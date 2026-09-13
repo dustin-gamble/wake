@@ -336,7 +336,9 @@ final class S4Protocol {
         pulseBaseline = 0;
         pulseDriving = false;
         pulseDriveAtMs = 0;
-        pulseStrokes = 0;
+        // pulseStrokes deliberately survives: reset() runs on every port reopen, and on a link
+        // that reopens every few seconds that wiped the one counter meant to outlast the fault.
+        // Measured going 1 -> 0 while the monitor counted 40 real strokes.
         for (PollField field : pollFields) {
             field.sizeIndex = 0;
             field.retired = false;
@@ -746,10 +748,18 @@ final class S4Protocol {
      * they arrive.
      */
     double pulseEffort() {
-        if (pulseSmoothed <= 0) {
+        if (pulseSmoothed <= 0 || lastPulseAtMs == 0) {
             return 0;
         }
-        return Math.max(0, Math.min(1, (pulseSmoothed - 1) / 12.0));
+        // Decay when the pulses stop rather than holding the last figure. Measured at 0.37 while
+        // flywheelMoving was already false - the exact "held value" mistake this project keeps
+        // making, committed again in new code. Gone in about a second of silence.
+        long quiet = System.currentTimeMillis() - lastPulseAtMs;
+        if (quiet > 1200) {
+            return 0;
+        }
+        double faded = pulseSmoothed * (1.0 - quiet / 1200.0);
+        return Math.max(0, Math.min(1, (faded - 1) / 12.0));
     }
 
     /** Strokes counted from the pulse stream alone, for when address 140 cannot be read. */

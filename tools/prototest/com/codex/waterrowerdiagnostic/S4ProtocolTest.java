@@ -22,6 +22,7 @@ public class S4ProtocolTest {
         reportsStrokeRateUnmultiplied();
         trimsAnIsolatedRateDip();
         countsStrokesFromPulsesAlone();
+        pulseEffortDecaysWhenPulsesStop();
 
         if (failures > 0) {
             System.out.println("\n" + failures + " check(s) FAILED");
@@ -160,6 +161,29 @@ public class S4ProtocolTest {
         check("three drives counted as three strokes", counted, 3);
     }
 
+    /**
+     * Pulse effort must fall to nothing when the pulses stop.
+     *
+     * <p>Measured on the machine at 0.37 while the flywheel had already been still long enough for
+     * flywheelMoving to read false. Holding a value flat because no fresh reading has arrived is
+     * the single mistake this project keeps repeating, and it went straight into the new code.
+     */
+    private static void pulseEffortDecaysWhenPulsesStop() throws Exception {
+        Object p = newProtocol();
+        for (int i = 0; i < 12; i++) {
+            feed(p, "P0A\r\n");
+        }
+        double live = getDouble(snapshot(p), "pulseEffort");
+        if (live <= 0) {
+            check("effort registers while pulses arrive", live, "> 0");
+        } else {
+            System.out.println("PASS effort registers while pulses arrive (" + live + ")");
+        }
+        Thread.sleep(1300);
+        double quiet = getDouble(snapshot(p), "pulseEffort");
+        check("effort is zero once the pulses stop", quiet, 0.0);
+    }
+
     /* ---------- harness ---------- */
 
     private static Object newProtocol() throws Exception {
@@ -193,6 +217,10 @@ public class S4ProtocolTest {
 
     private static int getInt(Object status, String field) throws Exception {
         return status.getClass().getDeclaredField(field).getInt(status);
+    }
+
+    private static double getDouble(Object status, String field) throws Exception {
+        return status.getClass().getDeclaredField(field).getDouble(status);
     }
 
     private static long getLong(Object status, String field) throws Exception {
