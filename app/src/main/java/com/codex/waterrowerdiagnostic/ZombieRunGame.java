@@ -31,6 +31,9 @@ final class ZombieRunGame extends GameView {
     private float hordePaceSec = 150f;    // 2:30 /500
     private Phase phase = Phase.READY;
     private double gap;
+    /** Seconds spent in the horde's grip; it ends the run only once this runs out. */
+    private double grabbedSeconds;
+    private static final double GRAB_LIMIT = 6.0;
     private double runStartMeters;
     private double runStartSeconds;
     private double nextSurgeAt;
@@ -62,6 +65,7 @@ final class ZombieRunGame extends GameView {
         phase = Phase.READY;
         caughtFx = false;
         gap = START_GAP;
+        grabbedSeconds = 0;
         nextSafeHouse = SAFE_EVERY;
         creep = 0;
         surgeUntil = 0;
@@ -130,9 +134,23 @@ final class ZombieRunGame extends GameView {
             gap += (speed - hordeSpeed()) * dt;
             gap = Math.min(MAX_GAP, gap);
             if (gap <= 0) {
+                // Grabbed, not gone. Closing the gap used to end the run on the spot, so one bad
+                // patch was unrecoverable and there was no way to row your way back out - which
+                // is the opposite of what the chase is for. Out-row them and you break the grip;
+                // only staying slower than the horde finishes it.
                 gap = 0;
-                phase = Phase.CAUGHT;
-                bests.recordHighest("zombie." + Math.round(hordePaceSec), (float) runMeters());
+                if (speed > hordeSpeed()) {
+                    grabbedSeconds = Math.max(0, grabbedSeconds - dt * 2.5);
+                    gap = 2.0;              // a shove of daylight, so the escape reads on screen
+                } else {
+                    grabbedSeconds += dt;
+                }
+                if (grabbedSeconds >= GRAB_LIMIT) {
+                    phase = Phase.CAUGHT;
+                    bests.recordHighest("zombie." + Math.round(hordePaceSec), (float) runMeters());
+                }
+            } else {
+                grabbedSeconds = 0;
             }
         }
         float danger = (float) Math.max(0, 1 - gap / 30.0);
@@ -246,6 +264,9 @@ final class ZombieRunGame extends GameView {
         } else if (phase == Phase.CAUGHT) {
             big = "EATEN";
             col = BAD;
+        } else if (grabbedSeconds > 0) {
+            big = "GRABBED - PULL!";
+            col = BAD;
         } else {
             big = Math.round(gap) + " m";
             col = gap > 30 ? ACCENT : gap > 12 ? WARN : BAD;
@@ -258,6 +279,8 @@ final class ZombieRunGame extends GameView {
             cap = "survived " + Math.round(runMeters()) + " m  ·  tap to run again";
         } else if (safe()) {
             cap = "SAFE HOUSE - they fall back for " + Math.round(safeUntil - sessionSeconds) + "s";
+        } else if (grabbedSeconds > 0) {
+            cap = "out-row them to break free - " + Math.round(GRAB_LIMIT - grabbedSeconds) + "s";
         } else if (surging()) {
             cap = "THEY'RE SURGING - " + Math.round(surgeUntil - sessionSeconds) + "s";
         } else if (sessionSeconds > nextSurgeAt - 3) {

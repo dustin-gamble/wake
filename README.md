@@ -1,6 +1,6 @@
 # WAKE
 
-**Rowing instruments, 21 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
+**Rowing instruments, 17 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
 
 📥 **[Download the APK and read the guide →](https://dustin-gamble.github.io/wake/)**
 
@@ -18,7 +18,7 @@ no root, no system changes, and Ergatta itself is untouched and still the fallba
 
 - **Three analog gauges** — speed, power, rate — with needles that carry momentum.
 - **A water paddle** spinning at the measured speed, coasting down on its own when you stop.
-- **21 games**: pace boats, ghost races against your own best, a zombie that closes when you ease
+- **17 games**: pace boats, ghost races against your own best, a zombie that closes when you ease
   off, a side-scrolling runner, boss fights, a canyon chase, an isometric city that builds one
   block per stroke. Each shows the same vitals strip, so the numbers are never hidden by the game.
 - **Coast Flight** — a CesiumJS globe with satellite imagery and terrain. Power above 60 W is

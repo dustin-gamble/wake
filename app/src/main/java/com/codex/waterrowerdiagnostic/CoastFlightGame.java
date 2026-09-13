@@ -297,6 +297,19 @@ class CoastFlightGame extends GameView {
             flight.ui.post(flight::postInvalidateOnAnimation);
         }
 
+        /**
+         * Reload from Java rather than from the page.
+         *
+         * <p>The map tiers need different viewer construction, so switching map means starting
+         * over - but the page's own location.reload() has to pass shouldOverrideUrlLoading, which
+         * this client blocks wholesale to stop a stray link stranding the user in a browser. So
+         * the page asks, and Java reloads.
+         */
+        @JavascriptInterface
+        public void reload() {
+            flight.ui.post(flight::reloadPage);
+        }
+
         @JavascriptInterface
         public void home() {
             flight.ui.post(flight.host::onFlightHome);

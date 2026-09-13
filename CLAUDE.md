@@ -6,7 +6,7 @@ diagnostic and rowing app.
 ## Read this first if you are picking up the games work
 
 The instrument side is done and stable. Games are specified in [GAME_IDEAS.md](GAME_IDEAS.md)
-and **twenty-one games, a Records screen and the browser-based Coast Flight are built**
+and **seventeen games, a Records screen and the browser-based Coast Flight are built**
 (3.5.0). All were confirmed working on
 the tablet. The user's verdict on the first twelve was that they "suck" - they are
 dashboards with a score. The three built in response - **Zombie Run, Row Runner, Boss
@@ -175,7 +175,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.6.1-debug
+3.7.0-debug
 ```
 
 Build and publish in one go (this is the loop used all session):
@@ -355,6 +355,53 @@ mid-stroke. If you add a hot field, everything else gets slower; check the cost.
 Command gap is user-selectable in diagnostics (60-400ms, default 150ms). Lower is fresher
 but historically destabilised the write path.
 
+## Tune games to THIS envelope, not to a guess (3.7.0)
+
+Measured from 3221 samples of real rowing on this machine. Every game constant that gates
+progress must be placed against these numbers:
+
+| | p10 | median | p90 | max |
+|---|---|---|---|---|
+| Watts | 93 | **129** | 162 | 205 |
+| Boat speed | 3.0 | **3.85 m/s** | 4.06 | 4.19 |
+| Stroke rate | 23 | **25** | 26 | 27 |
+| Pace /500m | | **128 s** | | 119 s |
+
+Every "it doesn't move / it never lifts off / the bar won't budge" complaint traced to a constant
+set without this table:
+
+- **Rocket Launch** asked for 130 W to hover. The median is 129 W, so it sat on the pad forever.
+- **Collector**'s three speed bands topped out at 3.4 m/s, below the median, so the boat was
+  permanently in the fast lane and changing lane meant nearly stopping - which read as lag.
+- **Pace Boat** defaulted to 135 s/500m against a rower who holds 128, so the opponent lost and
+  never came back. Not a bug in the chase logic; the opponent was simply slower.
+- **Sprint Ladder** started at 120 W with 12% steps, putting rung 4 beyond the measured peak.
+
+Two failures were about *when* a value is sampled rather than how big it is:
+
+- **Mega Pull** read watts inside `onStroke`, which fires when the stroke *counter* increments -
+  about a second after the drive, when instantaneous power has collapsed toward zero. It was
+  building the tower out of the troughs. Peaks must come from `onStatusChanged`.
+- Anything wanting peak power has the same trap. `onStroke` is for counting and for hits, never
+  for magnitudes.
+
+**Removed in 3.7.0** on the user's verdict, after all were seen on the machine: Boss Fight
+("isn't fun", no readable feedback that you are attacking), Storm ("no good"), Power Zones ("not
+working"), Depth Dive ("didn't work"). Their record keys are still formatted in the Records
+screen so old results are not orphaned. Seventeen games remain.
+
+## Screenshots from the tablet (3.7.0)
+
+The tablet is kiosk-locked: no file manager, no app switcher, and Android's own screenshot lands
+in a gallery that cannot be opened. So the app photographs itself:
+
+- **Long-press the vitals strip** in any game, or **long-press WAKE on the home screen**, or use
+  **Screenshot** in the diagnostics drawer (it closes the drawer first, then waits 450ms).
+- The PNG is POSTed to `/api/screenshot` and lands in `server/data/screenshots/<screen>-<time>.png`.
+- It draws the *view hierarchy*, so every canvas screen comes out exactly as seen. **Coast Flight
+  will come out blank** - it is WebGL on a GPU surface, outside the view draw pass. Use the
+  hardware screenshot for that one.
+
 ## Game Architecture
 
 Everything lives in `MainActivity` as swappable screens inside a `FrameLayout`
@@ -410,7 +457,7 @@ vignette and speed lines over the top, HUD last so it never shakes.
 ## Screen Layout
 
 **Home** (3.2.0): one-line header (name, RECORDS, STREAM toggle, exit), then a fixed grid
-of twenty-two cards - GAUGES plus twenty-one games - each with a drawn icon (58dp), name and
+of eighteen cards - GAUGES plus seventeen games - each with a drawn icon (58dp), name and
 personal best, sized to fill the screen with no scrolling. Columns come from screen width
 (6 at >=1280dp, 5 at >=980dp, 4 at >=700dp) - fewer columns means bigger icons, so if the
 cards look cramped raise the thresholds rather than shrinking the icon.
@@ -521,6 +568,18 @@ stopping dead.
 - The drag factor could be measured properly rather than tuned by eye: `k = I d(1/w)/dt`,
   fitting a line to `1/w` against time during a recovery phase. Needs a usable per-pulse
   timing signal, which the `Pxx` value does not appear to give.
+
+## Coast Flight performance on the old engine
+
+Chrome 70 on tablet silicon needed real cuts, all gated on `LEGACY` so a modern WebView keeps the
+full quality: `resolutionScale` 0.6, `maximumScreenSpaceError` 6 (far fewer tiles), lighting and
+fog off, no ground atmosphere, terrain without vertex normals, the 26 route labels dropped to
+bare points, and the camera updated at ~30Hz instead of every frame - each `setView` is a full
+scene traversal.
+
+**The map card could not switch maps** because the page called `window.location.reload()`, which
+has to pass `shouldOverrideUrlLoading` - and that is blocked wholesale to stop a stray link
+stranding the user in a browser. The page now asks Java to reload through the bridge instead.
 
 ## Analysing A Capture
 

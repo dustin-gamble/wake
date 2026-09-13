@@ -75,8 +75,13 @@ function cycleMode() {
       bridge.setMapMode(next);
     } catch (e) { /* falls back to the default on the next entry */ }
   }
-  // The three tiers need different viewer construction, so start the page over.
-  window.location.reload();
+  // The three tiers need different viewer construction, so start the page over. Java does it:
+  // an in-page reload has to survive shouldOverrideUrlLoading, which the app blocks wholesale.
+  if (bridge && bridge.reload) {
+    bridge.reload();
+  } else {
+    window.location.reload();
+  }
 }
 
 /** The route, north to south, nudged just offshore so the coastline sits off the left wing. */
@@ -247,14 +252,19 @@ function initGlobe() {
     timeline: false,
     // Cheap tablet GPU: no shadows, no anti-aliasing pass.
     requestRenderMode: false,
-    shadows: false
+    shadows: false,
+    // Chrome 70 on tablet silicon. Half-resolution rendering is by far the largest single win
+    // and at 250 km/h over a coastline it is barely visible.
+    contextOptions: { webgl: { antialias: false, alpha: false } }
   };
 
   if (LEGACY) {
     // CesiumJS 1.95 takes provider instances up front and has no async factories.
     if (mode === 'satellite') {
       options.imageryProvider = Cesium.createWorldImagery();
-      options.terrainProvider = Cesium.createWorldTerrain({ requestVertexNormals: true });
+      // No vertex normals: they double the terrain payload and only feed the lighting, which is
+      // switched off below for the same performance reason.
+      options.terrainProvider = Cesium.createWorldTerrain({ requestVertexNormals: false });
     } else {
       options.imageryProvider = new Cesium.OpenStreetMapImageryProvider({
         url: 'https://tile.openstreetmap.org/'
@@ -292,13 +302,22 @@ function initGlobe() {
     }
   }
 
-  viewer.scene.globe.enableLighting = true;
+  // ---- performance, all of it aimed at the tablet ----
+  viewer.resolutionScale = LEGACY ? 0.6 : 1.0;
+  viewer.scene.globe.maximumScreenSpaceError = LEGACY ? 6 : 2;   // far fewer tiles to fetch and draw
+  viewer.scene.globe.tileCacheSize = LEGACY ? 60 : 100;
+  viewer.scene.globe.showGroundAtmosphere = !LEGACY;
+  viewer.scene.fxaa = false;
+  viewer.scene.postProcessStages.fxaa.enabled = false;
+  // Lighting costs a full extra pass and needs terrain normals to look right; it is the first
+  // thing to go on the old engine.
+  viewer.scene.globe.enableLighting = !LEGACY;
   // Pin the sun to a California afternoon. The real clock often put the coast on the night
   // side and the whole scene went black.
   viewer.clock.currentTime = Cesium.JulianDate.fromIso8601('2026-06-21T01:40:00Z');
   viewer.clock.shouldAnimate = false;
   viewer.scene.skyAtmosphere.show = true;
-  viewer.scene.fog.enabled = true;
+  viewer.scene.fog.enabled = !LEGACY;
   viewer.scene.screenSpaceCameraController.enableInputs = false;   // the course flies itself
 
   var line = [];
@@ -317,9 +336,19 @@ function initGlobe() {
     }
   });
   for (var p = 0; p < ROUTE.length; p++) {
-    viewer.entities.add({
+    var marker = {
       position: Cesium.Cartesian3.fromDegrees(ROUTE[p].lon, ROUTE[p].lat),
-      point: { pixelSize: 6, color: Cesium.Color.fromCssColorString('#35d0ba').withAlpha(0.8) },
+      point: { pixelSize: 6, color: Cesium.Color.fromCssColorString('#35d0ba').withAlpha(0.8) }
+    };
+    if (LEGACY) {
+      // 26 outlined labels re-laid out every frame is real cost on this engine, and the footer
+      // already names the landmark you are heading for.
+      viewer.entities.add(marker);
+      continue;
+    }
+    viewer.entities.add({
+      position: marker.position,
+      point: marker.point,
       label: {
         text: ROUTE[p].name,
         font: '12px sans-serif',
@@ -361,6 +390,7 @@ window.wakeFeed = function (d) {
 /* ---------------- frame ---------------- */
 
 var lastFrame = 0;
+var lastCameraMs = 0;
 
 function frame(now) {
   var dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0;
@@ -392,7 +422,10 @@ function frame(now) {
   var targetBank = Math.max(-32, Math.min(32, turn * 1.6));
   state.bank += (targetBank - state.bank) * Math.min(1, 2.0 * dt);
 
-  if (viewer) {
+  // ~30Hz camera on the old engine: each setView is a full scene traversal, and the flight is
+  // smooth long before 60. Stamp the clock only when a frame actually goes through.
+  if (viewer && (!LEGACY || now - lastCameraMs >= 28)) {
+    lastCameraMs = now;
     viewer.camera.setView({
       destination: Cesium.Cartesian3.fromDegrees(here.lon, here.lat, state.altitude),
       orientation: {

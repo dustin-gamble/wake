@@ -18,7 +18,9 @@ final class SprintLadderGame extends GameView {
     private final PersonalBests bests;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    private int startWatts = 120;
+    // Measured p90 is 162 W and the peak 205 W. Starting at 120 with 12% steps put rung 4
+    // beyond anything reachable, so the bar stopped responding partway up.
+    private int startWatts = 105;
     private Phase phase = Phase.READY;
     private int rung;
     private double phaseStart;
@@ -40,7 +42,7 @@ final class SprintLadderGame extends GameView {
     }
 
     private int targetFor(int r) {
-        return Math.round(startWatts * (1f + 0.12f * r));
+        return Math.round(startWatts * (1f + 0.08f * r));
     }
 
     private int sprintSeconds(int r) {

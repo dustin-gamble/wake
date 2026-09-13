@@ -73,11 +73,11 @@ final class GaugeStripView extends View {
 
         // Stopwatch takes the left, then two arc gauges, then plain figures.
         float x = dp(14f);
-        float clockW = dp(140f);
+        float clockW = dp(168f);
         drawClock(c, x, h, clockW);
         x += clockW;
 
-        float gaugeW = dp(78f);
+        float gaugeW = dp(96f);
         drawArcGauge(c, x, h, gaugeW, speed / 5f, String.format(java.util.Locale.US, "%.1f", speed),
                 "m/s", ACCENT);
         x += gaugeW;
@@ -101,12 +101,12 @@ final class GaugeStripView extends View {
         paint.setColor(col);
         paint.setTextAlign(Paint.Align.LEFT);
         paint.setFakeBoldText(true);
-        paint.setTextSize(dp(42f));
+        paint.setTextSize(dp(52f));
         paint.setTypeface(android.graphics.Typeface.MONOSPACE);
         c.drawText(PersonalBests.formatTime((float) clockSeconds), x, h * 0.60f, paint);
         paint.setTypeface(android.graphics.Typeface.DEFAULT);
         paint.setFakeBoldText(false);
-        paint.setTextSize(dp(8.5f));
+        paint.setTextSize(dp(10f));
         paint.setColor(FAINT);
         c.drawText(clockStarted && !clockRunning ? "PAUSED - ROW TO RESUME"
                 : clockStarted ? "ROWING TIME" : "STARTS ON FIRST STROKE",
@@ -135,12 +135,12 @@ final class GaugeStripView extends View {
         paint.setTextAlign(Paint.Align.CENTER);
         paint.setFakeBoldText(true);
         paint.setTypeface(android.graphics.Typeface.MONOSPACE);
-        paint.setTextSize(dp(16f));
+        paint.setTextSize(dp(21f));
         paint.setColor(TEXT);
         c.drawText(value, cx, cy - dp(1f), paint);
         paint.setTypeface(android.graphics.Typeface.DEFAULT);
         paint.setFakeBoldText(false);
-        paint.setTextSize(dp(8.5f));
+        paint.setTextSize(dp(10f));
         paint.setColor(FAINT);
         c.drawText(label, cx, cy + dp(12f), paint);
     }
@@ -149,12 +149,12 @@ final class GaugeStripView extends View {
         paint.setTextAlign(Paint.Align.CENTER);
         paint.setFakeBoldText(true);
         paint.setTypeface(android.graphics.Typeface.MONOSPACE);
-        paint.setTextSize(dp(19f));
+        paint.setTextSize(dp(25f));
         paint.setColor(color);
         c.drawText(value, cx, h * 0.55f, paint);
         paint.setTypeface(android.graphics.Typeface.DEFAULT);
         paint.setFakeBoldText(false);
-        paint.setTextSize(dp(8.5f));
+        paint.setTextSize(dp(10f));
         paint.setColor(FAINT);
         c.drawText(label, cx, h * 0.55f + dp(13f), paint);
     }

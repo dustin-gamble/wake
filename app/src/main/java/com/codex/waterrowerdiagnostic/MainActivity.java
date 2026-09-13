@@ -8,6 +8,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Typeface;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
@@ -39,6 +41,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
@@ -53,6 +56,7 @@ import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
@@ -385,6 +389,10 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         title.setTextSize(24);
         title.setLetterSpacing(0.2f);
         title.setTextColor(getColorCompat(R.color.primary));
+        title.setOnLongClickListener(v -> {
+            captureScreenshot("home");
+            return true;
+        });
         header.addView(title);
         TextView sub = new TextView(this);
         sub.setText("  v" + BuildConfig.VERSION_NAME);
@@ -419,7 +427,6 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         cards.add(gridCard("GAUGES", GameIconView.Kind.GAUGES, accent, null, null, v -> showInstruments()));
         cards.add(gridCard("ZOMBIE RUN", GameIconView.Kind.ZOMBIE, bad, "zombie.150", "m", v -> openZombieRun()));
         cards.add(gridCard("ROW RUNNER", GameIconView.Kind.RUNNER, 0xFFE84C3D, "runner.distance", "m", v -> openRowRunner()));
-        cards.add(gridCard("BOSS FIGHT", GameIconView.Kind.BOSS, 0xFFB48CFF, "boss.level", "bosses", v -> openBossFight()));
         cards.add(gridCard("COAST FLIGHT", GameIconView.Kind.FLY, 0xFF7FC6EE, null, null, v -> openCoastFlight()));
         cards.add(gridCard("SKYLINE", GameIconView.Kind.CITY, 0xFF9A6BB0, "city.blocks", "blocks", v -> openSkyline()));
         cards.add(gridCard("WAVE RIDER", GameIconView.Kind.SURF, 0xFF7FC6EE, "surf.score", "pts", v -> openWaveRider()));
@@ -433,12 +440,9 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         cards.add(gridCard("THE RUN", GameIconView.Kind.RUN, accent, "run.streak", "streak", v -> openTheRun()));
         cards.add(gridCard("INTERVALS", GameIconView.Kind.INTERVALS, blue, "intervals.sprints", "in band", v -> openIntervals()));
         cards.add(gridCard("JOURNEY", GameIconView.Kind.JOURNEY, accent, "journey.total", "", v -> openJourney()));
-        cards.add(gridCard("STORM", GameIconView.Kind.STORM, blue, "storm.100", "held", v -> openStorm()));
-        cards.add(gridCard("POWER ZONES", GameIconView.Kind.ZONES, warn, null, null, v -> openPowerZones()));
         cards.add(gridCard("SPRINT LADDER", GameIconView.Kind.LADDER, warn, "ladder.120", "rung", v -> openSprintLadder()));
         cards.add(gridCard("TUG OF WAR", GameIconView.Kind.TUG, bad, "tug.2", "held", v -> openTugOfWar()));
         cards.add(gridCard("COLLECTOR", GameIconView.Kind.COLLECTOR, accent, "collector.score", "pts", v -> openCollector()));
-        cards.add(gridCard("DEPTH DIVE", GameIconView.Kind.DIVE, warn, "dive.joules", "", v -> openDepthDive()));
 
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -457,6 +461,23 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
             grid.addView(row, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         }
+        // Grow every icon to fill the cell the grid actually produced. A fixed 58dp left the
+        // cards mostly empty, and the right size depends on the screen and the card count, not
+        // on a constant - removing four games alone made every cell taller.
+        int heightDp = (int) (getResources().getDisplayMetrics().heightPixels
+                / getResources().getDisplayMetrics().density);
+        int chromeDp = 96;   // header, last-session line and the paddings around the grid
+        int cellDp = Math.max(76, (heightDp - chromeDp) / Math.max(1, rows));
+        // What is left after the title and the personal-best line underneath.
+        int iconDp = Math.max(58, Math.min(132, cellDp - 46));
+        for (View card : cards) {
+            View icon = ((LinearLayout) card).getChildAt(0);
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) icon.getLayoutParams();
+            lp.width = dp(iconDp);
+            lp.height = dp(iconDp);
+            icon.setLayoutParams(lp);
+        }
+
         LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
         gridParams.topMargin = dp(8);
@@ -617,12 +638,35 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
     private void openJourney() {
         JourneyGame game = new JourneyGame(this);
         game.setTotalMeters(journeyLifetime + journeySession);
-        showGame(game, gameScreen("JOURNEY", game, null));
+        showGame(game, gameScreen("JOURNEY", game, journeyChips(game)));
+    }
+
+    /** The journey is a lifetime total, so the only control it needs is a way to start again. */
+    private View journeyChips(JourneyGame game) {
+        TextView reset = chip("RESTART");
+        reset.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setTitle("Restart the journey?")
+                .setMessage("This clears the lifetime distance and starts the route again from the"
+                        + " beginning. Your other records are untouched.")
+                .setNegativeButton("Cancel", (d, w) -> d.dismiss())
+                .setPositiveButton("Restart", (d, w) -> {
+                    journeyLifetime = 0;
+                    journeySession = 0;
+                    personalBests.putFloat("journey.total", 0f);
+                    game.setTotalMeters(0);
+                    game.start();
+                    toast("Journey restarted");
+                })
+                .show());
+        return reset;
     }
 
     /* ---------- pace boat ---------- */
 
-    private static final float[] PACE_CHOICES = {150f, 135f, 120f, 110f, 100f};
+    // Re-centred on measured ability: 3221 samples of real rowing gave a median pace of
+    // 128 s/500m and a best of 119. The old set started at 150 and defaulted to 135, so the
+    // pace boat was slower than the rower and simply fell away - no race at all.
+    private static final float[] PACE_CHOICES = {145f, 138f, 132f, 126f, 120f, 114f};
     private static final int[] DISTANCE_CHOICES = {500, 1000, 2000, 5000};
 
     private void openPaceBoat() {
@@ -653,18 +697,6 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         });
         row.addView(dist);
         return row;
-    }
-
-    private void openStorm() {
-        StormGame game = new StormGame(this, personalBests);
-        showGame(game, gameScreen("STORM", game, wattsChip("hold ", game.baseWatts(), 60, 220,
-                game::setBaseWatts)));
-    }
-
-    private void openPowerZones() {
-        PowerZonesGame game = new PowerZonesGame(this);
-        showGame(game, gameScreen("POWER ZONES", game, wattsChip("threshold ", game.threshold(),
-                100, 300, game::setThreshold)));
     }
 
     /** A single watts chip that cycles through a range in steps of 20. */
@@ -735,12 +767,7 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         showGame(game, gameScreen("COLLECTOR", game, null));
     }
 
-    private void openDepthDive() {
-        DepthDiveGame game = new DepthDiveGame(this, personalBests);
-        showGame(game, gameScreen("DEPTH DIVE", game, null));
-    }
-
-    /** All personal bests as a plain list. Rebuilt each time it is opened. */
+        /** All personal bests as a plain list. Rebuilt each time it is opened. */
     private void showRecords() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -891,6 +918,86 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
     }
 
     /**
+     * Photograph the app's own screen and send it to the laptop.
+     *
+     * <p>This tablet is kiosk-locked: no file manager, no app switcher, and Android's own
+     * screenshot lands in a gallery that cannot be opened. Since the app already knows where the
+     * laptop is, the shortest path to a usable image is to draw the view hierarchy into a bitmap
+     * and POST it.
+     *
+     * <p>Caveat worth knowing: this renders the <em>views</em>. Every screen here is a custom
+     * Canvas view and comes out exactly as seen, but Coast Flight is a WebView drawing WebGL on
+     * the GPU, and that surface is not in the view draw pass - it will come out blank. Use the
+     * hardware screenshot for that one.
+     */
+    private void captureScreenshot(String label) {
+        if (TextUtils.isEmpty(serverUrl)) {
+            toast("No laptop found - screenshot needs the dashboard running");
+            return;
+        }
+        View root = getWindow().getDecorView().getRootView();
+        if (root.getWidth() <= 0 || root.getHeight() <= 0) {
+            return;
+        }
+        Bitmap shot;
+        try {
+            shot = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
+        } catch (OutOfMemoryError e) {
+            toast("Not enough memory for a screenshot");
+            return;
+        }
+        root.draw(new Canvas(shot));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        shot.compress(Bitmap.CompressFormat.PNG, 100, out);
+        shot.recycle();
+        final byte[] png = out.toByteArray();
+        final String base = serverUrl;
+        toast("Screenshot " + (png.length / 1024) + " kB - sending");
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(base + "/api/screenshot").openConnection();
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(8000);
+                connection.setRequestMethod("POST");
+                connection.setRequestProperty("Content-Type", "image/png");
+                connection.setRequestProperty("X-Shot-Name", label);
+                connection.setFixedLengthStreamingMode(png.length);
+                connection.setDoOutput(true);
+                OutputStream stream = connection.getOutputStream();
+                stream.write(png);
+                stream.close();
+                final int code = connection.getResponseCode();
+                runOnUiThread(() -> toast(code == 200 ? "Screenshot saved on the laptop"
+                        : "Screenshot rejected: " + code));
+            } catch (IOException e) {
+                runOnUiThread(() -> toast("Screenshot failed: " + e.getMessage()));
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }, "screenshot").start();
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+        log(message);
+    }
+
+    /** Which screen is on show, for naming the saved file. */
+    private String screenLabel() {
+        if (currentGame != null) {
+            return currentGame.getClass().getSimpleName().replace("Game", "");
+        }
+        if (screenHost != null && screenHost.getChildCount() > 0
+                && screenHost.getChildAt(0) == instrumentsScreen) {
+            return "gauges";
+        }
+        return "home";
+    }
+
+    /**
      * Fetch the Cesium Ion token from the laptop and cache it.
      *
      * <p>The token is never compiled into the app: the laptop holds it in CESIUM_ION_TOKEN or
@@ -1003,12 +1110,7 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         showGame(game, gameScreen("ROW RUNNER", game, null));
     }
 
-    private void openBossFight() {
-        BossFightGame game = new BossFightGame(this, personalBests);
-        showGame(game, gameScreen("BOSS FIGHT", game, null));
-    }
-
-    private void openTheRun() {
+        private void openTheRun() {
         TheRunGame game = new TheRunGame(this, personalBests);
         showGame(game, gameScreen("THE RUN", game, null));
     }
@@ -1092,9 +1194,16 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
 
         // Vitals across the top of every game: stopwatch, speed, power, pace, rate, distance.
         gameStrip = new GaugeStripView(this);
-        // 62dp before: the enlarged stopwatch needs the height.
+        // Long-press anywhere on the strip to photograph the screen. Deliberately invisible:
+        // every game already has the strip, and none of them need another control.
+        gameStrip.setOnLongClickListener(v -> {
+            captureScreenshot(screenLabel());
+            return true;
+        });
+        // 62dp -> 74dp -> 92dp: this strip is the instrument during a game, and the games
+        // themselves lose very little by it.
         LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(74));
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
         stripParams.topMargin = dp(4);
         root.addView(gameStrip, stripParams);
 
@@ -1539,6 +1648,14 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         Button findLaptop = button("Find Laptop");
         findLaptop.setOnClickListener(v -> discoverLaptop());
         uploadControls.addView(findLaptop, weightParams());
+
+        Button shotButton = button("Screenshot");
+        shotButton.setOnClickListener(v -> {
+            setDiagnosticsOpen(false);
+            // Let the drawer finish sliding out, or it ends up in the picture.
+            screenHost.postDelayed(() -> captureScreenshot(screenLabel()), 450);
+        });
+        uploadControls.addView(shotButton, weightParams());
 
         Button snapshotButton = button("Snapshot");
         snapshotButton.setOnClickListener(v -> sendSnapshot("manual", true));

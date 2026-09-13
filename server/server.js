@@ -188,6 +188,39 @@ function handleApi(req, res, pathname) {
   // The tablet app fetches this once and caches it, so Coast Flight's maps keep working with
   // the laptop switched off. Same credential the /fly page is already served with, on the same
   // local network - no wider exposure, and still nothing stored in source.
+  // The tablet posts a PNG of its own screen here. Getting images off a kiosk-locked tablet is
+  // otherwise painful: no file manager, no app switcher, and the built-in screenshot lands in a
+  // gallery you cannot reach. Body is the raw PNG; X-Shot-Name says which screen it was.
+  if (pathname === '/api/screenshot' && req.method === 'POST') {
+    const chunks = [];
+    let bytes = 0;
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 12 * 1024 * 1024) {
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const dir = path.join(DATA_DIR, 'screenshots');
+      fs.mkdirSync(dir, { recursive: true });
+      const label = String(req.headers['x-shot-name'] || 'screen')
+        .replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'screen';
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const file = path.join(dir, `${label}-${stamp}.png`);
+      fs.writeFile(file, Buffer.concat(chunks), (error) => {
+        if (error) {
+          sendJson(res, 500, { ok: false, error: String(error.message) });
+          return;
+        }
+        console.log(`screenshot saved: ${path.relative(ROOT, file)} (${bytes} bytes)`);
+        sendJson(res, 200, { ok: true, file: path.basename(file), bytes });
+      });
+    });
+    return true;
+  }
+
   if (pathname === '/api/cesium-token' && req.method === 'GET') {
     sendJson(res, 200, { ionToken: cesiumToken() });
     return true;

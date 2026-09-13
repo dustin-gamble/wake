@@ -47,6 +47,34 @@ final class MegaPullGame extends GameView {
         bell = best > 0 ? Math.round(best * 1.03f) : 180;
     }
 
+    /**
+     * The peak has to be sampled from every reading, not from the stroke tick.
+     *
+     * <p>This game used to read watts inside {@link #onStroke}, which fires when the stroke
+     * <em>counter</em> increments - about a second after the drive, by which time instantaneous
+     * power has usually collapsed back toward zero (it reads exactly zero in 27% of samples taken
+     * mid-row). The tower was therefore being built from the troughs between pulls, and looked
+     * dead however hard the handle was moved.
+     */
+    @Override
+    protected void onStatusChanged(S4Protocol.Status s) {
+        if (s == null || phase != Phase.PULLING) {
+            return;
+        }
+        if (s.watts > peak) {
+            peak = s.watts;
+            puckTarget = Math.min(1f, peak / (bell * 1.15f));
+            fx.burst(getWidth() * 0.5f, getHeight() * 0.85f, 16, dp(150f), 0.5f, dp(3f), 0xFFF5C518, true);
+            shake.kick(dp(4f) + s.watts / 300f * dp(6f));
+        }
+        if (peak >= bell && !rang) {
+            rang = true;
+            fx.burst(getWidth() * 0.5f, getHeight() * 0.12f, 60, dp(260f), 1.2f, dp(4f), 0xFFF5C518, true);
+            shake.kick(dp(16f));
+            bests.recordHighest("megapull.peak", peak);
+        }
+    }
+
     @Override
     protected void onStroke(int watts) {
         if (phase == Phase.READY) {
@@ -56,18 +84,6 @@ final class MegaPullGame extends GameView {
             return;
         }
         strokesLeft--;
-        if (watts > peak) {
-            peak = watts;
-            puckTarget = Math.min(1f, peak / (bell * 1.15f));
-            fx.burst(getWidth() * 0.5f, getHeight() * 0.85f, 16, dp(150f), 0.5f, dp(3f), 0xFFF5C518, true);
-            shake.kick(dp(4f) + watts / 300f * dp(6f));
-        }
-        if (peak >= bell && !rang) {
-            rang = true;
-            fx.burst(getWidth() * 0.5f, getHeight() * 0.12f, 60, dp(260f), 1.2f, dp(4f), 0xFFF5C518, true);
-            shake.kick(dp(16f));
-            bests.recordHighest("megapull.peak", peak);
-        }
         if (strokesLeft <= 0) {
             phase = Phase.RESULT;
             resultAt = sessionSeconds;

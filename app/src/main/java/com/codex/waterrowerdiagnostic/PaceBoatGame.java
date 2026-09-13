@@ -18,7 +18,8 @@ class PaceBoatGame extends GameView {
     private final RiverRenderer river;
     protected final PersonalBests bests;
 
-    private float targetPaceSec = 135f;   // 2:15 /500m
+    // 2:06 /500m: just inside the measured median of 2:08, so holding it is a real contest.
+    private float targetPaceSec = 126f;
     protected int raceMeters = 1000;
     protected State state = State.READY;
 

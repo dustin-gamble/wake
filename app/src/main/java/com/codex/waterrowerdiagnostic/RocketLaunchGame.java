@@ -22,7 +22,10 @@ final class RocketLaunchGame extends GameView {
 
     private static final float KARMAN = 100_000f;      // metres, the finish
     private static final float[] STAGE_ALT = {0f, 12_000f, 35_000f, 70_000f};
-    private static final float[] STAGE_HOVER = {130f, 105f, 80f, 58f};
+    // Was {130, 105, 80, 58}. Measured median power is 129 W, so the first stage asked for
+    // exactly a steady effort just to hover and the rocket never left the pad. Lift-off now
+    // wants a firm pull rather than a personal best, and the ladder still eases as it climbs.
+    private static final float[] STAGE_HOVER = {95f, 82f, 68f, 54f};
     private static final String[] LAYER = {"TROPOSPHERE", "STRATOSPHERE", "MESOSPHERE", "THERMOSPHERE"};
 
     private final PersonalBests bests;

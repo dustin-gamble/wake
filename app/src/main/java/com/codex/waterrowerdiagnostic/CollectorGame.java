@@ -13,8 +13,13 @@ import android.view.MotionEvent;
 final class CollectorGame extends GameView {
 
     private static final int LANES = 3;
-    private static final float[] BAND_LO = {1.2f, 2.4f, 3.4f};
-    private static final float[] BAND_HI = {2.4f, 3.4f, 9.0f};
+    // Measured speed while rowing: p10 3.0, median 3.85, p90 4.06 m/s. The old bands topped
+    // out at 3.4, so the boat sat in the fast lane permanently and changing lane meant nearly
+    // stopping - which is what read as lag. These three straddle the real working range.
+    private static final float[] BAND_LO = {2.5f, 3.4f, 4.0f};
+    private static final float[] BAND_HI = {3.4f, 4.0f, 9.0f};
+    /** Lane boundaries are sticky, so a speed sitting on a band edge cannot flicker. */
+    private static final float BAND_STICK = 0.08f;
     private static final int[] POINTS = {1, 2, 4};
     private static final String[] NAMES = {"EASY", "STEADY", "FAST"};
 
