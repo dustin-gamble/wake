@@ -126,6 +126,28 @@ clamp to.
 visible credit, so the Cesium credit container is *restyled* small and translucent, never
 hidden. An earlier version hid it with `display:none` - do not do that again.
 
+### Keeping the Ion token out of GitHub
+
+Three layers, because one is not enough:
+
+1. **It is never in the repo.** `server/cesium.local.json` is gitignored and the server injects
+   the token at request time. Verified across the whole history, not just the working tree:
+   every blob of every commit scanned, zero hits.
+2. **A pre-commit hook refuses to commit one.** `tools/scan-secrets.py` reads the *staged blobs*
+   (what actually gets pushed, unlike a working-tree grep) and blocks JWTs, private keys, cloud
+   keys, LAN addresses and home paths. Enable it in a fresh clone with:
+
+   ```sh
+   git config core.hooksPath tools/git-hooks
+   ```
+
+   **Test any change to that scanner against a real-shaped token.** The first version required 20
+   characters in a JWT header segment; a real header is 17, so it passed a token straight through
+   and only a live commit test caught it.
+3. **GitHub secret scanning and push protection are enabled** on the repository. Generic
+   (non-provider) pattern scanning could not be turned on - it needs Advanced Security - which is
+   precisely the category a Cesium token falls into, so layer 2 is the one doing the work here.
+
 ### The Ion token
 
 **No token lives in source, and none is compiled into the APK** (verified with `strings` on the
