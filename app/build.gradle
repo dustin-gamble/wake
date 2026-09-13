@@ -1,0 +1,37 @@
+plugins {
+    id 'com.android.application'
+}
+
+def diagnosticServerUrl = providers.gradleProperty('diagnosticServerUrl').orElse('').get()
+def escapedDiagnosticServerUrl = diagnosticServerUrl
+        .replace('\\', '\\\\')
+        .replace('"', '\\"')
+
+android {
+    namespace 'com.codex.waterrowerdiagnostic'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.codex.waterrowerdiagnostic'
+        minSdk 23
+        targetSdk 28
+        versionCode 60
+        versionName '3.6.1'
+        buildConfigField 'String', 'DEFAULT_SERVER_URL', "\"${escapedDiagnosticServerUrl}\""
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    implementation 'com.github.mik3y:usb-serial-for-android:3.9.0'
+}

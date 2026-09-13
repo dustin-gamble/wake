@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <title>WAKE - Coast Flight</title>
+    <style>
+      /* This page runs inside WAKE's WebView on the Ergatta tablet, which is Chrome 70.
+         Three things that look ordinary are NOT available there and must be avoided:
+           - the `inset` shorthand (Chrome 87)  -> write top/right/bottom/left
+           - `gap` on a flex container (Chrome 84) -> use margins
+           - unprefixed `backdrop-filter` (Chrome 76) -> -webkit- as well
+         The desktop browser hides these mistakes; the tablet does not. */
+      :root {
+        --ink: #e6edf7; --dim: #8d9bb0; --faint: #5d6b80;
+        --accent: #35d0ba; --blue: #6f8cff; --warn: #f0b132; --bad: #f0655d;
+        --panel: rgba(10, 16, 26, 0.72);
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #03080f;
+        font-family: var(--sans); color: var(--ink);
+        -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+      #globe { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
+
+      /* Cesium's own chrome is noise, but the credit line must stay visible: Bing imagery and
+         Google's photorealistic tiles both require attribution. Restyled, never hidden. */
+      .cesium-viewer-bottom { bottom: 2px !important; }
+      .cesium-widget-credits, .cesium-credit-textContainer, .cesium-credit-textContainer * {
+        font-family: var(--sans) !important; font-size: 9.5px !important;
+        color: rgba(230, 237, 247, 0.55) !important; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+      .cesium-credit-expand-link { color: rgba(230, 237, 247, 0.7) !important; }
+
+      .overlay { position: absolute; pointer-events: none; }
+      #wings { top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; opacity: 0.9; }
+
+      #hud { left: 0; right: 0; top: 0; padding: 10px 12px;
+        background: linear-gradient(180deg, rgba(3,8,15,0.78), transparent); }
+      .card { display: inline-block; vertical-align: top; margin-right: 10px;
+        background: var(--panel); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px; padding: 8px 12px;
+        -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+      .big { font-family: var(--mono); font-size: 26px; font-weight: 700; line-height: 1;
+        font-variant-numeric: tabular-nums; }
+      .cap { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--faint); font-weight: 650; margin-top: 4px; }
+      .stat { display: inline-block; margin-right: 16px; }
+      .stat:last-child { margin-right: 0; }
+      .stat .v { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+
+      #climb { position: absolute; right: 14px; top: 50%; margin-top: -110px;
+        width: 46px; height: 220px; }
+      #climbFill { position: absolute; left: 0; right: 0; background: var(--accent); }
+
+      #foot { left: 0; right: 0; bottom: 0; padding: 10px 14px;
+        background: linear-gradient(0deg, rgba(3,8,15,0.8), transparent); }
+      #landmark { font-size: 13px; color: var(--ink); }
+      #hint { font-size: 11px; color: var(--warn); margin-top: 3px; min-height: 13px; }
+      #progressTrack { height: 4px; background: rgba(255,255,255,0.14); border-radius: 2px;
+        margin-top: 8px; position: relative; }
+      #progressFill { height: 4px; background: var(--accent); border-radius: 2px; width: 0; }
+      .tick { position: absolute; top: -3px; width: 2px; height: 10px;
+        background: rgba(255,255,255,0.35); }
+      #footRow { margin-top: 5px; pointer-events: auto; }
+      #trip { display: inline-block; }
+      #reset { float: right; color: var(--faint); text-decoration: underline; }
+
+      #splash { position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+        background: rgba(3, 8, 15, 0.9); text-align: center; padding: 28px;
+        display: -webkit-box; display: flex;
+        -webkit-box-align: center; align-items: center;
+        -webkit-box-pack: center; justify-content: center; }
+      #splash.hidden { display: none; }
+      #splash h1 { font-size: 24px; letter-spacing: 0.14em; margin: 0 0 10px; color: var(--accent); }
+      #splash p { margin: 6px auto; color: var(--dim); font-size: 13px; max-width: 520px; }
+      .pill { display: inline-block; margin-top: 14px; padding: 7px 14px; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.18); font-size: 12px; color: var(--dim); }
+      #engine { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center;
+        font-family: var(--mono); font-size: 10px; color: var(--faint); }
+    </style>
+  </head>
+  <body>
+    <div id="globe"></div>
+
+    <svg id="wings" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
+      <path id="wingL" d="" fill="rgba(30,22,17,0.92)"/>
+      <path id="wingR" d="" fill="rgba(30,22,17,0.92)"/>
+    </svg>
+
+    <div id="hud" class="overlay">
+      <div class="card">
+        <div class="big" id="alt">0</div>
+        <div class="cap">Altitude (m)</div>
+      </div>
+      <div class="card">
+        <div class="big" id="spd">0</div>
+        <div class="cap">Airspeed (km/h)</div>
+      </div>
+      <div class="card" style="pointer-events:auto;cursor:pointer" id="mapCard">
+        <div class="v" id="mapMode" style="font-family:var(--mono);font-size:14px">&mdash;</div>
+        <div class="cap">Map &middot; tap to change</div>
+      </div>
+      <div class="card">
+        <div class="stat"><div class="v" id="watts">0</div><div class="cap">Watts</div></div>
+        <div class="stat"><div class="v" id="spm">0</div><div class="cap">Rate</div></div>
+        <div class="stat"><div class="v" id="dist">0</div><div class="cap">km flown</div></div>
+      </div>
+    </div>
+
+    <div id="climb" class="overlay">
+      <div style="position:absolute;top:0;right:0;bottom:0;left:0;border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:var(--panel)"></div>
+      <div id="climbFill"></div>
+      <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(255,255,255,0.35)"></div>
+      <div class="cap" style="position:absolute;left:0;right:0;bottom:-16px;text-align:center">Climb</div>
+    </div>
+
+    <div id="foot" class="overlay">
+      <div id="landmark">Waiting for a stroke&hellip;</div>
+      <div id="hint"></div>
+      <div id="progressTrack"></div>
+      <div id="footRow">
+        <span id="trip" class="cap" style="margin:0">Trip: 0 km</span>
+        <a id="reset" href="#" class="cap" style="margin:0">Restart at the Golden Gate</a>
+      </div>
+    </div>
+
+    <div id="splash">
+      <div>
+        <h1>COAST FLIGHT</h1>
+        <p>Row to climb. Power is lift, boat speed is airspeed, and the course flies itself
+           down the California coast.</p>
+        <p id="splashState" class="pill">Loading the globe&hellip;</p>
+        <div id="engine"></div>
+      </div>
+    </div>
+
+    <script>
+      /* Chrome 70 runtime gaps that CesiumJS 1.95 touches. Syntax cannot be shimmed - that is
+         why the version below is chosen by engine - but missing globals can be. */
+      (function () {
+        if (typeof window.globalThis === 'undefined') { window.globalThis = window; }
+        if (!Object.fromEntries) {
+          Object.fromEntries = function (pairs) {
+            var out = {};
+            Array.prototype.forEach.call(pairs, function (p) { out[p[0]] = p[1]; });
+            return out;
+          };
+        }
+        if (!String.prototype.replaceAll) {
+          String.prototype.replaceAll = function (find, replace) {
+            if (Object.prototype.toString.call(find) === '[object RegExp]') {
+              return this.replace(find, replace);
+            }
+            return this.split(find).join(replace);
+          };
+        }
+        if (!Promise.allSettled) {
+          Promise.allSettled = function (list) {
+            return Promise.all(Array.prototype.map.call(list, function (p) {
+              return Promise.resolve(p).then(
+                function (value) { return { status: 'fulfilled', value: value }; },
+                function (reason) { return { status: 'rejected', reason: reason }; });
+            }));
+          };
+        }
+        if (!window.queueMicrotask) {
+          window.queueMicrotask = function (fn) { Promise.resolve().then(fn); };
+        }
+      })();
+
+      /* Pick the CesiumJS release the engine can actually parse.
+
+         CesiumJS started emitting optional chaining (`?.`) in 1.99, which is a SYNTAX error
+         before Chrome 80 - the whole bundle fails to load, silently, with a blank globe. The
+         Ergatta tablet's WebView is Chrome 70, so it gets 1.95, the last release without it.
+         A modern WebView gets the current release and the photorealistic tiles that need it.
+         Verified by scanning the published bundles and their workers, not by assumption. */
+      (function () {
+        var match = /Chrome\/(\d+)/.exec(navigator.userAgent);
+        var chrome = match ? parseInt(match[1], 10) : 0;
+        var legacy = chrome > 0 && chrome < 80;
+        var version = legacy ? '1.95' : '1.126';
+        window.__WAKE_LEGACY__ = legacy;
+        window.__WAKE_CHROME__ = chrome;
+        window.__WAKE_CESIUM_VERSION__ = version;
+
+        var engine = document.getElementById('engine');
+        engine.textContent = 'Chrome ' + (chrome || '?') + ' · CesiumJS ' + version;
+        if (window.WakeNative && WakeNative.report) {
+          WakeNative.report('engine', 'chrome=' + chrome + ' cesium=' + version
+            + ' legacy=' + legacy);
+        }
+
+        var base = 'https://cesium.com/downloads/cesiumjs/releases/' + version + '/Build/Cesium/';
+        window.__WAKE_CESIUM_BASE__ = base;
+        // Must be set before Cesium.js evaluates so it resolves its own workers.
+        window.CESIUM_BASE_URL = base;
+        var css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = base + 'Widgets/widgets.css';
+        document.head.appendChild(css);
+
+        var lib = document.createElement('script');
+        lib.src = base + 'Cesium.js';
+        lib.onload = function () {
+          var app = document.createElement('script');
+          app.src = 'fly.js';
+          document.body.appendChild(app);
+        };
+        lib.onerror = function () {
+          document.getElementById('splashState').textContent =
+            'Could not download CesiumJS. The tablet needs internet for the maps.';
+          if (window.WakeNative && WakeNative.report) {
+            WakeNative.report('cesium-download-failed', base);
+          }
+        };
+        document.body.appendChild(lib);
+      })();
+    </script>
+  </body>
+</html>

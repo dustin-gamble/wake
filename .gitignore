@@ -1,0 +1,19 @@
+# Build output
+.gradle/
+build/
+*/build/
+local.properties
+
+# Secrets: the Cesium Ion token is read at runtime, never committed.
+cesium.local.json
+server/cesium.local.json
+
+# Captured rowing sessions - tens of MB of local telemetry, and yours, not the repo's.
+server/data/
+
+# The locally built APK has this machine's LAN address compiled into it.
+# The published one lives in docs/downloads/ and is built without it.
+server/public/downloads/
+
+.DS_Store
+node_modules/

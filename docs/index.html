@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WAKE — rowing instruments and games for a WaterRower S4</title>
+    <meta name="description" content="An open-source Android app that reads the WaterRower S4 monitor over USB and turns it into analog instruments, 21 games and a Cesium flight down the California coast.">
+    <style>
+      :root {
+        --bg: #060B12; --panel: #0D1420; --line: #1C2736;
+        --ink: #E6EDF7; --dim: #8D9BB0; --faint: #5D6B80;
+        --accent: #35D0BA; --blue: #6F8CFF; --warn: #F0B132;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+        line-height: 1.55; -webkit-font-smoothing: antialiased; }
+      .wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 72px; }
+
+      header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+      .mark { width: 44px; height: 44px; border-radius: 12px; background: var(--accent);
+        display: grid; place-items: center; flex: none; }
+      h1 { font-size: 30px; letter-spacing: 0.16em; margin: 0; }
+      .eyebrow { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+        color: var(--faint); margin: 0 0 2px; font-weight: 700; }
+      .lede { font-size: 17px; color: var(--dim); margin: 18px 0 26px; }
+      .lede strong { color: var(--ink); font-weight: 600; }
+
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+      .btn { display: inline-block; padding: 13px 20px; border-radius: 10px; font-weight: 650;
+        font-size: 15px; text-decoration: none; border: 1px solid var(--line);
+        color: var(--ink); background: var(--panel); }
+      .btn.primary { background: var(--accent); color: #04211D; border-color: var(--accent); }
+      .btn.ghost { background: transparent; }
+      .btn:active { transform: translateY(1px); }
+      .note { font-size: 12.5px; color: var(--faint); margin: 0 0 30px; }
+
+      .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+        padding: 18px 20px; margin: 16px 0; }
+      h2 { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+        color: var(--accent); margin: 0 0 12px; }
+      h3 { font-size: 15px; margin: 18px 0 6px; }
+      p { margin: 8px 0; }
+      ul { margin: 8px 0; padding-left: 20px; }
+      li { margin: 5px 0; color: var(--dim); }
+      li strong, p strong { color: var(--ink); }
+      code { font-family: var(--mono); font-size: 0.9em; background: rgba(255,255,255,0.06);
+        padding: 2px 6px; border-radius: 4px; color: var(--ink); }
+      pre { font-family: var(--mono); font-size: 12.5px; background: #05090F;
+        border: 1px solid var(--line); border-radius: 10px; padding: 14px;
+        overflow-x: auto; color: var(--dim); }
+      a { color: var(--accent); }
+
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+      .cell { background: #0A111B; border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; }
+      .cell .k { font-family: var(--mono); font-size: 21px; color: var(--accent); }
+      .cell .v { font-size: 12px; color: var(--faint); margin-top: 3px; }
+
+      .steps { counter-reset: step; list-style: none; padding: 0; }
+      .steps li { counter-increment: step; position: relative; padding-left: 34px; margin: 11px 0; }
+      .steps li::before { content: counter(step); position: absolute; left: 0; top: 1px;
+        width: 23px; height: 23px; border-radius: 50%; background: #16202E; color: var(--accent);
+        font-family: var(--mono); font-size: 12px; display: grid; place-items: center; }
+
+      footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line);
+        color: var(--faint); font-size: 13px; }
+      .tag { display: inline-block; font-size: 11px; font-family: var(--mono); color: var(--warn);
+        border: 1px solid rgba(240,177,50,0.35); border-radius: 999px; padding: 2px 9px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+
+      <header>
+        <div class="mark" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#04211D"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 17c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2"/>
+            <path d="M7 11l4-4"/><circle cx="14.5" cy="7.5" r="2.5"/>
+          </svg>
+        </div>
+        <div>
+          <p class="eyebrow">Open source · WaterRower S4 over USB</p>
+          <h1>WAKE</h1>
+        </div>
+      </header>
+
+      <p class="lede">Your rowing machine already measures everything. WAKE reads the
+        <strong>WaterRower S4 monitor over USB</strong> and turns it into analog instruments that
+        behave like water, <strong>21 games</strong>, and a flight down the California coast on a
+        real 3D globe. It runs on the tablet you already have.</p>
+
+      <div class="actions">
+        <a class="btn primary" href="downloads/wake-3.6.1-debug.apk" download>⬇ Download APK · 3.6.1</a>
+        <a class="btn" id="openApp" href="ergattarowdiag://connect">Open WAKE</a>
+        <a class="btn ghost" href="https://github.com/dustin-gamble/wake">Source on GitHub</a>
+        <a class="btn ghost" href="https://github.com/sponsors/dustin-gamble">♥ Sponsor</a>
+      </div>
+      <p class="note">1.2 MB · Android 5.0+ · debug-signed, so Android will ask you to allow
+        installs from your browser. <strong>Open WAKE</strong> only does something on a tablet that
+        already has it installed — handy on a kiosk-locked rower with no app switcher.</p>
+
+      <div class="panel">
+        <h2>What it does</h2>
+        <div class="grid">
+          <div class="cell"><div class="k">3</div><div class="v">Analog gauges whose needles carry momentum</div></div>
+          <div class="cell"><div class="k">21</div><div class="v">Games driven by your actual power and cadence</div></div>
+          <div class="cell"><div class="k">900 km</div><div class="v">Cesium flight, Golden Gate to San Diego</div></div>
+          <div class="cell"><div class="k">7</div><div class="v">S4 memory addresses decoded live</div></div>
+        </div>
+        <h3>The instruments</h3>
+        <p>Speed, power and stroke rate on real dials, a water paddle that spins at the measured
+          speed, and a live trace of boat speed over power. The thing that matters is the
+          <strong>decay between strokes</strong> — rowers call it the run of the boat, and it is
+          the whole reason to take the next stroke. Most apps hold the last reading flat. This one
+          models the paddle slowing down: quadratic drag, <code>ω(t) = ω₀/(1 + (k/I)ω₀t)</code>.</p>
+        <h3>The games</h3>
+        <p>Pace boats, ghost races against your own best, a zombie that gains on you when you ease
+          off, a side-scrolling runner, boss fights, a canyon chase, an isometric city that builds
+          itself one block per stroke. Every one shows the same vitals strip so you can read your
+          numbers while you play.</p>
+        <h3>Coast Flight</h3>
+        <p>A CesiumJS globe with satellite imagery and real terrain. Power above 60 W is lift,
+          boat speed is airspeed, and the route flies itself down the California coast. Your
+          progress persists, so the 900 km is a trip across many sessions.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Install</h2>
+        <ol class="steps">
+          <li>Open this page <strong>in the browser on your rowing tablet</strong> and tap Download APK.</li>
+          <li>Allow the install when Android asks. Nothing is replaced and nothing needs root.</li>
+          <li>Plug the S4 monitor into the tablet's USB port and open WAKE. Grant USB access.</li>
+          <li>It connects on its own and the gauges come alive. Take a stroke.</li>
+        </ol>
+        <p class="note" style="margin-bottom:0">The laptop dashboard is optional — clone the repo
+          and run <code>node server/server.js</code> for live capture, an event stream and protocol
+          decoding. The app finds it on your Wi-Fi by itself.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Built to be safe on a leased machine</h2>
+        <ul>
+          <li><strong>No root.</strong> No system modification. No changes to boot behaviour.</li>
+          <li><strong>Ergatta is untouched</strong> and remains the fallback — WAKE is just another app you launch.</li>
+          <li><strong>Nothing leaves your network</strong> except map tiles for the flight screen.</li>
+          <li><strong>No account, no telemetry, no ads.</strong> Records live in the tablet's own storage.</li>
+        </ul>
+      </div>
+
+      <div class="panel">
+        <h2>Hardware</h2>
+        <p>Built against a WaterRower in an Ergatta fit-out, Android 9 tablet, S4 monitor
+          <code>04D8:000A</code> over CDC-ACM. Any WaterRower S4 that exposes USB serial should
+          work; other Android tablets should too. <span class="tag">reports welcome</span></p>
+        <pre>Device: WR USB sensor      Driver: CdcAcmSerialDriver
+Decoded: 088 watts · 14A speed · 1A9 rate · 140 strokes
+         057 distance · 1A0 heart rate · 1E1 clock</pre>
+      </div>
+
+      <footer>
+        <p>MIT licensed. Not affiliated with WaterRower or Ergatta.
+          <a href="https://github.com/dustin-gamble/wake/issues">Issues and pull requests welcome.</a></p>
+        <p>If it made a row go quicker, you can
+          <a href="https://github.com/sponsors/dustin-gamble">sponsor the project</a>.</p>
+      </footer>
+
+    </div>
+    <script>
+      // The launch link is only meaningful where the app exists. Say so rather than appearing broken.
+      document.getElementById('openApp').addEventListener('click', function () {
+        var started = Date.now();
+        setTimeout(function () {
+          if (Date.now() - started < 1600 && !document.hidden) {
+            this.textContent = 'WAKE not installed here';
+          }
+        }.bind(this), 900);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to cesium.local.json (gitignored) to enable photorealistic maps at /fly. Get a token at https://cesium.com/ion/tokens - it needs read access to Cesium World Imagery, Cesium World Terrain, and Google Photorealistic 3D Tiles.",
+  "ionToken": "paste-your-cesium-ion-token-here"
+}

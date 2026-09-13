@@ -1,0 +1,15 @@
+<resources>
+    <color name="background">#0A0E14</color>
+    <color name="surface">#111722</color>
+    <color name="surface_alt">#161D2B</color>
+    <color name="line">#212B3B</color>
+    <color name="primary">#35D0BA</color>
+    <color name="primary_dark">#1D7A6D</color>
+    <color name="accent_blue">#6F8CFF</color>
+    <color name="warn">#F0B132</color>
+    <color name="bad">#F0655D</color>
+    <color name="text_primary">#E6EDF7</color>
+    <color name="text_secondary">#8D9BB0</color>
+    <color name="text_faint">#5D6B80</color>
+    <color name="divider">#212B3B</color>
+</resources>

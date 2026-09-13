@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WAKE — Coast Flight</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.126/Build/Cesium/Widgets/widgets.css">
+    <style>
+      :root {
+        --ink: #e6edf7; --dim: #8d9bb0; --faint: #5d6b80;
+        --accent: #35d0ba; --blue: #6f8cff; --warn: #f0b132; --bad: #f0655d;
+        --panel: rgba(10, 16, 26, 0.72);
+        --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #03080f;
+        font-family: var(--sans); color: var(--ink); }
+      #globe { position: absolute; inset: 0; }
+      /* Cesium's own chrome is noise, but the credit line must stay: Google's photorealistic
+         tiles and Bing imagery both require visible attribution. Restyled, not removed. */
+      .cesium-viewer-bottom { bottom: 2px !important; }
+      .cesium-widget-credits, .cesium-credit-textContainer, .cesium-credit-textContainer * {
+        font-family: var(--sans) !important; font-size: 9.5px !important;
+        color: rgba(230, 237, 247, 0.55) !important; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+      .cesium-credit-expand-link { color: rgba(230, 237, 247, 0.7) !important; }
+
+      .overlay { position: absolute; pointer-events: none; }
+
+      /* Wings, drawn in SVG so they can flap with the stroke. */
+      #wings { inset: 0; width: 100%; height: 100%; opacity: 0.9; }
+
+      #hud { left: 0; right: 0; top: 0; padding: 14px 18px; display: flex; gap: 14px;
+        align-items: flex-start; background: linear-gradient(180deg, rgba(3,8,15,0.78), transparent); }
+      .card { background: var(--panel); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px; padding: 10px 14px; backdrop-filter: blur(6px); }
+      .big { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1;
+        font-variant-numeric: tabular-nums; }
+      .cap { font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+        color: var(--faint); font-weight: 650; margin-top: 4px; }
+      .row { display: flex; gap: 18px; }
+      .stat .v { font-family: var(--mono); font-size: 19px; font-variant-numeric: tabular-nums; }
+
+      #title { font-size: 15px; font-weight: 700; letter-spacing: 0.18em; color: var(--accent); }
+      #sub { font-size: 10.5px; color: var(--faint); margin-top: 2px; }
+
+      #climb { position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+        width: 54px; height: 220px; }
+      #climbFill { position: absolute; left: 0; right: 0; background: var(--accent); }
+
+      #foot { left: 0; right: 0; bottom: 0; padding: 12px 18px;
+        background: linear-gradient(0deg, rgba(3,8,15,0.8), transparent); }
+      #landmark { font-size: 13px; color: var(--ink); }
+      #hint { font-size: 11px; color: var(--warn); margin-top: 4px; }
+      #progressTrack { height: 4px; background: rgba(255,255,255,0.14); border-radius: 2px;
+        margin-top: 10px; position: relative; }
+      #progressFill { height: 4px; background: var(--accent); border-radius: 2px; width: 0; }
+      .tick { position: absolute; top: -3px; width: 2px; height: 10px;
+        background: rgba(255,255,255,0.35); }
+
+      #splash { position: absolute; inset: 0; display: grid; place-items: center;
+        background: rgba(3, 8, 15, 0.88); text-align: center; padding: 32px; }
+      #splash h1 { font-size: 26px; letter-spacing: 0.14em; margin: 0 0 10px; color: var(--accent); }
+      #splash p { margin: 6px 0; color: var(--dim); font-size: 13px; max-width: 520px; }
+      #splash code { font-family: var(--mono); color: var(--ink); background: rgba(255,255,255,0.08);
+        padding: 2px 6px; border-radius: 4px; }
+      #splash.hidden { display: none; }
+      .pill { display: inline-block; margin-top: 14px; padding: 7px 14px; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.18); font-size: 12px; color: var(--dim); }
+    </style>
+  </head>
+  <body>
+    <div id="globe"></div>
+
+    <svg id="wings" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
+      <path id="wingL" d="" fill="rgba(30,22,17,0.92)"/>
+      <path id="wingR" d="" fill="rgba(30,22,17,0.92)"/>
+    </svg>
+
+    <div id="hud" class="overlay">
+      <a class="card" id="backToApp" href="ergattarowdiag://connect"
+         style="pointer-events:auto;text-decoration:none;display:block">
+        <div id="title">‹ WAKE · COAST FLIGHT</div>
+        <div id="sub">Tap here to go back to the app</div>
+      </a>
+      <div class="card">
+        <div class="big" id="alt">0</div>
+        <div class="cap">Altitude (m)</div>
+      </div>
+      <div class="card">
+        <div class="big" id="spd">0</div>
+        <div class="cap">Airspeed (km/h)</div>
+      </div>
+      <div class="card" style="pointer-events:auto;cursor:pointer" id="mapCard" title="Change the map">
+        <div class="v" id="mapMode" style="font-family:var(--mono);font-size:15px">—</div>
+        <div class="cap">Map · tap to change</div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div class="stat"><div class="v" id="watts">0</div><div class="cap">Watts</div></div>
+          <div class="stat"><div class="v" id="spm">0</div><div class="cap">Rate</div></div>
+          <div class="stat"><div class="v" id="dist">0</div><div class="cap">km flown</div></div>
+          <div class="stat"><div class="v" id="clock">0:00</div><div class="cap">Rowing time</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="climb" class="overlay">
+      <div style="position:absolute;inset:0;border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:var(--panel)"></div>
+      <div id="climbFill"></div>
+      <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(255,255,255,0.35)"></div>
+      <div class="cap" style="position:absolute;left:0;right:0;bottom:-18px;text-align:center">Climb</div>
+    </div>
+
+    <div id="foot" class="overlay">
+      <div id="landmark">Waiting for the rower…</div>
+      <div id="hint"></div>
+      <div id="progressTrack"><div id="progressFill"></div></div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px;pointer-events:auto">
+        <span id="trip" class="cap" style="margin:0">Trip: 0 km</span>
+        <a id="reset" href="#" class="cap" style="margin:0;color:var(--faint);text-decoration:underline">Restart at the Golden Gate</a>
+      </div>
+    </div>
+
+    <div id="splash">
+      <div>
+        <h1>COAST FLIGHT</h1>
+        <p>Row to climb. Power is lift, boat speed is airspeed, and the course flies itself down
+           the California coast.</p>
+        <p>Turn on <code>STREAM</code> in WAKE on the tablet, then take a stroke.</p>
+        <p id="splashState" class="pill">Connecting to the dashboard…</p>
+      </div>
+    </div>
+
+    <script>
+      // Injected by the server from CESIUM_ION_TOKEN or server/cesium.local.json.
+      window.__WAKE_CESIUM_ION_TOKEN__ = "__CESIUM_ION_TOKEN__";
+    </script>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.126/Build/Cesium/Cesium.js"></script>
+    <script src="/fly.js"></script>
+  </body>
+</html>

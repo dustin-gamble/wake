@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ergatta Row Diagnostic</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="shell">
+
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#05201c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 17c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2"/>
+              <path d="M7 11l4-4"/><circle cx="14.5" cy="7.5" r="2.5"/>
+            </svg>
+          </div>
+          <div>
+            <p class="eyebrow">Local rower link</p>
+            <h1>Ergatta Row Diagnostic</h1>
+          </div>
+        </div>
+
+        <div class="pill-row">
+          <span class="pill" id="pillStream"><span class="dot"></span><span>Connecting</span></span>
+          <span class="pill" id="pillTablet"><span class="dot"></span><span>No tablet</span></span>
+          <span class="pill" id="pillMonitor"><span class="dot"></span><span>No monitor</span></span>
+          <a class="button" id="backToAppTop" href="#" title="Bring the WAKE app back to the front">‹ Back to WAKE</a>
+          <button id="themeToggle" type="button" title="Toggle light and dark">Theme</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Live rowing metrics">
+        <div class="metric">
+          <p class="metric-label">Time</p>
+          <p class="metric-value" id="vTime">0:00</p>
+        </div>
+        <div class="metric">
+          <p class="metric-label">Distance</p>
+          <p class="metric-value" id="vDistance">0<span class="unit">m</span></p>
+        </div>
+        <div class="metric is-primary">
+          <p class="metric-label">Pace / 500m</p>
+          <p class="metric-value" id="vPace">--:--</p>
+        </div>
+        <div class="metric">
+          <p class="metric-label">Stroke rate</p>
+          <p class="metric-value" id="vRate">0<span class="unit">spm</span></p>
+        </div>
+        <div class="metric">
+          <p class="metric-label">Power</p>
+          <p class="metric-value" id="vWatts">0<span class="unit">W</span></p>
+        </div>
+        <div class="metric">
+          <p class="metric-label">Strokes</p>
+          <p class="metric-value" id="vStrokes">0</p>
+        </div>
+      </section>
+
+      <div class="grid-2 grid-3up">
+        <section class="panel chart-wrap">
+          <div class="panel-head">
+            <h2>Last 2 minutes</h2>
+            <div class="legend">
+              <span><i class="swatch" style="background:var(--accent)"></i>Power (W)</span>
+              <span><i class="swatch" style="background:var(--pulse)"></i>Stroke rate (spm)</span>
+            </div>
+          </div>
+          <canvas id="chart" width="900" height="380"></canvas>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Water</h2>
+            <span class="small" style="margin:0">Flywheel pulse cadence</span>
+          </div>
+          <div class="water-row">
+            <canvas id="paddle" width="150" height="150"></canvas>
+            <div class="water-stats">
+              <p class="stat-label">Water speed</p>
+              <p class="stat-value" id="sPulseHz" style="font-size:30px">--<span class="unit" style="font-size:0.45em;color:var(--text-faint)"> Hz</span></p>
+              <p class="stat-label" style="margin-top:10px">Last Pxx value</p>
+              <p class="stat-value" id="sPulseValue">--</p>
+              <p class="small" style="margin-top:10px">Water speed comes from address 14A. The wheel coasts down on its own when reports stop.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Link health</h2>
+          <div class="stats">
+            <div><p class="stat-label">Packets</p><p class="stat-value" id="sPackets">0</p></div>
+            <div><p class="stat-label">Pulses</p><p class="stat-value" id="sPulses">0</p></div>
+            <div><p class="stat-label">Packet age</p><p class="stat-value" id="sAge">--</p></div>
+            <div><p class="stat-label">Events / s</p><p class="stat-value" id="sRate">0.0</p></div>
+            <div><p class="stat-label">Last command</p><p class="stat-value" id="sCommand" style="font-size:15px">--</p></div>
+            <div><p class="stat-label">Retired fields</p><p class="stat-value" id="sRetired">0</p></div>
+            <div><p class="stat-label">Dropped uploads</p><p class="stat-value" id="sDropped">0</p></div>
+            <div><p class="stat-label">App version</p><p class="stat-value" id="sVersion" style="font-size:15px">--</p></div>
+          </div>
+          <p class="small" id="sourceLine">Waiting for the tablet app to check in.</p>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>S4 memory map decode</h2>
+          <span class="small" style="margin:0">Compare against the rower's own display to confirm each address</span>
+        </div>
+        <div class="overflow-x">
+          <table class="map-table">
+            <thead>
+              <tr><th>Request</th><th>Field</th><th>Value</th><th>Hex</th><th>Age</th><th>State</th></tr>
+            </thead>
+            <tbody id="mapBody">
+              <tr><td colspan="6" class="empty" style="font-family:var(--sans)">No memory reads answered yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="grid-3">
+        <section class="panel">
+          <h2>Tablet setup</h2>
+          <ol class="steps">
+            <li>Open this page in Chrome on the rower tablet.</li>
+            <li>Install the diagnostic APK.</li>
+            <li>Open the app; this laptop is filled in automatically.</li>
+            <li>Tap Refresh, allow USB, then tap Open.</li>
+          </ol>
+          <div class="actions" style="margin-top:14px">
+            <a class="button primary" href="/downloads/ergatta-row-diagnostic-debug.apk">Install APK</a>
+            <a class="button" id="openAppLink" href="#">Open app</a>
+          </div>
+          <p class="small">Stays on your Wi-Fi. Does not replace Ergatta or change boot behavior.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Open on rower</h2>
+          <div id="addressList" class="address-list"><span class="empty">Finding addresses...</span></div>
+          <p class="small">The app remembers this laptop and finds it again on the same Wi-Fi.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Capture</h2>
+          <div class="actions">
+            <a class="button primary" href="/fly" target="_blank">Coast Flight</a>
+            <a class="button" href="/api/export">Download capture</a>
+            <button id="resetButton" type="button">Start new session</button>
+            <button id="pauseButton" type="button" aria-pressed="false">Pause view</button>
+          </div>
+          <p class="small" id="captureNote">Events are appended to server/data/events.jsonl. Starting a new session archives the current file rather than deleting it.</p>
+          <h2 style="margin-top:18px">Connected browsers</h2>
+          <div id="browserList"><span class="empty">No check-ins yet.</span></div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Event stream</h2>
+          <div class="filters" id="filters"></div>
+        </div>
+        <div id="eventList" class="events"><span class="empty">Waiting for tablet data...</span></div>
+      </section>
+
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
