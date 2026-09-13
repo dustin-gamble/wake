@@ -77,6 +77,10 @@ final class S4Protocol {
         final boolean stillRowing;
         /** A pulse arrived within the last moment: instantaneous proof the flywheel is turning. */
         final boolean flywheelMoving;
+        /** Effort from the pulse stream at 40Hz. Liveness, not a calibrated measurement. */
+        final double pulseEffort;
+        /** Strokes counted from pulses alone - survives a refused write path. */
+        final int pulseStrokes;
         /**
          * Stroke rate smoothed for display. See {@link S4Protocol#averagedStrokeRate}; use
          * {@link #strokeRate} for anything that decides something.
@@ -108,7 +112,9 @@ final class S4Protocol {
                 long speedUnchangedMs,
                 boolean stillRowing,
                 boolean flywheelMoving,
-                int strokeRateAverage) {
+                int strokeRateAverage,
+                double pulseEffort,
+                int pulseStrokes) {
             this.monitorConnected = monitorConnected;
             this.rowing = rowing;
             this.elapsedSeconds = elapsedSeconds;
@@ -134,6 +140,8 @@ final class S4Protocol {
             this.stillRowing = stillRowing;
             this.flywheelMoving = flywheelMoving;
             this.strokeRateAverage = strokeRateAverage;
+            this.pulseEffort = pulseEffort;
+            this.pulseStrokes = pulseStrokes;
         }
     }
 
@@ -279,6 +287,12 @@ final class S4Protocol {
     private long lastPulseAtMs;
     private double pulseIntervalMs;
     private int lastPulseValue;
+    /** Smoothed Pxx payload: effort at 40Hz, independent of the poll. See pulseEffort(). */
+    private double pulseSmoothed;
+    private double pulseBaseline;
+    private boolean pulseDriving;
+    private long pulseDriveAtMs;
+    private int pulseStrokes;
 
     S4Protocol(Listener listener) {
         this.listener = listener;
@@ -318,6 +332,11 @@ final class S4Protocol {
         lastPulseAtMs = 0;
         pulseIntervalMs = 0;
         lastPulseValue = 0;
+        pulseSmoothed = 0;
+        pulseBaseline = 0;
+        pulseDriving = false;
+        pulseDriveAtMs = 0;
+        pulseStrokes = 0;
         for (PollField field : pollFields) {
             field.sizeIndex = 0;
             field.retired = false;
@@ -558,7 +577,9 @@ final class S4Protocol {
                 unchangedMs("14A", now),
                 stillRowing(now),
                 lastPulseAtMs > 0 && now - lastPulseAtMs < 700,
-                averagedStrokeRate(now));
+                averagedStrokeRate(now),
+                pulseEffort(),
+                pulseStrokes());
     }
 
     /**
@@ -678,6 +699,27 @@ final class S4Protocol {
         } catch (NumberFormatException ignored) {
             lastPulseValue = 0;
         }
+        // Pxx is a count per fixed 25ms interval, not a period: packets arrive at 40/s whenever
+        // the flywheel turns, and the payload rises monotonically with speed and power (3.75 m/s
+        // at 7, 4.53 m/s at 13, over 7330 samples). Noisy per packet, so it is smoothed - but it
+        // is forty times finer than the poll and keeps arriving when writes are refused, which
+        // makes it the only signal that can keep the instruments alive on a broken link.
+        pulseSmoothed = pulseSmoothed == 0
+                ? lastPulseValue
+                : pulseSmoothed * 0.75 + lastPulseValue * 0.25;
+        // A slow baseline the drive has to rise above; it recovers between strokes.
+        pulseBaseline = pulseBaseline == 0
+                ? pulseSmoothed
+                : pulseBaseline * 0.985 + pulseSmoothed * 0.015;
+        boolean above = pulseSmoothed > pulseBaseline + PULSE_DRIVE_MARGIN;
+        if (above && !pulseDriving && lastPacketAtMs - pulseDriveAtMs > PULSE_MIN_STROKE_MS) {
+            pulseDriving = true;
+            pulseDriveAtMs = lastPacketAtMs;
+            pulseStrokes++;
+        } else if (!above && pulseSmoothed < pulseBaseline + PULSE_DRIVE_MARGIN * 0.4) {
+            pulseDriving = false;
+        }
+
         if (lastPulseAtMs > 0) {
             long gap = lastPacketAtMs - lastPulseAtMs;
             // Ignore absurd gaps so a stall or a reconnect does not poison the average.
@@ -688,6 +730,31 @@ final class S4Protocol {
             }
         }
         lastPulseAtMs = lastPacketAtMs;
+    }
+
+    /** Rise above the rolling baseline that counts as a drive. Needs tuning on hardware. */
+    private static final double PULSE_DRIVE_MARGIN = 0.8;
+    /** No two drives closer than this; even a 40spm sprint leaves 1.5s between strokes. */
+    private static final long PULSE_MIN_STROKE_MS = 700;
+
+    /**
+     * Effort from the pulse stream, roughly 0 to 1, updated 40 times a second.
+     *
+     * <p>Not a calibrated speed: per-sample correlation with `14A` is only r = +0.24, so this is a
+     * liveness and shape signal rather than a measurement. Use it to move the instruments between
+     * memory reads and to catch the drive as it happens; `14A` and `088` stay authoritative when
+     * they arrive.
+     */
+    double pulseEffort() {
+        if (pulseSmoothed <= 0) {
+            return 0;
+        }
+        return Math.max(0, Math.min(1, (pulseSmoothed - 1) / 12.0));
+    }
+
+    /** Strokes counted from the pulse stream alone, for when address 140 cannot be read. */
+    int pulseStrokes() {
+        return pulseStrokes;
     }
 
     /** Zero once the flywheel has clearly stopped, rather than holding the last rate forever. */

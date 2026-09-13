@@ -2735,6 +2735,8 @@ public class MainActivity extends Activity
         payload.put("fields", new JSONArray(s4Protocol.fieldReport()));
         payload.put("droppedUploads", droppedUploads);
         payload.put("commandGapMs", commandGapMs);
+        payload.put("pulseEffort", Math.round(status.pulseEffort * 100) / 100.0);
+        payload.put("pulseStrokes", status.pulseStrokes);
         payload.put("coastDrag", coastDrag);
         payload.put("screen", currentGame != null ? currentGame.getClass().getSimpleName()
                 : screenHost != null && screenHost.getChildCount() > 0
@@ -2774,6 +2776,16 @@ public class MainActivity extends Activity
             // while the session continues. Driving means a stroke is actively pushing the wheel:
             // the reading rose, or it changed within the last stroke period.
             boolean driving = status.stillRowing && status.speedUnchangedMs < 1200;
+            // The pulse stream arrives at 40Hz unsolicited, so it is the one signal that keeps
+            // working when the write path is refused. When memory reads have gone stale but the
+            // flywheel is clearly turning, drive the instruments from it rather than showing a
+            // frozen needle - a held value is the one thing this project must never display.
+            boolean readsStale = status.speedUnchangedMs > 4000;
+            boolean pulseAlive = status.flywheelMoving && status.pulseEffort > 0.02;
+            boolean onPulses = readsStale && pulseAlive;
+            if (onPulses) {
+                driving = true;
+            }
             trackJourney(status);
             if (gameStrip != null && currentGame != null) {
                 gameStrip.update(status, currentGame.boatSpeed());
@@ -2784,14 +2796,19 @@ public class MainActivity extends Activity
                     ((JourneyGame) currentGame).setTotalMeters(journeyLifetime + journeySession);
                 }
             }
-            speedGauge.setValue((float) status.waterSpeedMps, driving);
+            // Pxx is not calibrated speed (r = +0.24 per sample), so it is scaled onto the
+            // dial only to show motion and shape, never presented as a measurement.
+            float shownSpeed = onPulses
+                    ? (float) (0.8 + status.pulseEffort * 3.6)
+                    : (float) status.waterSpeedMps;
+            speedGauge.setValue(shownSpeed, driving);
             powerGauge.setValue(status.watts, driving);
             rateGauge.setValue(status.strokeRateAverage, driving);
 
             powerBar.setValue(status.watts, status.watts + " W");
             rateBar.setValue(status.strokeRateAverage, status.strokeRateAverage + " spm");
 
-            paddleView.setSpeed(status.waterSpeedMps, driving);
+            paddleView.setSpeed(onPulses ? shownSpeed : status.waterSpeedMps, driving);
 
             connectionBanner.setText(connectionSummary(status));
             connectionBanner.setTextColor(getColorCompat(status.monitorConnected

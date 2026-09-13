@@ -21,6 +21,7 @@ public class S4ProtocolTest {
         clampsNonsensePace();
         reportsStrokeRateUnmultiplied();
         trimsAnIsolatedRateDip();
+        countsStrokesFromPulsesAlone();
 
         if (failures > 0) {
             System.out.println("\n" + failures + " check(s) FAILED");
@@ -130,6 +131,33 @@ public class S4ProtocolTest {
             feed(q, "IDS1A91E\r\n");     // 0x1E = 30spm
         }
         check("a sustained change follows", getInt(snapshot(q), "strokeRateAverage"), 30);
+    }
+
+    /**
+     * Strokes can be counted from the pulse stream alone, with no memory read involved.
+     *
+     * <p>This is what keeps the instruments alive when the write path is refused: Pxx arrives
+     * unsolicited at 40Hz, and a drive shows as the payload rising above its rolling baseline.
+     * Simulated here as a settle, then three rises separated by more than the minimum stroke gap.
+     */
+    private static void countsStrokesFromPulsesAlone() throws Exception {
+        Object p = newProtocol();
+        for (int i = 0; i < 25; i++) {
+            feed(p, "P07\r\n");            // settle the baseline at 7
+        }
+        check("no stroke from a steady flywheel", getInt(snapshot(p), "pulseStrokes"), 0);
+
+        for (int stroke = 0; stroke < 3; stroke++) {
+            for (int i = 0; i < 4; i++) {
+                feed(p, "P0C\r\n");        // 12: the drive
+            }
+            for (int i = 0; i < 14; i++) {
+                feed(p, "P07\r\n");        // back to the recovery baseline
+            }
+            Thread.sleep(760);               // longer than PULSE_MIN_STROKE_MS
+        }
+        int counted = getInt(snapshot(p), "pulseStrokes");
+        check("three drives counted as three strokes", counted, 3);
     }
 
     /* ---------- harness ---------- */
