@@ -675,8 +675,29 @@ stopping dead.
   the cube law versus 15.6% for a square-root fit, errors to +/-50%. **Inconclusive** -
   watts and `14A` are asynchronous samples with different averaging windows, so the test
   cannot separate a wrong law from bad sampling.
-- The `Pxx` payload does not encode pulse period: measured rate is pinned near 40Hz for
-  every value 2-13 (R^2 0.13 against `1/Pxx`). Treat `pulseHz` as reporting cadence only.
+- **`Pxx` is a count per interval, not a period - and it does carry effort.** The earlier
+  reading was half right. Packets arrive at a fixed **40.0/s** whenever the flywheel turns (p10
+  39.9, p90 40.1, r^2 0.00 against speed), so the *arrival rate* says only "moving or not", and
+  `1/Pxx` as a period correlates at r = -0.23. But the *payload* was never tested as a count.
+  Against 7330 moving samples it rises monotonically with speed and power:
+
+  | Pxx | n | mean speed | mean watts |
+  |---|---|---|---|
+  | 7 | 1324 | 3.75 m/s | 119 W |
+  | 9 | 1325 | 3.78 m/s | 123 W |
+  | 11 | 703 | 3.84 m/s | 130 W |
+  | 12 | 151 | 3.92 m/s | 147 W |
+  | 13 | 20 | 4.53 m/s | 205 W |
+
+  Per-sample correlation is weak (r = +0.24 speed, +0.30 watts), so it is noisy stroke to stroke
+  and needs smoothing over several packets; values 1-3 sit off the trend and are probably coast.
+
+  **This is the most under-used signal on the link.** It arrives at 25ms resolution, unsolicited,
+  with no write involved - so it survives a broken write path, and it is forty times finer than
+  the ~1s poll and the ~2.5s `088` refresh. The architecture should be the reverse of today's:
+  pulses as the primary liveness signal driving the needles, memory reads as the slow
+  authoritative correction. "It feels dead", "it misses strokes" and "when I stroke hard it
+  doesn't capture" are one problem - a one-hertz sample rate on a sub-second event.
 - The drag factor could be measured properly rather than tuned by eye: `k = I d(1/w)/dt`,
   fitting a line to `1/w` against time during a recovery phase. Needs a usable per-pulse
   timing signal, which the `Pxx` value does not appear to give.
@@ -891,7 +912,8 @@ by prefix; add a new key to both.
    on 2498 samples: CV 18.0% versus 15.6% for a square-root fit. Inconclusive - watts and
    `14A` are asynchronous samples with different averaging windows.
 3. **Drag factor could be measured** as `k = I d(1/w)/dt` if a per-pulse timing signal
-   ever becomes available. `Pxx` is not it (R^2 0.13 against measured pulse rate).
+   ever becomes available. The `Pxx` arrival rate is not it (fixed 40Hz), but the payload is a
+   count per interval and is worth fitting - see the decode notes.
 
 ## Dashboard Notes
 
