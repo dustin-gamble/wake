@@ -175,7 +175,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.7.0-debug
+3.7.1-debug
 ```
 
 Build and publish in one go (this is the loop used all session):
@@ -390,7 +390,24 @@ Two failures were about *when* a value is sampled rather than how big it is:
 working"), Depth Dive ("didn't work"). Their record keys are still formatted in the Records
 screen so old results are not orphaned. Seventeen games remain.
 
-## Screenshots from the tablet (3.7.0)
+## Publishing: use the script, not gradle by hand (3.7.1)
+
+```sh
+./tools/publish-apk.sh          # LAPTOP_URL=... to override the baked-in dashboard
+```
+
+It builds **two different APKs** and they must not be mixed up:
+
+| | goes to | dashboard URL | screenshot upload |
+|---|---|---|---|
+| local | `server/public/downloads/` | baked in | **on** (`-PscreenshotUpload=true`) |
+| public | `docs/downloads/` (GitHub Pages) | none, discovery only | **off** |
+
+It also writes `server/public/downloads/version.json`, which the dashboard reads to show which
+build the Install button is handing out and whether the connected tablet is behind it. Build by
+hand and that line goes stale, which is the whole reason the script exists.
+
+## Screenshots from the tablet (3.7.0, gated in 3.7.1)
 
 The tablet is kiosk-locked: no file manager, no app switcher, and Android's own screenshot lands
 in a gallery that cannot be opened. So the app photographs itself:
@@ -401,6 +418,22 @@ in a gallery that cannot be opened. So the app photographs itself:
 - It draws the *view hierarchy*, so every canvas screen comes out exactly as seen. **Coast Flight
   will come out blank** - it is WebGL on a GPU surface, outside the view draw pass. Use the
   hardware screenshot for that one.
+- **Never automatic.** There is no timer and no capture on entering a screen; it fires only on a
+  deliberate long-press or button, one image per action.
+- **Compiled out of the published build** via `BuildConfig.SCREENSHOT_UPLOAD`. Verified on the
+  dex: the public APK has zero `setOnLongClickListener` calls, so no trigger survives, and the
+  method body is inside `if (BuildConfig.SCREENSHOT_UPLOAD)` so a false constant empties it.
+  Dead lambda bodies do linger in the string pool - javac desugars lambdas before it drops
+  constant-false blocks, and a debug APK is not minified - so grepping the dex for
+  `X-Shot-Name` is not a useful test. Reachability is.
+
+## Can this tablet take a Bluetooth sensor? (3.7.1)
+
+A `device-capabilities` event is now sent once per session, forced, carrying
+`bluetoothLe` / `bluetoothAdapter` / `bluetoothEnabled` plus the screen metrics. It exists to
+answer the handle-mounted IMU question from the capture instead of by buying hardware. Reading
+the adapter needs only the normal `BLUETOOTH` permission; nothing is scanned, paired or
+connected, and that is the extent of the Bluetooth code in the app.
 
 ## Game Architecture
 

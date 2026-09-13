@@ -80,6 +80,19 @@ function bestLocalUrlFor(clientAddress) {
   return candidates.length ? `http://${candidates[0].address}:${PORT}` : `http://localhost:${PORT}`;
 }
 
+/**
+ * What the Install button is currently handing out. Written by tools/publish-apk.sh, so the
+ * dashboard can say which build is on offer and whether the tablet is behind it.
+ */
+function publishedApk() {
+  try {
+    const raw = fs.readFileSync(path.join(PUBLIC_DIR, 'downloads', 'version.json'), 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -181,6 +194,7 @@ function handleApi(req, res, pathname) {
       events: events.slice(-100),
       browserCheckins: [...browserCheckins.values()],
       apkReady: fs.existsSync(path.join(PUBLIC_DIR, 'downloads', 'ergatta-row-diagnostic-debug.apk')),
+      apk: publishedApk(),
     });
     return true;
   }

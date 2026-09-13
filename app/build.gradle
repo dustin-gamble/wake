@@ -2,6 +2,9 @@ plugins {
     id 'com.android.application'
 }
 
+// Screenshot upload is development tooling: it draws the screen and posts it to a
+// laptop. Off unless asked for, so the published build cannot send a picture anywhere.
+def screenshotUpload = providers.gradleProperty('screenshotUpload').orElse('false').get()
 def diagnosticServerUrl = providers.gradleProperty('diagnosticServerUrl').orElse('').get()
 def escapedDiagnosticServerUrl = diagnosticServerUrl
         .replace('\\', '\\\\')
@@ -15,9 +18,10 @@ android {
         applicationId 'com.codex.waterrowerdiagnostic'
         minSdk 23
         targetSdk 28
-        versionCode 61
-        versionName '3.7.0'
+        versionCode 62
+        versionName '3.7.1'
         buildConfigField 'String', 'DEFAULT_SERVER_URL', "\"${escapedDiagnosticServerUrl}\""
+        buildConfigField 'boolean', 'SCREENSHOT_UPLOAD', "${screenshotUpload == 'true'}"
     }
 
     buildTypes {

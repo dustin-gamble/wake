@@ -18,6 +18,7 @@ const el = {
   eventList: $('eventList'),
   filters: $('filters'),
   openAppLink: $('openAppLink'),
+  apkLine: $('apkLine'),
   resetButton: $('resetButton'),
   pauseButton: $('pauseButton'),
   chart: $('chart'),
@@ -492,7 +493,10 @@ function addEvent(event) {
     version: appVersion,
     at: Date.parse(event.receivedAt || '') || Date.now(),
   };
-  if (appVersion) el.sVersion.textContent = appVersion;
+  if (appVersion) {
+    el.sVersion.textContent = appVersion;
+    renderApkLine();
+  }
 
   if (type === 'rowing-status') renderStatus(payload, lastTablet.at);
   refreshPills();
@@ -618,9 +622,41 @@ async function browserCheckin() {
   });
 }
 
+/**
+ * Say which build the Install button hands out, and whether the tablet is running it.
+ *
+ * The tablet cannot see its own update status and the version is easy to lose track of across
+ * rebuilds, so the comparison is made here rather than left to memory.
+ */
+let publishedApk = null;
+
+function renderApkLine() {
+  if (!el.apkLine) return;
+  if (!publishedApk) {
+    el.apkLine.textContent = 'No version.json yet - run tools/publish-apk.sh.';
+    el.apkLine.style.color = '';
+    return;
+  }
+  const built = publishedApk.builtAt ? new Date(publishedApk.builtAt).toLocaleString() : 'unknown';
+  const onTablet = lastTablet && lastTablet.version ? lastTablet.version : null;
+  let line = `Published: ${publishedApk.versionName} (code ${publishedApk.versionCode}), built ${built}.`;
+  if (onTablet && onTablet !== publishedApk.versionName) {
+    line += `  Tablet is running ${onTablet} - install to update.`;
+    el.apkLine.style.color = 'var(--warn)';
+  } else if (onTablet) {
+    line += `  Tablet is up to date.`;
+    el.apkLine.style.color = 'var(--accent)';
+  } else {
+    el.apkLine.style.color = '';
+  }
+  el.apkLine.textContent = line;
+}
+
 async function loadState() {
   const response = await fetch('/api/state', { cache: 'no-store' });
   const state = await response.json();
+  publishedApk = state.apk || null;
+  renderApkLine();
   renderAddresses(state.serverUrls || []);
   renderBrowsers(state.browserCheckins || []);
   for (const event of state.events || []) addEvent(event);

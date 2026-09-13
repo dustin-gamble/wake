@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.bluetooth.BluetoothAdapter;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Typeface;
@@ -389,10 +390,12 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         title.setTextSize(24);
         title.setLetterSpacing(0.2f);
         title.setTextColor(getColorCompat(R.color.primary));
-        title.setOnLongClickListener(v -> {
-            captureScreenshot("home");
-            return true;
-        });
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            title.setOnLongClickListener(v -> {
+                captureScreenshot("home");
+                return true;
+            });
+        }
         header.addView(title);
         TextView sub = new TextView(this);
         sub.setText("  v" + BuildConfig.VERSION_NAME);
@@ -931,58 +934,100 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
      * hardware screenshot for that one.
      */
     private void captureScreenshot(String label) {
-        if (TextUtils.isEmpty(serverUrl)) {
-            toast("No laptop found - screenshot needs the dashboard running");
-            return;
-        }
-        View root = getWindow().getDecorView().getRootView();
-        if (root.getWidth() <= 0 || root.getHeight() <= 0) {
-            return;
-        }
-        Bitmap shot;
-        try {
-            shot = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
-        } catch (OutOfMemoryError e) {
-            toast("Not enough memory for a screenshot");
-            return;
-        }
-        root.draw(new Canvas(shot));
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        shot.compress(Bitmap.CompressFormat.PNG, 100, out);
-        shot.recycle();
-        final byte[] png = out.toByteArray();
-        final String base = serverUrl;
-        toast("Screenshot " + (png.length / 1024) + " kB - sending");
-        new Thread(() -> {
-            HttpURLConnection connection = null;
-            try {
-                connection = (HttpURLConnection) new URL(base + "/api/screenshot").openConnection();
-                connection.setConnectTimeout(3000);
-                connection.setReadTimeout(8000);
-                connection.setRequestMethod("POST");
-                connection.setRequestProperty("Content-Type", "image/png");
-                connection.setRequestProperty("X-Shot-Name", label);
-                connection.setFixedLengthStreamingMode(png.length);
-                connection.setDoOutput(true);
-                OutputStream stream = connection.getOutputStream();
-                stream.write(png);
-                stream.close();
-                final int code = connection.getResponseCode();
-                runOnUiThread(() -> toast(code == 200 ? "Screenshot saved on the laptop"
-                        : "Screenshot rejected: " + code));
-            } catch (IOException e) {
-                runOnUiThread(() -> toast("Screenshot failed: " + e.getMessage()));
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
+        // Wrapped rather than guarded with an early return: SCREENSHOT_UPLOAD is a
+        // compile-time constant, so with it false javac omits this whole block and the
+        // published APK does not contain the upload path at all - verifiable with
+        // `strings` on the dex, which is the point.
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            if (TextUtils.isEmpty(serverUrl)) {
+                toast("No laptop found - screenshot needs the dashboard running");
+                return;
             }
-        }, "screenshot").start();
+            View root = getWindow().getDecorView().getRootView();
+            if (root.getWidth() <= 0 || root.getHeight() <= 0) {
+                return;
+            }
+            Bitmap shot;
+            try {
+                shot = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
+            } catch (OutOfMemoryError e) {
+                toast("Not enough memory for a screenshot");
+                return;
+            }
+            root.draw(new Canvas(shot));
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            shot.compress(Bitmap.CompressFormat.PNG, 100, out);
+            shot.recycle();
+            final byte[] png = out.toByteArray();
+            final String base = serverUrl;
+            toast("Screenshot " + (png.length / 1024) + " kB - sending");
+            new Thread(() -> {
+                HttpURLConnection connection = null;
+                try {
+                    connection = (HttpURLConnection) new URL(base + "/api/screenshot").openConnection();
+                    connection.setConnectTimeout(3000);
+                    connection.setReadTimeout(8000);
+                    connection.setRequestMethod("POST");
+                    connection.setRequestProperty("Content-Type", "image/png");
+                    connection.setRequestProperty("X-Shot-Name", label);
+                    connection.setFixedLengthStreamingMode(png.length);
+                    connection.setDoOutput(true);
+                    OutputStream stream = connection.getOutputStream();
+                    stream.write(png);
+                    stream.close();
+                    final int code = connection.getResponseCode();
+                    runOnUiThread(() -> toast(code == 200 ? "Screenshot saved on the laptop"
+                            : "Screenshot rejected: " + code));
+                } catch (IOException e) {
+                    runOnUiThread(() -> toast("Screenshot failed: " + e.getMessage()));
+                } finally {
+                    if (connection != null) {
+                        connection.disconnect();
+                    }
+                }
+            }, "screenshot").start();
+        }
     }
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
         log(message);
+    }
+
+    /**
+     * Report what this tablet could talk to besides USB.
+     *
+     * <p>Sent once at startup so the question "can this thing take a Bluetooth sensor at all" is
+     * answered from the capture rather than by buying hardware first. Reading the adapter needs
+     * only the normal BLUETOOTH permission; nothing is scanned, paired or connected.
+     */
+    private void publishCapabilities() {
+        try {
+            JSONObject payload = new JSONObject();
+            boolean le = getPackageManager().hasSystemFeature(
+                    android.content.pm.PackageManager.FEATURE_BLUETOOTH_LE);
+            BluetoothAdapter adapter = null;
+            boolean enabled = false;
+            try {
+                adapter = BluetoothAdapter.getDefaultAdapter();
+                enabled = adapter != null && adapter.isEnabled();
+            } catch (RuntimeException e) {
+                // Some locked-down builds refuse the adapter outright; that is itself the answer.
+                payload.put("bluetoothError", String.valueOf(e.getMessage()));
+            }
+            payload.put("bluetoothLe", le);
+            payload.put("bluetoothAdapter", adapter != null);
+            payload.put("bluetoothEnabled", enabled);
+            payload.put("androidSdk", Build.VERSION.SDK_INT);
+            payload.put("screenWidthPx", getResources().getDisplayMetrics().widthPixels);
+            payload.put("screenHeightPx", getResources().getDisplayMetrics().heightPixels);
+            payload.put("density", getResources().getDisplayMetrics().density);
+            publishEvent("device-capabilities", payload, true);
+            log("Bluetooth LE " + (le ? "supported" : "NOT supported")
+                    + ", adapter " + (adapter != null ? (enabled ? "on" : "off") : "absent"));
+        } catch (JSONException e) {
+            setUploadStatus("Capability report failed: " + e.getMessage());
+        }
     }
 
     /** Which screen is on show, for naming the saved file. */
@@ -1196,10 +1241,12 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         gameStrip = new GaugeStripView(this);
         // Long-press anywhere on the strip to photograph the screen. Deliberately invisible:
         // every game already has the strip, and none of them need another control.
-        gameStrip.setOnLongClickListener(v -> {
-            captureScreenshot(screenLabel());
-            return true;
-        });
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            gameStrip.setOnLongClickListener(v -> {
+                captureScreenshot(screenLabel());
+                return true;
+            });
+        }
         // 62dp -> 74dp -> 92dp: this strip is the instrument during a game, and the games
         // themselves lose very little by it.
         LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(
@@ -1649,13 +1696,15 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         findLaptop.setOnClickListener(v -> discoverLaptop());
         uploadControls.addView(findLaptop, weightParams());
 
-        Button shotButton = button("Screenshot");
-        shotButton.setOnClickListener(v -> {
-            setDiagnosticsOpen(false);
-            // Let the drawer finish sliding out, or it ends up in the picture.
-            screenHost.postDelayed(() -> captureScreenshot(screenLabel()), 450);
-        });
-        uploadControls.addView(shotButton, weightParams());
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            Button shotButton = button("Screenshot");
+            shotButton.setOnClickListener(v -> {
+                setDiagnosticsOpen(false);
+                // Let the drawer finish sliding out, or it ends up in the picture.
+                screenHost.postDelayed(() -> captureScreenshot(screenLabel()), 450);
+            });
+            uploadControls.addView(shotButton, weightParams());
+        }
 
         Button snapshotButton = button("Snapshot");
         snapshotButton.setOnClickListener(v -> sendSnapshot("manual", true));
@@ -2756,6 +2805,7 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
                 log("Found laptop dashboard at " + discoveredUrl);
                 publishSimpleEvent("laptop-discovered", true);
                 fetchIonToken();
+                runOnUiThread(this::publishCapabilities);
                 sendSnapshot("laptop-discovered", true);
             } catch (SocketTimeoutException e) {
                 if (TextUtils.isEmpty(serverUrl)) {
