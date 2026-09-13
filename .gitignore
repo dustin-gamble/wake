@@ -1,3 +1,6 @@
+# This machine's dashboard address, used by tools/publish-apk.sh.
+.laptop-url
+
 # Build output
 .gradle/
 build/

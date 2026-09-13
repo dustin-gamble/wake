@@ -9,7 +9,9 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(cd "$ROOT/.." && pwd)
-LAPTOP_URL=${LAPTOP_URL:-http://192.168.0.137:8787}
+# Your dashboard URL: put it in .laptop-url (gitignored) or pass LAPTOP_URL=... .
+# Left empty the local build simply discovers the laptop over UDP like the public one.
+LAPTOP_URL=${LAPTOP_URL:-$(cat "$ROOT/.laptop-url" 2>/dev/null || true)}
 
 export ANDROID_HOME="$WORK/android-sdk"
 export ANDROID_SDK_ROOT="$WORK/android-sdk"
