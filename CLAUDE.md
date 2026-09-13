@@ -197,7 +197,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.7.3-debug
+3.7.4-debug
 ```
 
 Build and publish in one go (this is the loop used all session):
@@ -359,6 +359,17 @@ Official map: [tbressler/waterrower-core MemoryLocation.java](https://github.com
 - What remains is poll quantisation: the counter is read about once a second, so a per-stroke
   reaction lands 2s or 3s after the last one rather than evenly at 2.4s. That jitter is inherent
   at this poll rate and is not worth chasing with a shorter command gap - see the write path.
+- **`088` is not instantaneous power. It updates once per stroke.** Measured over 145s of rowing
+  at 26spm: 48 distinct watt readings, each held a median of **2.53s** - the stroke period. So the
+  figure on screen is the *previous* drive's power until the current one finishes, and pulling
+  harder cannot move it until the stroke ends. That lag is the machine, not the app; do not try to
+  smooth it away, and do not describe `088` as instantaneous anywhere.
+- **Displayed stroke rate rises at once and falls slowly** (3.7.4). Dips to 19-21 in ~9% of samples
+  read as missed strokes, but the first fix - a trimmed mean - discarded real hard strokes as
+  outliers, reported from the machine as "when I stroke hard it doesn't capture". **No symmetric
+  filter can do both**: one sample in eight moves a mean by an eighth. The filter is now asymmetric,
+  the same shape as the speed needle: any higher reading shows immediately, a drop is approached at
+  2.5spm/s (6 when the rate reads zero). Pinned by a test that checks both directions.
 - **Distance is real** via `057`, since 1.2.0. The earlier integrated estimate under-counted
   badly (350m against a true 1914m) and is now only a fallback.
 - **Pace is derived** as `50000 / avgSpeedCmS`, clamped: nothing below 50 cm/s, nothing

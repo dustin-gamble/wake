@@ -2706,6 +2706,12 @@ public class MainActivity extends Activity
         payload.put("distanceMeters", status.distanceMeters);
         payload.put("strokes", status.strokes);
         payload.put("strokeRate", status.strokeRate);
+        // The smoothed figure is what the gauges show, so the capture has to carry it too,
+        // or a rate complaint cannot be checked against what was actually on screen.
+        payload.put("strokeRateAverage", status.strokeRateAverage);
+        // The coast trigger rests on this; without it in the capture, a "it froze" report
+        // cannot be told apart from a rower at rest.
+        payload.put("stillRowing", status.stillRowing);
         payload.put("watts", status.watts);
         payload.put("heartRate", status.heartRate);
         payload.put("paceSecondsPer500m", status.paceSecondsPer500m);
