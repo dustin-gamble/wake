@@ -35,6 +35,9 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -155,6 +158,13 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
     private LinearLayout deviceList;
     private TextView statusView;
     private TextView uploadStatusView;
+    private TextView controllerView;
+    /** Latest gamepad state. Steering lives here so no game has to know about Bluetooth. */
+    private String controllerName = "";
+    private float padX;
+    private float padY;
+    private String padButton = "";
+    private long padLastMs;
     private TextView logView;
     private TextView stateChip;
     private TextView connectionBanner;
@@ -989,6 +999,85 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         }
     }
 
+    /**
+     * A Bluetooth gamepad arrives as ordinary Android input, so there is no Bluetooth code here
+     * and none is needed: pair it in Settings and the events simply show up. That is the whole
+     * argument for a controller over a handle-mounted IMU - no firmware, no sensor fusion, and
+     * an absolute stick position instead of a tilt that has to be told apart from acceleration.
+     */
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if ((event.getSource() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                && event.getAction() == MotionEvent.ACTION_MOVE) {
+            padX = axis(event, MotionEvent.AXIS_X);
+            padY = axis(event, MotionEvent.AXIS_Y);
+            if (padX == 0f && padY == 0f) {
+                // Some pads (a sideways Joy-Con among them) report the stick on the hat or the
+                // second axis pair instead.
+                padX = axis(event, MotionEvent.AXIS_Z);
+                padY = axis(event, MotionEvent.AXIS_RZ);
+            }
+            InputDevice device = event.getDevice();
+            controllerName = device != null ? device.getName() : "gamepad";
+            padLastMs = System.currentTimeMillis();
+            return true;
+        }
+        return super.onGenericMotionEvent(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (event != null && (event.getSource() & InputDevice.SOURCE_GAMEPAD)
+                == InputDevice.SOURCE_GAMEPAD && keyCode != KeyEvent.KEYCODE_BACK) {
+            padButton = KeyEvent.keyCodeToString(keyCode).replace("KEYCODE_", "");
+            InputDevice device = event.getDevice();
+            controllerName = device != null ? device.getName() : "gamepad";
+            padLastMs = System.currentTimeMillis();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    /** Axis value with the device's own dead zone applied, so a worn stick does not drift. */
+    private static float axis(MotionEvent event, int which) {
+        InputDevice device = event.getDevice();
+        float value = event.getAxisValue(which);
+        if (device != null) {
+            InputDevice.MotionRange range = device.getMotionRange(which, event.getSource());
+            if (range != null && Math.abs(value) <= range.getFlat()) {
+                return 0f;
+            }
+        }
+        return Math.abs(value) < 0.08f ? 0f : value;
+    }
+
+    /** What the diagnostics drawer shows about the controller, if there is one. */
+    private String controllerLine() {
+        StringBuilder found = new StringBuilder();
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device == null) {
+                continue;
+            }
+            int sources = device.getSources();
+            boolean pad = (sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                    || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+            if (pad) {
+                if (found.length() > 0) {
+                    found.append(", ");
+                }
+                found.append(device.getName());
+            }
+        }
+        if (found.length() == 0) {
+            return "Controller: none paired";
+        }
+        boolean live = System.currentTimeMillis() - padLastMs < 3000;
+        return "Controller: " + found
+                + (live ? String.format(Locale.US, "  |  X %+.2f  Y %+.2f  %s", padX, padY, padButton)
+                        : "  |  paired, no input yet - move a stick");
+    }
+
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
         log(message);
@@ -1019,6 +1108,7 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
             payload.put("bluetoothAdapter", adapter != null);
             payload.put("bluetoothEnabled", enabled);
             payload.put("androidSdk", Build.VERSION.SDK_INT);
+            payload.put("controllers", controllerLine());
             payload.put("screenWidthPx", getResources().getDisplayMetrics().widthPixels);
             payload.put("screenHeightPx", getResources().getDisplayMetrics().heightPixels);
             payload.put("density", getResources().getDisplayMetrics().density);
@@ -1710,6 +1800,12 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         snapshotButton.setOnClickListener(v -> sendSnapshot("manual", true));
         uploadControls.addView(snapshotButton, weightParams());
         panel.addView(uploadControls, marginTop(dp(4)));
+
+        controllerView = new TextView(this);
+        controllerView.setText("Controller: none paired");
+        controllerView.setTextColor(getColorCompat(R.color.text_faint));
+        controllerView.setTextSize(11);
+        panel.addView(controllerView, marginTop(dp(6)));
 
         uploadStatusView = new TextView(this);
         uploadStatusView.setText("Laptop upload: waiting");
@@ -2622,6 +2718,9 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
                     paceValue.setText(formatPace(Math.round(shownPace)));
                     wattsValue.setText(Math.round(shownWatts) + " W");
                     strokeRateValue.setText(String.valueOf(Math.round(shownRate)));
+                }
+                if (controllerView != null && diagnosticsOpen) {
+                    controllerView.setText(controllerLine());
                 }
                 uiTicker.postDelayed(this, 33);
             }

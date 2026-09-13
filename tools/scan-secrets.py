@@ -11,6 +11,7 @@ A note on why this exists rather than a `grep -r`: recursive grep in some enviro
 skips files and reports a clean tree that is not clean. Reading the blobs out of the index is
 the only thing that answers the question actually being asked.
 """
+import pathlib
 import re
 import subprocess
 import sys
@@ -21,11 +22,27 @@ PATTERNS = {
     'AWS access key':         re.compile(rb'AKIA[0-9A-Z]{16}'),
     'GitHub token':           re.compile(rb'gh[pousr]_[A-Za-z0-9]{30,}'),
     'Slack token':            re.compile(rb'xox[baprs]-[A-Za-z0-9-]{10,}'),
-    'private LAN address':    re.compile(rb'192\.168\.\d{1,3}\.\d{1,3}'),
     'home directory':         re.compile(rb'/Users/[a-z]'),
+    # A credential-shaped VALUE, not a constant name: long, and mixing cases and digits the way
+    # a generated key does. `PREF_TOKEN = "cesium-ion-token"` is a key name and must not trip it.
     'inline secret':          re.compile(rb'(?i)(api[_-]?key|secret|password|token)\s*[:=]\s*'
-                                         rb'["\'][^"\']{16,}["\']'),
+                                         rb'["\'](?=[^"\']*[A-Z])(?=[^"\']*[0-9])'
+                                         rb'[A-Za-z0-9+/=_-]{24,}["\']'),
 }
+
+def real_lan_address():
+    """This machine's actual dashboard address, if it is configured.
+
+    Only the real one is blocked. A documentation placeholder like the UI hint
+    "for example http://192.168.1.25:8787" is not a leak, and blocking every RFC1918
+    address would train everyone to bypass the hook - which is worse than the problem.
+    """
+    try:
+        url = pathlib.Path('.laptop-url').read_text().strip()
+    except OSError:
+        return None
+    found = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', url)
+    return found.group(1).encode() if found else None
 
 # Files that legitimately contain a pattern. Keep this list short and justified.
 ALLOWED = set()   # nothing needs an exemption; keep it that way
@@ -44,6 +61,9 @@ def main():
         if name in ALLOWED:
             continue
         blob = subprocess.run(['git', 'show', ':' + name], capture_output=True).stdout
+        lan = real_lan_address()
+        if lan and lan in blob:
+            hits.append(('this machine\'s LAN address', name, lan.decode()))
         for label, pattern in PATTERNS.items():
             found = pattern.search(blob)
             if found:
