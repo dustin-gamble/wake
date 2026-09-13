@@ -32,6 +32,8 @@ abstract class GameView extends View {
      * for internal timers that must not pause (an interval's rest, a boss's attack cadence).
      */
     protected double activeSeconds;
+    private float steering;
+    private boolean steeringLive;
     private long lastDrivingMs;
     private static final long CLOCK_GRACE_MS = 15000;
 
@@ -146,6 +148,32 @@ abstract class GameView extends View {
 
     double activeSeconds() {
         return activeSeconds;
+    }
+
+    /**
+     * Steering, -1 (hard left) to +1 (hard right), from the tilt sensor on the handle.
+     *
+     * <p>Zero when no sensor is connected, so a game can use it unconditionally and simply does
+     * not turn without one. The activity feeds it; games never touch Bluetooth.
+     */
+    protected float steering() {
+        return steering;
+    }
+
+    void setSteering(float value) {
+        steering = Math.max(-1f, Math.min(1f, value));
+    }
+
+    /** True once a handle tilt sensor is actually feeding steering. */
+    protected boolean hasSteering() {
+        return steeringLive;
+    }
+
+    void setSteeringLive(boolean live) {
+        steeringLive = live;
+        if (!live) {
+            steering = 0f;
+        }
     }
 
     /** Coasted boat speed, for the shared vitals strip. */

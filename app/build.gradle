@@ -18,8 +18,8 @@ android {
         applicationId 'com.codex.waterrowerdiagnostic'
         minSdk 23
         targetSdk 28
-        versionCode 63
-        versionName '3.7.2'
+        versionCode 64
+        versionName '3.7.3'
         buildConfigField 'String', 'DEFAULT_SERVER_URL', "\"${escapedDiagnosticServerUrl}\""
         buildConfigField 'boolean', 'SCREENSHOT_UPLOAD', "${screenshotUpload == 'true'}"
     }

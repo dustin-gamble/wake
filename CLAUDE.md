@@ -197,7 +197,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.7.1-debug
+3.7.3-debug
 ```
 
 Build and publish in one go (this is the loop used all session):
@@ -456,6 +456,35 @@ A `device-capabilities` event is now sent once per session, forced, carrying
 answer the handle-mounted IMU question from the capture instead of by buying hardware. Reading
 the adapter needs only the normal `BLUETOOTH` permission; nothing is scanned, paired or
 connected, and that is the extent of the Bluetooth code in the app.
+
+## Steering: the handle tilt sensor (3.7.3)
+
+Hardware: a **WitMotion WT901BLECL** strapped to the rowing handle. Chosen over a cheaper bare
+IMU because it runs its own Kalman filter and reports *angles*, not raw acceleration - which
+matters more here than in most places, since the handle travels ~1.2m per stroke and a bare
+accelerometer cannot separate gravity from that motion. The gyro carries orientation through the
+drive; the fusion happens in the sensor.
+
+- `HandleSensor.java` - BLE scan, connect, notify, and frame reassembly. Notifications do not
+  respect message boundaries, exactly like the rower's serial link, so frames are buffered to 11
+  bytes and checksummed before decoding. Angle packet is `0x55 0x53 <6 bytes> ... <checksum>`,
+  little-endian int16, degrees = raw / 32768 * 180.
+- **The service and characteristic UUIDs are documented, not verified.** On connect the callback
+  logs every service and characteristic it finds to the laptop as a `handle-sensor` event, and
+  falls back to the first characteristic that supports notifications. Fix the constants from that
+  log on first contact and drop the fallback if it proves unnecessary.
+- **Android 9 returns an empty BLE scan without `ACCESS_FINE_LOCATION` - no error, just nothing.**
+  It is requested at runtime before the first scan. Do not remove that.
+- Games read `steering()` on `GameView`, -1 to +1, and `hasSteering()` to know whether a sensor is
+  actually feeding it. No game touches Bluetooth.
+- Neutral is captured on the first reading, because the sensor can be strapped on at any angle.
+  **Centre Steering** in the diagnostics drawer re-zeroes it after remounting. Full lock at 35
+  degrees of roll, 3 degree dead zone.
+
+**Canyon Chase drove lateral position from boat speed** across a 1.0-4.8 m/s band. This machine is
+rowed at 3.0-4.2, so the craft sat pinned against the right wall and the only way to steer left was
+to stop rowing - which is exactly what "it just runs into the wall" meant. It now steers from the
+handle when one is connected, and the speed fallback spans the speeds actually produced.
 
 ## Game Architecture
 

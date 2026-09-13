@@ -87,9 +87,23 @@ final class CanyonChaseGame extends GameView {
         return (float) (Math.sin(metres / 46.0) * 9.5 + Math.sin(metres / 17.0) * 3.2);
     }
 
-    /** Where your speed puts you across the canyon. */
+    /**
+     * Where you sit across the canyon.
+     *
+     * <p>With a handle tilt sensor this is simply where you steered, which is what the game was
+     * always meant to be. Without one it falls back to speed - and that fallback was unplayable:
+     * it mapped 1.0-4.8 m/s across the full width, while this machine is rowed at 3.0-4.2, so the
+     * craft sat pinned against the right wall and the only way to turn left was to stop rowing.
+     * The fallback band now spans the speeds actually produced.
+     */
+    private static final float FALLBACK_LO = 2.6f;
+    private static final float FALLBACK_HI = 4.2f;
+
     private float lateralFor(float speed) {
-        float f = Math.max(0f, Math.min(1f, (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)));
+        if (hasSteering()) {
+            return steering() * (CANYON_HALF - 2.5f);
+        }
+        float f = Math.max(0f, Math.min(1f, (speed - FALLBACK_LO) / (FALLBACK_HI - FALLBACK_LO)));
         return (f - 0.5f) * 2f * (CANYON_HALF - 2.5f);
     }
 
@@ -108,7 +122,7 @@ final class CanyonChaseGame extends GameView {
         // Lateral: eased toward where speed says, so it feels like a craft, not a cursor.
         float targetLat = lateralFor(speed);
         float prevLat = lateral;
-        lateral += (targetLat - lateral) * Math.min(1f, 2.0f * dt);
+        lateral += (targetLat - lateral) * Math.min(1f, (hasSteering() ? 6.0f : 2.0f) * dt);
         lateralVel = dt > 0 ? (lateral - prevLat) / dt : 0f;
         // Bank into the turn: your own drift plus the canyon bending under you.
         float canyonBend = (centreAt(x + 24) - centreAt(x)) * 0.9f;

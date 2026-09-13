@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- Read-only: reports whether this tablet has BLE at all. Nothing is scanned or paired. -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
+    <!-- Scanning for the handle tilt sensor. On Android 9 a BLE scan returns nothing at all
+         without location permission - no error, just an empty result - so it is requested at
+         runtime before the first scan. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <uses-feature
         android:name="android.hardware.usb.host"

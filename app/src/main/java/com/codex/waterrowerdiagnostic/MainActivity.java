@@ -79,7 +79,8 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class MainActivity extends Activity implements CoastFlightGame.Host {
+public class MainActivity extends Activity
+        implements CoastFlightGame.Host, HandleSensor.Listener {
     private static final String ACTION_USB_PERMISSION =
             "com.codex.waterrowerdiagnostic.USB_PERMISSION";
     private static final String APP_NAME = "WAKE";
@@ -159,6 +160,17 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
     private TextView statusView;
     private TextView uploadStatusView;
     private TextView controllerView;
+    private TextView handleView;
+    private HandleSensor handleSensor;
+    private String handleState = "Handle sensor: not started";
+    /** Roll treated as straight ahead; the sensor can be strapped on at any angle. */
+    private float handleZeroRoll = Float.NaN;
+    private float handleRoll;
+    private float steering;
+    private static final int PERM_SCAN = 4711;
+    /** Full lock at this much roll from neutral. A wrist rolls comfortably about this far. */
+    private static final float STEER_FULL_DEG = 35f;
+    private static final float STEER_DEADZONE_DEG = 3f;
     /** Latest gamepad state. Steering lives here so no game has to know about Bluetooth. */
     private String controllerName = "";
     private float padX;
@@ -898,6 +910,94 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         fetchIonToken();
         showGame(coastFlight, gameScreen("COAST FLIGHT", coastFlight, null, coastFlight.webView()));
         publishSimpleEvent("coast-flight-opened", true);
+    }
+
+    /* ---------- HandleSensor.Listener ---------- */
+
+    @Override
+    public void onHandleState(String state) {
+        handleState = "Handle: " + state;
+        log(handleState);
+    }
+
+    /**
+     * Turn handle roll into a steering axis.
+     *
+     * <p>Neutral is wherever the handle sat when the first reading arrived, because the sensor
+     * can be strapped on at any angle - re-zero from diagnostics after remounting it. A small
+     * dead zone keeps the boat straight when you are just rowing.
+     */
+    @Override
+    public void onHandleAngles(float roll, float pitch, float yaw) {
+        handleRoll = roll;
+        if (Float.isNaN(handleZeroRoll)) {
+            handleZeroRoll = roll;
+        }
+        float offset = roll - handleZeroRoll;
+        if (offset > 180f) {
+            offset -= 360f;
+        } else if (offset < -180f) {
+            offset += 360f;
+        }
+        if (Math.abs(offset) < STEER_DEADZONE_DEG) {
+            offset = 0f;
+        }
+        steering = Math.max(-1f, Math.min(1f, offset / STEER_FULL_DEG));
+        if (currentGame != null) {
+            currentGame.setSteeringLive(true);
+            currentGame.setSteering(steering);
+        }
+    }
+
+    @Override
+    public void onHandleReport(String stage, String detail) {
+        log("Handle " + stage + ": " + detail);
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("stage", stage);
+            payload.put("detail", detail == null ? "" : detail);
+            publishEvent("handle-sensor", payload, true);
+        } catch (JSONException e) {
+            setUploadStatus("Event failed: " + e.getMessage());
+        }
+    }
+
+    /** Android 9 returns an empty BLE scan without location permission, and no error with it. */
+    private void startHandleSensor() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.ACCESS_FINE_LOCATION},
+                    PERM_SCAN);
+            return;
+        }
+        if (handleSensor == null) {
+            handleSensor = new HandleSensor(this, this);
+        }
+        handleZeroRoll = Float.NaN;
+        handleSensor.start();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode == PERM_SCAN) {
+            if (results.length > 0
+                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                startHandleSensor();
+            } else {
+                handleState = "Handle: location permission refused, cannot scan";
+                log(handleState);
+            }
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+    }
+
+    private String handleLine() {
+        if (handleSensor == null) {
+            return handleState + "  (tap Find Handle)";
+        }
+        return String.format(Locale.US, "%s  |  roll %+.1f\u00b0  steer %+.2f",
+                handleState, handleRoll, steering);
     }
 
     /* ---------- CoastFlightGame.Host ---------- */
@@ -1801,6 +1901,26 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
         uploadControls.addView(snapshotButton, weightParams());
         panel.addView(uploadControls, marginTop(dp(4)));
 
+        handleView = new TextView(this);
+        handleView.setText(handleState);
+        handleView.setTextColor(getColorCompat(R.color.text_faint));
+        handleView.setTextSize(11);
+        panel.addView(handleView, marginTop(dp(6)));
+
+        LinearLayout handleControls = new LinearLayout(this);
+        handleControls.setOrientation(LinearLayout.HORIZONTAL);
+        Button findHandle = button("Find Handle");
+        findHandle.setOnClickListener(v -> startHandleSensor());
+        handleControls.addView(findHandle, weightParams());
+        Button zeroHandle = button("Centre Steering");
+        zeroHandle.setOnClickListener(v -> {
+            handleZeroRoll = handleRoll;
+            steering = 0f;
+            toast("Steering centred at " + Math.round(handleRoll) + "\u00b0");
+        });
+        handleControls.addView(zeroHandle, weightParams());
+        panel.addView(handleControls, marginTop(dp(4)));
+
         controllerView = new TextView(this);
         controllerView.setText("Controller: none paired");
         controllerView.setTextColor(getColorCompat(R.color.text_faint));
@@ -2443,6 +2563,9 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
     }
 
     private void exitApp() {
+        if (handleSensor != null) {
+            handleSensor.stop();
+        }
         saveLastSession();
         commitJourney();
         publishSimpleEvent("app-exit-requested", true);
@@ -2721,6 +2844,7 @@ public class MainActivity extends Activity implements CoastFlightGame.Host {
                 }
                 if (controllerView != null && diagnosticsOpen) {
                     controllerView.setText(controllerLine());
+                    handleView.setText(handleLine());
                 }
                 uiTicker.postDelayed(this, 33);
             }
