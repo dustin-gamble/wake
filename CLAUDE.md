@@ -282,6 +282,34 @@ inter-command gap (down from 40ms) and dropping the four addresses this unit ref
 the rower was also physically reconnected during the same period, so the evidence does not
 separate them. If the stall returns, those are the first two knobs.
 
+### It came back on 2026-09-13, and nothing in software fixed it
+
+After a clean 10km session on 3.7.3, the link began failing again mid-morning: `rc=-1` at
+`after=0msec`, first failure 2-3s after every open, cooldown, reopen, repeat to `s4-reopen-limit`.
+
+**Eliminated, in this order, all of them by experiment:**
+
+- *The build I had just shipped.* A version table showed 9 clean opens across 1.5.0-3.7.3 and 5
+  failing opens all on 3.7.4, which looked decisive. It was not: all five were inside one 90-second
+  bad spell. **Reverting 3.7.4 to 3.7.3's exact code and reinstalling changed nothing.** Correlating
+  a fault with a version needs opens spread across time, not a cluster.
+- *Fast relaunch after exit.* Historic clean opens exist at gaps of 0s, 10s, 11s, 12s and 15s.
+- *Cable replug.* 16 faults in the 40s after `usb-attached`.
+- *Monitor power-cycle.* 11 faults after.
+- *Full tablet reboot.* 21 faults after - the worst of the three.
+- *Pulse traffic saturating the link.* The user reported "dead while rowing, alive when stopped",
+  which fits it perfectly. The data refutes it: in 5-second buckets, **13% of spinning buckets
+  contained a write failure against 35% of still ones**. Failures are *more* common at idle. A
+  plausible mechanism that matches a symptom is still worth testing before acting on.
+
+**Untested at time of writing: the USB cable and the OTG adapter.** An instant `rc=-1` with no
+timeout, at idle, surviving every reset, is what a marginal physical connection looks like. Note
+that the 0.6.x episode above also ended around a physical reconnection.
+
+**If you are picking this up:** do not start by changing code. The link either works or it does
+not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
+`app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
+
 ### What was measured while it was broken
 
 Time from `serial-opened` to first write failure, 36 sessions across five builds:
