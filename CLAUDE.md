@@ -469,6 +469,17 @@ visible (skipped for configuration changes); the library's `closeInt` releases b
 `onStart` retakes the rower only if `onStop` released it, so the normal launch - where auto-connect
 already opens the port - is not a double open.
 
+**Verified on the machine - Exit path (3.11.0):** left WAKE with the Exit button at 20:01:59;
+`connection-closed` followed 0.73 s later, and in the next 25 s WAKE produced zero reclaims, zero
+writes, zero probes, zero status and zero raw bytes. Checked with `giveback.py` (scratchpad),
+which also bounds the window at the next `app-started` so a reopen is not miscounted.
+
+**Not yet verified - Home/background path.** Exit already closed the connection before the
+take-it-back change, so it proves little about the new code. The path that change added is
+`onStop` releasing the rower while the process keeps running (Home, or switching straight to
+Ergatta). It emits `s4-interface-released`; run `giveback.py <start> report home` to check it, and
+get the rower's word that Ergatta then reads strokes. Until both hold, treat the guardrail as open.
+
 **Why this sits inside the Ergatta guardrail:** Ergatta is not disabled, removed or modified, and
 its behaviour with WAKE closed or backgrounded is exactly as before. It only loses the rower while
 WAKE is the app on screen. **If you change this, keep the release in `onStop`.** Without it WAKE
