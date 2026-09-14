@@ -474,6 +474,27 @@ its behaviour with WAKE closed or backgrounded is exactly as before. It only los
 WAKE is the app on screen. **If you change this, keep the release in `onStop`.** Without it WAKE
 would deprive Ergatta of the rower whenever it is merely in the background.
 
+### It works: 3.10.0, first minute on the machine
+
+```
+                        3.9.3             3.10.0
+packets framed          1 -> 6            1 -> 2,460
+last packet             2.5 s after open  60.0 s - still flowing
+write failures          12                0
+stroke counter updates  0                 14
+reclaims                -                 +2.6 s  +5.5 s  +8.4 s  +14.3 s, every one control and data true
+```
+
+Pulses ran at 40/s - the same rate as the healthy morning session. The other owner re-takes the
+interface about every 3 s; WAKE takes it back inside the one-second write-retry window, so no
+request is actually lost and none is logged as a failure. That also confirms the owner is one a
+forcing claim can displace - consistent with the kernel driver re-binding.
+
+**Still to verify on the machine:** that strokes arrive promptly rather than in lumps (one 20 s
+stretch showed +5 where 30 spm predicts ~10), and the release half - that `s4-interface-released`
+fires on leaving WAKE and Ergatta then reads the rower normally. The second is the guardrail; do
+not ship anything that weakens it.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
