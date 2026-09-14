@@ -108,6 +108,9 @@ Everything is in `app/src/main/java/com/codex/waterrowerdiagnostic/`.
 | `MainActivity.java` | USB link, screens, home grid, diagnostics drawer. Large. |
 | `GameView.java` | Base class for every game: coasted speed, smoothed distance, rowing clock. |
 | `Coast.java`, `BoatSpeedModel.java` | How every needle and boat winds down. Tested. |
+| `PulseMeter.java` | Paddle pulses into power, work, stroke shape and drag. Tested. |
+| `RowerProfile.java` | The rower's learned range - set game targets from it. Tested. |
+| `Progress.java` | Levels, weekly goal and streak. Tested. |
 | `*Game.java` | One file per game. `ZoneRowGame` and `CollectorGame` are small, readable examples. |
 | `GameIconView.java` | The drawn icons on the home grid. |
 | `app/src/main/assets/coastflight/` | Coast Flight's page — Chrome 70 JavaScript and CSS only. |
@@ -124,10 +127,9 @@ Everything is in `app/src/main/java/com/codex/waterrowerdiagnostic/`.
 - **Never hold a displayed value flat** while waiting for a fresh reading.
 - `onStroke()` fires about a second after the drive. Use it to count strokes, never to read power.
   Peaks come from `onStatusChanged()`.
-- **Tune difficulty to the actual rower.** The original was tuned to one person: median 129 W,
-  3.85 m/s, 25 spm, 2:08/500m. Your human may be faster or slower. With the dashboard running and
-  streaming on, their real numbers land in `server/data/events.jsonl` — measure before setting
-  thresholds.
+- **Tune difficulty to the actual rower: use `profile`** (a `RowerProfile` every game gets). It
+  learns their low, typical and high power, speed and rate; never hard-code watts or m/s.
+- Run `./gradlew lintDebug` and check for `NewApi` before shipping: the tablet is Android 9.
 - Do not add addresses to the monitor's poll loop casually; every one slows all the others.
 - Coast Flight runs in a **Chrome 70 WebView**: no `?.`, no `??`, no CSS `inset` or flex `gap`.
   A desktop browser hides these; the tablet shows a blank screen.
@@ -136,10 +138,11 @@ Everything is in `app/src/main/java/com/codex/waterrowerdiagnostic/`.
 
 ```sh
 S=app/src/main/java/com/codex/waterrowerdiagnostic T=tools/prototest/com/codex/waterrowerdiagnostic
-javac -d /tmp/wake-tests $S/S4Protocol.java $S/Coast.java $S/BoatSpeedModel.java \
-  $T/S4ProtocolTest.java $T/BoatSpeedModelTest.java
-java -cp /tmp/wake-tests com.codex.waterrowerdiagnostic.S4ProtocolTest
-java -cp /tmp/wake-tests com.codex.waterrowerdiagnostic.BoatSpeedModelTest
+javac -d /tmp/wake-tests $S/S4Protocol.java $S/PulseMeter.java $S/Coast.java $S/BoatSpeedModel.java \
+  $S/RowerProfile.java $S/Progress.java $T/*.java
+for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest; do
+  java -cp /tmp/wake-tests com.codex.waterrowerdiagnostic.$t
+done
 ```
 
 ## Sharing back

@@ -197,8 +197,19 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.7.3-debug
+3.18.2-debug
 ```
+
+**Check newer Android APIs with lint before trusting a build on the tablet** (Android 9, API 28):
+
+```sh
+./gradlew lintDebug      # look for NewApi in app/build/reports/lint-results-debug.txt
+```
+
+`assembleDebug` does not run it. 3.18.0 compiled a call to `Math.floorMod(long, int)`, which only
+exists from Android 13; D8 happened to backport it, so the tablet was never at risk, but the call
+now uses plain arithmetic. The `MissingPermission` errors lint reports are Android 12+ Bluetooth
+rules and do not apply at targetSdk 28.
 
 Build and publish in one go (this is the loop used all session):
 

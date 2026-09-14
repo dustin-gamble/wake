@@ -150,10 +150,11 @@ Protocol and physics run without Android, so they are tested with plain `javac`:
 
 ```sh
 S=app/src/main/java/com/codex/waterrowerdiagnostic T=tools/prototest/com/codex/waterrowerdiagnostic
-javac -d /tmp/t $S/S4Protocol.java $S/Coast.java $S/BoatSpeedModel.java \
-  $T/S4ProtocolTest.java $T/BoatSpeedModelTest.java
-java -cp /tmp/t com.codex.waterrowerdiagnostic.S4ProtocolTest
-java -cp /tmp/t com.codex.waterrowerdiagnostic.BoatSpeedModelTest
+javac -d /tmp/t $S/S4Protocol.java $S/PulseMeter.java $S/Coast.java $S/BoatSpeedModel.java \
+  $S/RowerProfile.java $S/Progress.java $T/*.java
+for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest; do
+  java -cp /tmp/t com.codex.waterrowerdiagnostic.$t
+done
 ```
 
 ## Layout
