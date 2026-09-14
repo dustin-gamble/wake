@@ -145,6 +145,15 @@ public class MainActivity extends Activity
     private static final long WRITE_COOLDOWN_MS = 1500;
     /** Measured on this unit: cooldowns never clear a wedged pipe, only a reopen does. */
     private static final int WRITE_FAILURES_BEFORE_REOPEN = 10;
+    /**
+     * Ride through a write blackout instead of reacting to it. Six probes on 3.9.0 showed every
+     * host-to-device transfer failing at once - bulk and control alike - with the connection alive
+     * and the interface claimed, then working again 0.1-0.7s later. Retrying the same command
+     * every 100ms for up to a second outlasts every blackout measured.
+     */
+    private static final int WRITE_RETRIES = 10;
+    private static final long WRITE_RETRY_GAP_MS = 100;
+    private static final long WRITE_RETRY_BUDGET_MS = 1000;
     private static final int START_COMMAND_ATTEMPTS = 4;
     /** Stop thrashing the port if reopening is not restoring writes either. */
     private static final int MAX_REOPENS_PER_SESSION = 4;
@@ -2346,59 +2355,63 @@ public class MainActivity extends Activity
                     }
                     lastS4Command = command.trim();
 
-                    try {
-                        synchronized (ioLock) {
-                            port.write(command.getBytes(StandardCharsets.US_ASCII), WRITE_TIMEOUT_MS);
+                    byte[] commandBytes = command.getBytes(StandardCharsets.US_ASCII);
+                    IOException writeError = null;
+                    boolean written = false;
+                    long retryStart = System.currentTimeMillis();
+                    for (int attempt = 0; attempt < WRITE_RETRIES && protocolPolling.get(); attempt++) {
+                        try {
+                            synchronized (ioLock) {
+                                port.write(commandBytes, WRITE_TIMEOUT_MS);
+                            }
+                            written = true;
+                            break;
+                        } catch (IOException e) {
+                            writeError = e;
+                            // Report what the USB stack says on the first refusal; if its raw
+                            // transfer went through, the command was delivered.
+                            if (attempt == 0 && probeWritePath(port, command, e.getMessage())) {
+                                written = true;
+                                break;
+                            }
+                            if (System.currentTimeMillis() - retryStart > WRITE_RETRY_BUDGET_MS) {
+                                break;
+                            }
+                            Thread.sleep(WRITE_RETRY_GAP_MS);
                         }
+                    }
+
+                    if (written) {
                         if (consecutiveWriteFailures > 0) {
                             log("USB write path recovered after " + consecutiveWriteFailures + " failures");
                             publishSimpleEvent("s4-write-recovered", false);
                         }
                         consecutiveWriteFailures = 0;
                         writePathStalled = false;
-                    } catch (IOException e) {
-                        // No interface reclaim here. 0.5.1 measured reclaimed=true with
-                        // writeSucceededAfterReclaim=false 7 times out of 7: the claim is never
-                        // the problem, and the retry only burned a full 800ms write timeout on
-                        // every failure. Recovery comes from the backoff below.
-                        // A failed bulk transfer is a USB stall, not a refused command: keep the
-                        // field in rotation and back off so the pipe can recover.
+                    } else {
                         s4Protocol.abandonPoll();
-                        // Probe before counting it: if the write can be recovered in place, the
-                        // backoff and the port teardown that follows it are what the user saw as
-                        // "dead for a bit, then a spike".
-                        if (probeWritePath(port, command, e.getMessage())) {
-                            if (consecutiveWriteFailures > 0) {
-                                publishSimpleEvent("s4-write-recovered", false);
-                            }
-                            consecutiveWriteFailures = 0;
-                            writePathStalled = false;
-                            Thread.sleep(commandGapMs);
-                            continue;
-                        }
                         consecutiveWriteFailures++;
+                        String error = writeError == null ? "" : writeError.getMessage();
                         if (consecutiveWriteFailures <= 3
                                 || consecutiveWriteFailures % WRITE_FAILURES_BEFORE_COOLDOWN == 0) {
-                            publishWriteFailure(lastS4Command, e.getMessage(), consecutiveWriteFailures);
+                            publishWriteFailure(lastS4Command, error, consecutiveWriteFailures);
                         }
-                        log("USB write stalled on " + lastS4Command + " (attempt "
-                                + consecutiveWriteFailures + "): " + e.getMessage());
-                        if (consecutiveWriteFailures >= WRITE_FAILURES_BEFORE_REOPEN) {
-                            log("USB write path wedged; reopening the serial port");
+                        log("USB write refused on " + lastS4Command + " through a full second of "
+                                + "retries (attempt " + consecutiveWriteFailures + "): " + error);
+                        // No cooldown and no port teardown while the connection is alive. Both
+                        // were here before, and they are what turned a sub-second blackout into
+                        // the dead-then-spike gauges: a 1.5s pause, then a reopen with a 4s settle
+                        // that cannot help - every probe showed the descriptor valid and the
+                        // interface claimed - and which tore down the reader, fragmenting the
+                        // pulse stream as well. Only a genuinely dead connection is reopened.
+                        UsbDeviceConnection live = openConnection;
+                        if (live == null || live.getFileDescriptor() < 0) {
+                            log("USB connection is gone; reopening the serial port");
                             publishSimpleEvent("s4-port-reopen", true);
                             scheduleReopen();
                             break;
                         }
-                        if (consecutiveWriteFailures % WRITE_FAILURES_BEFORE_COOLDOWN == 0) {
-                            // The OUT pipe is wedged. Stop writing entirely for a few seconds; the
-                            // reader stays live, so pulses and stroke markers keep coming through.
-                            log("USB write path wedged; pausing writes for "
-                                    + (WRITE_COOLDOWN_MS / 1000) + "s");
-                            publishSimpleEvent("s4-write-cooldown", true);
-                            Thread.sleep(WRITE_COOLDOWN_MS);
-                        } else {
-                            Thread.sleep(Math.min(1500L, 120L * consecutiveWriteFailures));
-                        }
+                        Thread.sleep(Math.min(600L, 100L * consecutiveWriteFailures));
                         continue;
                     }
 

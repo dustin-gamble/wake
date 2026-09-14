@@ -322,6 +322,30 @@ standard request every USB device must accept - the Linux kernel does exactly th
 pipe - and changes nothing on the monitor. The probe is capped at 12 reports a session and one
 per 10s, because it holds the I/O lock for up to three 250ms timeouts.
 
+**What the probe found (3.9.0, six reports, all identical):**
+
+```
+fileDescriptor 43 | interfaceClaimed true | rawBulkTransferRc -1 | clearHaltRc -1 | afterClearHaltRc -1
+```
+
+- Not the serial library: a raw `bulkTransfer` on the same endpoint fails identically.
+- Not a stalled endpoint: clearing the halt changes nothing.
+- Not a dead connection: the descriptor is valid and the interface is claimed.
+- **`clearHaltRc -1` is the key.** That request goes over the control pipe, endpoint 0 - a
+  completely separate channel from the bulk data pipe. Failing at the same instant means **every
+  host-to-device transfer is blocked at once**, while device-to-host reads carry on.
+- **The blackout is short.** The next write succeeded 0.1-0.7s after each probe.
+
+The *cause* of the blackout is still unknown. But the multi-second dead gauges were not it - they
+were **the app's reaction**. A refused write triggered a 1.5s cooldown; ten triggered a port
+teardown with a 4s settle, which cannot help when the descriptor is valid, and which also killed
+the reader, fragmenting the pulse stream. Four of those and it gave up (`s4-reopen-limit`).
+
+**3.9.1 rides through it instead:** the same command is retried every 100ms for up to a second,
+longer than any blackout measured, with no cooldown, and the port is reopened only when the
+connection's file descriptor is actually invalid. If the gauges still die, the blackout has grown
+past a second - check `s4-write-probe` timings before changing anything else.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
