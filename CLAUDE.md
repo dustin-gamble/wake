@@ -490,10 +490,17 @@ interface about every 3 s; WAKE takes it back inside the one-second write-retry 
 request is actually lost and none is logged as a failure. That also confirms the owner is one a
 forcing claim can displace - consistent with the kernel driver re-binding.
 
-**Still to verify on the machine:** that strokes arrive promptly rather than in lumps (one 20 s
-stretch showed +5 where 30 spm predicts ~10), and the release half - that `s4-interface-released`
-fires on leaving WAKE and Ergatta then reads the rower normally. The second is the guardrail; do
-not ship anything that weakens it.
+**Strokes arrive individually again - resolved.** A continuous piece on 3.10.0, scored with
+`control.py`: the monitor counted 14 and the app saw all 14 live, **missed 0**. Every stroke came
+as its own +1 update, a median 1.8 s apart at 29-30 spm - no lumps, where the broken 3.9.1 control
+delivered 11 strokes in one update after 25 s of silence. Max packet age 26 ms against the healthy
+morning's 23 ms; watts changed once per stroke. The pulse detector caught 13 of 14, up from 5 of 15,
+because the pulse stream is now continuous. The earlier "+5 in 20 s" worry was the monitor's 20 s
+summary window, not the link.
+
+**Still to verify on the machine:** the release half - that `s4-interface-released` fires on leaving
+WAKE, that WAKE then touches the rower zero times, and that Ergatta reads it normally. That is the
+guardrail; do not ship anything that weakens it.
 
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
