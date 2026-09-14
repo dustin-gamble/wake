@@ -68,9 +68,16 @@ final class Progress {
         return 50.0 * (level - 1) * (level - 1);
     }
 
-    /** Monday of the week containing {@code day}. Epoch day 0 was a Thursday. */
+    /**
+     * Monday of the week containing {@code day}. Epoch day 0 was a Thursday.
+     *
+     * <p>Plain remainder arithmetic on purpose: {@code Math.floorMod(long, int)} only exists from
+     * Android 13, and the tablet runs 9. The build tool happened to backport it, but nothing should
+     * depend on that.
+     */
     static long weekStart(long day) {
-        return day - Math.floorMod(day + 3, 7);
+        long offset = ((day + 3) % 7 + 7) % 7;
+        return day - offset;
     }
 
     synchronized float weekMinutes(long today) {
