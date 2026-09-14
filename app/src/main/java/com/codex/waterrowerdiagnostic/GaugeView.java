@@ -43,7 +43,9 @@ final class GaugeView extends View {
     private float attackPerSecond = 6f;
     private float decayPerSecond = 1.1f;
     private boolean coastToZero;
-    private float dragCoefficient;
+    /** Shared wind-down; null for a gauge that simply eases (the rate dial). */
+    private Coast coast;
+    private boolean paddleTurning = true;
     private boolean driving = true;
 
     GaugeView(Context context, String label, String unit, int accent, float scaleMax, int decimals) {
@@ -93,42 +95,32 @@ final class GaugeView extends View {
     }
 
     /**
-     * Coasts down under quadratic fluid drag once the drive stops.
+     * Winds down with the shared {@link Coast} once the drive stops: holds, eases off, lands on
+     * zero. Replaced quadratic drag in 3.12.0, which dropped fast and then hovered above zero.
      *
-     * <p>The S4 reports speed 0 and stops sending pulses the moment you stop pulling, even though
-     * the paddle is still turning, so the wind-down cannot be measured and is modelled instead.
-     * Drag on a paddle in water goes as v^2, giving v(t) = v0 / (1 + k*v0*t): a quick initial drop
-     * with a long tail, which is how the real flywheel behaves.
-     *
-     * @param k larger slows the wheel sooner; 0.09 takes roughly 4 m/s down to 1 m/s in ~8s.
+     * @param baseSeconds    coast length from a crawl
+     * @param secondsPerUnit added per unit of this gauge's value when the coast starts
      */
-    /**
-     * Coasts down under water drag once the drive stops.
-     *
-     * <p>On a water rower essentially all the resistance is the paddle dragging through the tank,
-     * so the wind-down is pure quadratic drag: {@code dv/dt = -k*v^2}, giving
-     * {@code v(t) = v0 / (1 + k*v0*t)}. Bearing friction is negligible here and is deliberately
-     * not modelled - an earlier build added a linear term, which only compensated for a drag
-     * coefficient that was set far too low.
-     *
-     * <p>Applied in the gauge's own units, so k is per-unit and must suit the scale.
-     */
-    GaugeView waterDrag(float k) {
-        this.dragCoefficient = k;
+    GaugeView coastDown(float baseSeconds, float secondsPerUnit) {
+        this.coast = new Coast(baseSeconds, secondsPerUnit);
         this.coastToZero = true;
         return this;
     }
 
-    /**
-     * Retunes the drag while running.
-     *
-     * <p>The monitor reports nothing at all once the drive stops - no pulses, no speed - and the
-     * one address that might have carried instantaneous speed (148) is refused by this firmware.
-     * So the coefficient cannot be fitted from data and is set by how the paddle actually looks.
-     */
+    /** Retunes the coast length from the drawer's drag setting: lower drag glides longer. */
     void setDrag(float k) {
-        this.dragCoefficient = k;
+        if (coast != null) {
+            coast.setDrag(k);
+        }
         postInvalidateOnAnimation();
+    }
+
+    /**
+     * Whether the paddle's pulses are still arriving. Once they stop the paddle has stopped, so
+     * the rest of a coast finishes promptly instead of hovering above zero.
+     */
+    void setPaddleTurning(boolean turning) {
+        this.paddleTurning = turning;
     }
 
     /**
@@ -170,13 +162,16 @@ final class GaugeView extends View {
 
     /** True while the needle is winding down under drag rather than tracking a reading. */
     boolean isCoasting() {
-        return dragCoefficient > 0f && !driving && shown > 0f;
+        return coast != null && !driving && shown > 0f;
     }
 
     void reset() {
         target = 0f;
         shown = 0f;
         scaleMax = initialMax;
+        if (coast != null) {
+            coast.cancel();
+        }
         lastUpdateMs = 0;
         postInvalidateOnAnimation();
     }
@@ -199,20 +194,22 @@ final class GaugeView extends View {
         lastFrameMs = now;
 
         boolean stale = coastToZero && (lastUpdateMs == 0 || now - lastUpdateMs > 1200);
-        boolean coasting = dragCoefficient > 0f && (stale || !driving);
+        boolean coasting = coast != null && (stale || !driving);
 
-        if (coasting && shown > 0f) {
-            shown -= dragCoefficient * shown * shown * dt;
+        if (coasting) {
+            shown = coast.step(shown, dt, !paddleTurning);
         } else {
+            if (coast != null) {
+                coast.cancel();
+            }
             float aim = stale ? 0f : target;
             if (aim >= shown) {
                 shown += (aim - shown) * Math.min(1f, attackPerSecond * dt);
-            } else if (dragCoefficient > 0f) {
-                // Below the reading: still drag. The paddle slows between every stroke, not only
-                // when the session ends, so the needle must never sit flat waiting for a verdict.
-                // Falling: never quicker than water drag allows. A reading that drops suddenly is
-                // the monitor's average catching up, not the paddle actually stopping dead.
-                shown = Math.max(aim, shown - dragCoefficient * shown * shown * dt);
+            } else if (coast != null) {
+                // Below the reading: fall no quicker than a coast from here. The paddle slows
+                // between every stroke, so the needle must never sit flat waiting for a verdict,
+                // but a reading that drops suddenly is the average catching up, not a dead stop.
+                shown = coast.fallToward(shown, aim, dt);
             } else {
                 shown += (aim - shown) * Math.min(1f, decayPerSecond * dt);
             }
@@ -220,8 +217,7 @@ final class GaugeView extends View {
                 shown = aim;
             }
         }
-        // Drag approaches zero asymptotically; below a fraction of a percent of full scale the
-        // needle is already at the pin, so this is display quantisation rather than physics.
+        // The coast lands on zero by itself; this only tidies the last sliver of an eased fall.
         if (shown < scaleMax * 0.005f && (coasting || target <= 0f)) {
             shown = 0f;
         }
@@ -268,7 +264,7 @@ final class GaugeView extends View {
         canvas.drawText(label, cx, cy + radius * 0.86f, labelPaint);
 
         // Keep animating while the needle is still moving, coast included.
-        if (Math.abs(target - shown) > 0.001f || (shown > 0f && dragCoefficient > 0f)) {
+        if (Math.abs(target - shown) > 0.001f || (shown > 0f && coast != null)) {
             postInvalidateOnAnimation();
         }
     }

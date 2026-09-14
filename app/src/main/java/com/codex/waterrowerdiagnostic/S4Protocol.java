@@ -86,6 +86,8 @@ final class S4Protocol {
          * {@link #strokeRate} for anything that decides something.
          */
         final int strokeRateAverage;
+        /** {@link #strokeRateAverage} before rounding, for a display that shows "25.3". */
+        final double strokeRatePrecise;
 
         Status(
                 boolean monitorConnected,
@@ -114,7 +116,8 @@ final class S4Protocol {
                 boolean flywheelMoving,
                 int strokeRateAverage,
                 double pulseEffort,
-                int pulseStrokes) {
+                int pulseStrokes,
+                double strokeRatePrecise) {
             this.monitorConnected = monitorConnected;
             this.rowing = rowing;
             this.elapsedSeconds = elapsedSeconds;
@@ -142,6 +145,7 @@ final class S4Protocol {
             this.strokeRateAverage = strokeRateAverage;
             this.pulseEffort = pulseEffort;
             this.pulseStrokes = pulseStrokes;
+            this.strokeRatePrecise = strokeRatePrecise;
         }
     }
 
@@ -597,7 +601,8 @@ final class S4Protocol {
                 lastPulseAtMs > 0 && now - lastPulseAtMs < 700,
                 averagedStrokeRate(now),
                 pulseEffort(),
-                pulseStrokes());
+                pulseStrokes(),
+                preciseStrokeRate(now));
     }
 
     private void recordStrokeTick(long atMs) {
@@ -631,6 +636,11 @@ final class S4Protocol {
      * trigger and the games keep the raw value.
      */
     private int averagedStrokeRate(long now) {
+        return (int) Math.round(preciseStrokeRate(now));
+    }
+
+    /** {@link #averagedStrokeRate} before rounding. */
+    private double preciseStrokeRate(long now) {
         int intervals = strokeTickCount - 1;
         if (intervals < 3) {
             return trimmedRate(now);
@@ -648,7 +658,7 @@ final class S4Protocol {
         if (elapsed > expected * LATE_FACTOR) {
             rate = Math.min(rate, 60000.0 / elapsed);
         }
-        return (int) Math.round(rate);
+        return rate;
     }
 
     /**

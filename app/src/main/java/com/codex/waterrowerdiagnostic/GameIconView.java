@@ -13,7 +13,7 @@ final class GameIconView extends View {
     enum Kind {
         GAUGES, ZOMBIE, RUNNER, BOSS, PACE, GHOST, RUN, INTERVALS, JOURNEY, STORM, ZONES,
         LADDER, TUG, COLLECTOR, DIVE, HEADRACE, CANYON, MEGAPULL, CHASE, ROCKET, CITY, SURF,
-        FLY
+        FLY, ZONEROW
     }
 
     private final Kind kind;
@@ -176,6 +176,19 @@ final class GameIconView extends View {
                 path.lineTo(u(14), u(15));
                 path.close();
                 c.drawPath(path, p);
+                break;
+            case ZONEROW:
+                // Two lane bars, the upper one filled to a marker, the lower one shorter.
+                r.set(u(3), u(7), u(21), u(11));
+                p.setAlpha(70);
+                c.drawRoundRect(r, u(2), u(2), p);
+                p.setAlpha(255);
+                r.set(u(3), u(7), u(15), u(11));
+                c.drawRoundRect(r, u(2), u(2), p);
+                c.drawRect(u(14.5f), u(4.5f), u(16.2f), u(13.5f), p);
+                p.setColor(0xFF6F8CFF);
+                r.set(u(3), u(15.5f), u(12), u(18.5f));
+                c.drawRoundRect(r, u(1.5f), u(1.5f), p);
                 break;
             case FLY:
                 // A gliding bird over a coastline.

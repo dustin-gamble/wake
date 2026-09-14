@@ -519,6 +519,7 @@ public class MainActivity extends Activity
         int warn = getColorCompat(R.color.warn);
         int bad = getColorCompat(R.color.bad);
         cards.add(gridCard("GAUGES", GameIconView.Kind.GAUGES, accent, null, null, v -> showInstruments()));
+        cards.add(gridCard("ZONE ROW", GameIconView.Kind.ZONEROW, warn, "zonerow.10", "m", v -> openZoneRow()));
         cards.add(gridCard("ZOMBIE RUN", GameIconView.Kind.ZOMBIE, bad, "zombie.150", "m", v -> openZombieRun()));
         cards.add(gridCard("ROW RUNNER", GameIconView.Kind.RUNNER, 0xFFE84C3D, "runner.distance", "m", v -> openRowRunner()));
         cards.add(gridCard("COAST FLIGHT", GameIconView.Kind.FLY, 0xFF7FC6EE, null, null, v -> openCoastFlight()));
@@ -861,6 +862,17 @@ public class MainActivity extends Activity
         showGame(game, gameScreen("COLLECTOR", game, null));
     }
 
+    /** A timed piece on two lane bars. Full-screen instrument, so no vitals strip. */
+    private void openZoneRow() {
+        ZoneRowGame game = new ZoneRowGame(this, personalBests);
+        TextView length = chip(game.pieceMinutes() + " MIN");
+        length.setOnClickListener(v -> {
+            game.nextPieceLength();
+            length.setText(game.pieceMinutes() + " MIN");
+        });
+        showGame(game, gameScreen("ZONE ROW", game, length, null, false));
+    }
+
         /** All personal bests as a plain list. Rebuilt each time it is opened. */
     private void showRecords() {
         LinearLayout root = new LinearLayout(this);
@@ -946,6 +958,7 @@ public class MainActivity extends Activity
         if (key.startsWith("ladder.")) return "Sprint Ladder - rung from " + key.substring(7) + " W";
         if (key.startsWith("tug.")) return "Tug of War - held level " + key.substring(4);
         if (key.equals("collector.score")) return "Collector - best score";
+        if (key.startsWith("zonerow.")) return "Zone Row - most metres in " + key.substring(8) + " min";
         if (key.equals("dive.joules")) return "Depth Dive - deepest";
         if (key.startsWith("zombie.")) return "Zombie Run - survived vs " + PersonalBests.formatPace(Float.parseFloat(key.substring(7))) + " horde";
         if (key.equals("runner.distance")) return "Row Runner - furthest run";
@@ -1467,6 +1480,12 @@ public class MainActivity extends Activity
      * is what advances the coast physics and pushes data into the page.
      */
     private View gameScreen(String title, GameView game, View controls, View overlay) {
+        return gameScreen(title, game, controls, overlay, true);
+    }
+
+    /** @param vitals false for a screen that is itself a full instrument panel (ZONE ROW). */
+    private View gameScreen(String title, GameView game, View controls, View overlay,
+                            boolean vitals) {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(10), dp(12), dp(8));
@@ -1496,22 +1515,33 @@ public class MainActivity extends Activity
         }
         root.addView(header);
 
-        // Vitals across the top of every game: stopwatch, speed, power, pace, rate, distance.
-        gameStrip = new GaugeStripView(this);
-        // Long-press anywhere on the strip to photograph the screen. Deliberately invisible:
-        // every game already has the strip, and none of them need another control.
-        if (BuildConfig.SCREENSHOT_UPLOAD) {
-            gameStrip.setOnLongClickListener(v -> {
-                captureScreenshot(screenLabel());
-                return true;
-            });
+        if (vitals) {
+            // Vitals across the top of every game: stopwatch, speed, power, pace, rate, distance.
+            gameStrip = new GaugeStripView(this);
+            // Long-press anywhere on the strip to photograph the screen. Deliberately invisible:
+            // every game already has the strip, and none of them need another control.
+            if (BuildConfig.SCREENSHOT_UPLOAD) {
+                gameStrip.setOnLongClickListener(v -> {
+                    captureScreenshot(screenLabel());
+                    return true;
+                });
+            }
+            // 62dp -> 74dp -> 92dp: this strip is the instrument during a game, and the games
+            // themselves lose very little by it.
+            LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
+            stripParams.topMargin = dp(4);
+            root.addView(gameStrip, stripParams);
+        } else {
+            gameStrip = null;
+            // No strip to long-press, so the screenshot gesture moves onto the game itself.
+            if (BuildConfig.SCREENSHOT_UPLOAD) {
+                game.setOnLongClickListener(v -> {
+                    captureScreenshot(screenLabel());
+                    return true;
+                });
+            }
         }
-        // 62dp -> 74dp -> 92dp: this strip is the instrument during a game, and the games
-        // themselves lose very little by it.
-        LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
-        stripParams.topMargin = dp(4);
-        root.addView(gameStrip, stripParams);
 
         LinearLayout.LayoutParams gameParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
@@ -1596,9 +1626,10 @@ public class MainActivity extends Activity
         LinearLayout gauges = new LinearLayout(this);
         gauges.setOrientation(LinearLayout.HORIZONTAL);
         speedGauge = new GaugeView(this, "SPEED", "m/s",
-                getColorCompat(R.color.primary), 5f, 1).waterDrag(0.04f).attack(4.0f);
+                getColorCompat(R.color.primary), 5f, 1).coastDown(BoatSpeedModel.COAST_BASE_S, BoatSpeedModel.COAST_PER_MPS_S).attack(4.0f);
+        // Power winds down with the same shape as speed: 3 s plus 0.03 s per watt, ~7 s from 130 W.
         powerGauge = new GaugeView(this, "POWER", "watts",
-                getColorCompat(R.color.accent_blue), 250f, 0).waterDrag(0.012f).attack(4.5f);
+                getColorCompat(R.color.accent_blue), 250f, 0).coastDown(3f, 0.03f).attack(4.5f);
         rateGauge = new GaugeView(this, "RATE", "str/min",
                 getColorCompat(R.color.warn), 45f, 0).coasting(1.8f, 1.2f);
         gauges.addView(gaugeCell(speedGauge, 1.25f));
@@ -3063,6 +3094,11 @@ public class MainActivity extends Activity
             float shownSpeed = onPulses
                     ? (float) (0.8 + status.pulseEffort * 3.6)
                     : (float) status.waterSpeedMps;
+            // Pulses stopping means the paddle really has stopped: finish the coast promptly
+            // rather than leave a needle hovering above zero.
+            speedGauge.setPaddleTurning(status.flywheelMoving);
+            powerGauge.setPaddleTurning(status.flywheelMoving);
+            paddleView.setPaddleTurning(status.flywheelMoving);
             speedGauge.setValue(shownSpeed, driving);
             powerGauge.setValue(status.watts, driving);
             rateGauge.setValue(status.strokeRateAverage, driving);

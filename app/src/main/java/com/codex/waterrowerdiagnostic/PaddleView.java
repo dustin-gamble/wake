@@ -36,15 +36,9 @@ final class PaddleView extends View {
     static final double RPM_PER_MPS = 60.0 * 0.65;
     /** The wheel on screen turns at exactly the RPM it displays. */
     private static final double DEGREES_PER_MPS = RPM_PER_MPS * 6.0;
-    /**
-     * Quadratic drag constant for the coast-down. The monitor stops reporting the instant you stop
-     * pulling, so the wheel's wind-down is modelled: v(t) = v0 / (1 + k*v0*t).
-     */
-    /**
-     * Water drag, quadratic in speed. On this machine the paddle in the tank is the entire
-     * resistance, so nothing else is modelled: v(t) = v0 / (1 + DRAG*v0*t).
-     */
-    private volatile double drag = 0.04;
+    /** The wind-down shared with the speed gauge and the games' boat. See {@link Coast}. */
+    private final Coast coast = new Coast(BoatSpeedModel.COAST_BASE_S, BoatSpeedModel.COAST_PER_MPS_S);
+    private boolean paddleTurning = true;
 
     private final Paint bladePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hubPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -83,7 +77,12 @@ final class PaddleView extends View {
      *                        pulse stream is what makes the wheel react the moment you pull.
      */
     void setDrag(double k) {
-        this.drag = k;
+        coast.setDrag((float) k);
+    }
+
+    /** Pulses still arriving. Once they stop, the rest of the coast finishes promptly. */
+    void setPaddleTurning(boolean turning) {
+        this.paddleTurning = turning;
     }
 
     void setSpeed(double metresPerSecond, boolean driving) {
@@ -118,16 +117,19 @@ final class PaddleView extends View {
         boolean stale = lastUpdateMs == 0 || now - lastUpdateMs > 1500;
         boolean coasting = stale || !driving;
         double aim = coasting ? 0 : targetSpeed;
-        if (coasting && shownSpeed > 0) {
-            // Drive has stopped; the paddle keeps turning and water drag slows it.
-            shownSpeed -= drag * shownSpeed * shownSpeed * dt;
-        } else if (aim >= shownSpeed) {
-            // Readings land about once a second, so climbing too fast produces a staircase:
-            // jump, hold, jump. A gentler attack glides between them while still feeling live.
-            shownSpeed += (aim - shownSpeed) * Math.min(1.0, 4.5 * dt);
+        if (coasting) {
+            // Drive has stopped: hold, ease off, land on zero. See Coast.
+            shownSpeed = coast.step((float) shownSpeed, dt, !paddleTurning);
         } else {
-            // Never fall quicker than drag allows, whatever the monitor suddenly reports.
-            shownSpeed = Math.max(aim, shownSpeed - drag * shownSpeed * shownSpeed * dt);
+            coast.cancel();
+            if (aim >= shownSpeed) {
+                // Readings land about once a second, so climbing too fast produces a staircase:
+                // jump, hold, jump. A gentler attack glides between them while still feeling live.
+                shownSpeed += (aim - shownSpeed) * Math.min(1.0, 4.5 * dt);
+            } else {
+                // Never fall quicker than a coast would, whatever the monitor suddenly reports.
+                shownSpeed = coast.fallToward((float) shownSpeed, (float) aim, dt);
+            }
         }
         if (shownSpeed < 0.02) {
             shownSpeed = 0;

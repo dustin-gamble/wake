@@ -72,6 +72,7 @@ abstract class GameView extends View {
         this.driving = driving;
         long now = System.currentTimeMillis();
         boat.setTarget(s.waterSpeedMps, driving, now);
+        boat.setPaddleTurning(s.flywheelMoving);
         if (driving && running) {
             lastDrivingMs = now;
         }

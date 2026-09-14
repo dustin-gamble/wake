@@ -878,6 +878,48 @@ Consequences for anything built later:
 - Judge the between-stroke curve on the machine, not from a plot. If the decay does not
   make the user want to pull again, it is wrong regardless of what the fit says.
 
+## The coast shape: hold, ease off, land on zero (3.12.0)
+
+**Everything that winds down uses `Coast.java`** - speed gauge, power gauge, paddle, and the
+games' `BoatSpeedModel`. Quadratic drag (the physics section below) is no longer what the
+instruments draw; it is kept as background.
+
+Why it changed, measured on the tablet at drag 0.04: after the last stroke the needle fell from
+2.6 to 0.8 m/s while the monitor still read 2.6, then crawled from 0.66 to 0.21 over the next
+90 s and never reached zero - the paddle showed 11 rpm at rest. `v0/(1+k v0 t)` is steepest at
+the start and asymptotic at the end: exactly backwards from what the rower wants, which in their
+words is to "hang to speed a little longer, slow down slowly, then go to zero".
+
+- A coast lasts `scale x (base + perUnit x startValue)` seconds; speed uses 4 s + 2.5 s per m/s
+  (10.5 s from 2.6 m/s), power 3 s + 0.03 s per watt. The drawer's drag setting sets `scale` as
+  `0.04 / drag`, so "Longest glide" (0.02) doubles it.
+- The value follows `shape(p)`: 80% smoothstep plus 20% straight line (`LEAN`), so it holds
+  near its speed early (~87% after a 2.4 s stroke gap), falls through the middle, and lands on
+  exactly zero. The straight-line share means it is never flat - the rule below still holds.
+- **Pulses stopping is the one real "paddle has stopped" signal.** `flywheelMoving` is passed
+  as `setPaddleTurning`; once false, the remaining coast finishes within 1.5 s. On that capture
+  pulses kept arriving for 28 s after the last stroke while pulse effort was zero from 16 s, so
+  the paddle creeps a long time - the display deliberately does not follow the creep.
+- While still driving, a lower reading is approached no faster than a coast's steepest slope
+  (`fallToward`), so a sudden zero from the monitor's average cannot snap the needle.
+- Tests: `BoatSpeedModelTest` pins hang, midpoint, exact zero, every-frame fall, the pulse-stop
+  finish and the drag scaling. Compile `Coast.java` with it.
+
+## ZONE ROW (3.12.0)
+
+`ZoneRowGame`: a timed piece (10/20/30/5 min chip) drawn as one full-screen instrument, laid out
+after a commercial workout screen the rower asked to recreate, then renamed and recoloured at
+their request - no other product's names or marks. Opened with `gameScreen(..., vitals=false)`,
+so it has **no vitals strip** (the screenshot long-press moves onto the game view instead).
+
+- Split bar across four equal quarters, GLIDE / CRUISE / PUSH / SURGE, edges 3:00, 2:35, 2:15,
+  1:59, 1:45 per 500 m (from the measured envelope). Tap a zone name to set the target; the
+  rate bar's band (16-20 / 20-24 / 24-28 / 28-34 spm) and the time-in-zone clock follow it.
+- Rate shown to one decimal from `Status.strokeRatePrecise` (the interval model before rounding).
+- Calories are estimated as mechanical work x 4 (25% efficiency). The calorie register exists
+  but is not polled, on purpose. Heart rate shows "--" while 1A0 reads 0.
+- Piece clock runs on the rowing clock and a pause pill; best is `zonerow.<minutes>` in metres.
+
 ## Water Physics And The Coast-Down
 
 The machine is WaterRower hardware in an Ergatta fit-out, so the published rowing-ergometer
