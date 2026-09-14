@@ -243,6 +243,90 @@ function handleApi(req, res, pathname) {
     return true;
   }
 
+  // Race recordings to swap with a friend. Stored as small JSON files under data/ghosts - copy one to
+  // someone else's laptop and they can race it. No accounts and nothing leaves the network unless a
+  // person moves the file themselves.
+  if (pathname === '/api/ghosts' && req.method === 'GET') {
+    const dir = path.join(DATA_DIR, 'ghosts');
+    let list = [];
+    try {
+      list = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => {
+        try {
+          const g = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+          return { id: f.slice(0, -5), name: g.name, meters: g.meters, time: g.time, savedAt: g.savedAt };
+        } catch (error) {
+          return null;
+        }
+      }).filter(Boolean).sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+    } catch (error) {
+      list = [];
+    }
+    sendJson(res, 200, { ghosts: list });
+    return true;
+  }
+
+  if (pathname.startsWith('/api/ghosts/') && req.method === 'GET') {
+    const id = pathname.slice('/api/ghosts/'.length);
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) {
+      sendJson(res, 400, { ok: false, error: 'bad id' });
+      return true;
+    }
+    const file = path.join(DATA_DIR, 'ghosts', id + '.json');
+    fs.readFile(file, 'utf8', (error, text) => {
+      if (error) {
+        sendJson(res, 404, { ok: false, error: 'no such recording' });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(text);
+    });
+    return true;
+  }
+
+  if (pathname === '/api/ghosts' && req.method === 'POST') {
+    const chunks = [];
+    let bytes = 0;
+    req.on('data', (chunk) => {
+      bytes += chunk.length;
+      if (bytes > 256 * 1024) {
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      let g;
+      try {
+        g = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: 'not JSON' });
+        return;
+      }
+      const meters = Number(g.meters);
+      const time = Number(g.time);
+      const name = String(g.name || 'WAKE rower').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 40) || 'WAKE rower';
+      if (!Number.isInteger(meters) || meters < 100 || meters > 50000 || !(time > 0)
+          || typeof g.samples !== 'string' || !/^[0-9,.]{1,200000}$/.test(g.samples)) {
+        sendJson(res, 400, { ok: false, error: 'not a race recording' });
+        return;
+      }
+      const dir = path.join(DATA_DIR, 'ghosts');
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const id = (name.replace(/ /g, '_') + '-' + meters + '-' + stamp).slice(0, 80);
+      const record = { name, meters, time, samples: g.samples, savedAt: new Date().toISOString() };
+      fs.writeFile(path.join(dir, id + '.json'), JSON.stringify(record), (error) => {
+        if (error) {
+          sendJson(res, 500, { ok: false, error: String(error.message) });
+          return;
+        }
+        console.log(`race recording saved: ${id}`);
+        sendJson(res, 200, { ok: true, id });
+      });
+    });
+    return true;
+  }
+
   if (pathname === '/api/cesium-token' && req.method === 'GET') {
     sendJson(res, 200, { ionToken: cesiumToken() });
     return true;

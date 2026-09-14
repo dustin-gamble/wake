@@ -1,6 +1,6 @@
 # WAKE
 
-**Rowing instruments, 18 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
+**Rowing instruments, 19 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
 
 📥 **[Download the APK and read the guide →](https://dustin-gamble.github.io/wake/)**
 
@@ -30,11 +30,19 @@ no root, no system changes, and Ergatta itself is untouched and still the fallba
 
 - **Three analog gauges** — speed, power, rate — with needles that carry momentum.
 - **A water paddle** spinning at the measured speed, coasting down on its own when you stop.
-- **18 games**: pace boats, ghost races against your own best, a zombie that closes when you ease
-  off, a side-scrolling runner, a canyon chase, an isometric city that builds one
-  block per stroke. Each shows the same vitals strip, so the numbers are never hidden by the game.
-- **Zone Row** — a timed piece as one full-screen instrument: split across four effort zones,
-  stroke rate against a target band, time in zone.
+- **19 games** that tune themselves to you — WAKE learns your typical power, speed and stroke rate:
+  - **River Explorer** — row a never-ending river in first person; forks, landmarks, and a map that
+    fills in across sessions.
+  - **Stroke Coach** — the shape of every drive against your best stroke, with one tip at a time.
+  - **Crew Boat** — seven rowers follow your rhythm; even strokes build swing.
+  - **Race** (a rival that keeps it close, your best, your last, or a friend's recording), **Regatta**
+    (Club to Olympic, a race a day), **Daily Row** (a dated challenge and a streak), **Head Race**.
+  - **Zone Row** — a timed piece as one full-screen instrument, with Pyramid, Ladder, Sprints, Streak
+    and heart-rate plans.
+  - **Zombie Run, Row Runner** (every stroke is a jump), **Canyon**, **Rocket Launch**, **Mega Pull**,
+    **Wave Rider**, **Skyline**, **Night Grid**, **Tug of War**, **Collector**, **Coast Flight**.
+- **Levels, a weekly goal and a streak** (with a free rest day), **Session Art** posters, and a
+  Bluetooth **heart-rate strap**.
 - **Measured energy** — work and calories from the paddle's own 40-per-second pulses, with a
   load-scale calibration so they don't depend on the monitor's formula. See [CALIBRATION.md](CALIBRATION.md).
 - **Coast Flight** — a CesiumJS globe with satellite imagery and terrain. Power above 60 W is

@@ -1,5 +1,23 @@
 # WAKE — Improvement Ideas
 
+> **Status, 2026-09-14:** built in 3.13.0 - 3.18.0, except sound (the rower said no sound, so Rhythm
+> Row and all audio were dropped). Handing the rower back to Ergatta is resolved by decision: a tablet
+> restart is the accepted way back. Everything below is built but **not yet seen on the tablet**.
+>
+> | Idea | Status |
+> |---|---|
+> | Precise energy + load-scale calibration | Built (3.13.0, `PulseMeter`, CALIBRATE) |
+> | Tune every game to the rower | Built (3.14.0, `RowerProfile`) |
+> | Merges: Race, Zone Row plans, one Canyon | Built (3.14.0) |
+> | Coast Flight list, Head Race, Canyon rings | Built (3.14.0 - 3.16.0) |
+> | Row Runner, Skyline, Wave Rider, Collector, Mega Pull, gauges | Built (3.15.0) |
+> | River Explorer, Stroke Coach, Crew Boat, Night Grid, Regatta, Daily Row | Built (3.17.0) |
+> | Heart Zone Row + BLE strap | Built, untested without a strap (3.17.0) |
+> | Levels, weekly goal, streak, Continue, Session Art, first-run help | Built (3.18.0) |
+> | Race a friend's recording | Built via the laptop (3.18.0) |
+> | Handle sensor steering: River, Wave Rider; Stroke Coach handle level | Built, untested without the sensor |
+> | Sound, Rhythm Row | Not built - the rower asked for no sound |
+
 Where WAKE could go next: games to add, remove and improve, plus bigger ideas. Written on
 2026-09-13, after building ZONE ROW (3.12). It follows the original [GAME_IDEAS.md](GAME_IDEAS.md).
 

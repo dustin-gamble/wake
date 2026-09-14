@@ -12,6 +12,7 @@ import android.content.Context;
  *   <li><b>PACE</b> - a boat at a fixed split, defaulting to two seconds faster than your typical.</li>
  *   <li><b>BEST</b> - a recording of your fastest run at this distance.</li>
  *   <li><b>LAST</b> - a recording of your most recent finished run at this distance.</li>
+ *   <li><b>FRIEND</b> - someone else's recording, imported through the laptop dashboard.</li>
  * </ul>
  *
  * <p>Replaced separate Pace Boat and Ghost Race cards, which were the same game with the same
@@ -21,7 +22,7 @@ import android.content.Context;
 final class GhostRaceGame extends PaceBoatGame {
 
     enum Opponent {
-        ADAPTIVE("RIVAL"), PACE("PACE"), BEST("BEST"), LAST("LAST");
+        ADAPTIVE("RIVAL"), PACE("PACE"), BEST("BEST"), LAST("LAST"), FRIEND("FRIEND");
 
         final String label;
 
@@ -83,11 +84,12 @@ final class GhostRaceGame extends PaceBoatGame {
 
     private void loadGhost() {
         ghost = null;
-        if (opponent != Opponent.BEST && opponent != Opponent.LAST) {
+        if (opponent != Opponent.BEST && opponent != Opponent.LAST && opponent != Opponent.FRIEND) {
             return;
         }
         boolean last = opponent == Opponent.LAST;
-        String saved = bests.getString((last ? "ghostlast." : "ghost.") + raceMeters);
+        boolean friend = opponent == Opponent.FRIEND;
+        String saved = bests.getString((friend ? "ghostfriend." : last ? "ghostlast." : "ghost.") + raceMeters);
         if (saved == null || saved.isEmpty()) {
             return;
         }
@@ -101,8 +103,33 @@ final class GhostRaceGame extends PaceBoatGame {
             return;
         }
         ghost = g;
-        ghostFinish = last ? bests.get("timelast." + raceMeters, g.length)
+        ghostFinish = friend ? bests.get("timefriend." + raceMeters, g.length)
+                : last ? bests.get("timelast." + raceMeters, g.length)
                 : bests.get("time." + raceMeters, g.length);
+    }
+
+    private String friendName() {
+        String name = bests.getString("friend.name." + raceMeters);
+        return name == null ? "YOUR FRIEND" : name.toUpperCase(java.util.Locale.US);
+    }
+
+    /** The best recording at this distance, for sharing: one sample a second plus the distance. */
+    String bestRecording() {
+        return bests.getString("ghost." + raceMeters);
+    }
+
+    float bestTime() {
+        return bests.get("time." + raceMeters, 0f);
+    }
+
+    /** Stores a friend's recording for this distance and races it. */
+    void importFriend(String name, int meters, float time, String samples) {
+        bests.putString("ghostfriend." + meters, samples);
+        bests.putFloat("timefriend." + meters, time);
+        bests.putString("friend.name." + meters, name);
+        opponent = Opponent.FRIEND;
+        setRaceMeters(meters);
+        start();
     }
 
     boolean hasGhost() {
@@ -164,6 +191,9 @@ final class GhostRaceGame extends PaceBoatGame {
             case LAST:
                 return hasGhost() ? "YOUR LAST RACE  " + PersonalBests.formatTime((float) ghostFinish)
                         : "NO LAST RACE YET - " + super.opponentLabel();
+            case FRIEND:
+                return hasGhost() ? friendName() + "  " + PersonalBests.formatTime((float) ghostFinish)
+                        : "NO FRIEND'S RACE AT " + raceMeters + " m - IMPORT ONE";
             default:
                 return super.opponentLabel();
         }
@@ -178,6 +208,8 @@ final class GhostRaceGame extends PaceBoatGame {
                 return hasGhost() ? "YOU BEAT YOUR BEST" : "BEST RECORDED";
             case LAST:
                 return hasGhost() ? "YOU BEAT YOUR LAST RACE" : "YOU BEAT THE PACE BOAT";
+            case FRIEND:
+                return hasGhost() ? "YOU BEAT " + friendName() : super.winText();
             default:
                 return super.winText();
         }
@@ -192,6 +224,8 @@ final class GhostRaceGame extends PaceBoatGame {
                 return "YOUR BEST WON";
             case LAST:
                 return hasGhost() ? "YOUR LAST RACE WON" : super.loseText();
+            case FRIEND:
+                return hasGhost() ? friendName() + " WON" : super.loseText();
             default:
                 return super.loseText();
         }

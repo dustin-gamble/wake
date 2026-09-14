@@ -268,6 +268,17 @@ public class MainActivity extends Activity
     private final S4Protocol s4Protocol = new S4Protocol(this::handleS4Packet);
     /** The rower's learned range, shared by every game. See RowerProfile. */
     private final RowerProfile profile = new RowerProfile();
+    /** Levels, the weekly goal and the streak. */
+    private final Progress progress = new Progress();
+    private HomeProgressView progressView;
+    private TextView continueChip;
+    private double lastProgressMetres = -1;
+    /** Every card's action by title, so CONTINUE can reopen the last game played. */
+    private final java.util.HashMap<String, View.OnClickListener> cardActions = new java.util.HashMap<>();
+    /** Per-stroke power and rate for this run of the app, for Session Art. */
+    private final java.util.ArrayList<float[]> sessionStrokes = new java.util.ArrayList<>();
+    private PulseMeter.Stroke lastArtStroke;
+    private boolean sessionArtShown;
     /** Latest status on the UI thread, for once-a-second sampling. */
     private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
@@ -351,6 +362,10 @@ public class MainActivity extends Activity
                 pendingIntentFlags());
 
         setContentView(buildUi());
+        if (personalBests.getString("tour.done") == null) {
+            personalBests.putString("tour.done", "1");
+            screenHost.post(() -> showHelpPage(0));
+        }
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
@@ -415,6 +430,7 @@ public class MainActivity extends Activity
     protected void onStop() {
         saveMeasuredCalibration();
         commitProfile(RowerProfile.MIN_MINUTES);
+        saveProgress();
         if (!isChangingConfigurations() && openConnection != null) {
             releasedForBackground = true;
             publishSimpleEvent("s4-interface-released", true);
@@ -438,6 +454,7 @@ public class MainActivity extends Activity
         journeyLifetime = personalBests.get("journey.total", 0f);
         loadCalibration();
         profile.decode(personalBests.getString("profile"));
+        progress.decode(personalBests.getString("progress"));
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(getColorCompat(R.color.background));
 
@@ -496,6 +513,11 @@ public class MainActivity extends Activity
         if (screen == homeScreen) {
             saveLastSession();
             refreshPersonalBests();
+            refreshProgress();
+            if (!sessionArtShown && sessionStrokes.size() >= 60) {
+                sessionArtShown = true;
+                screenHost.post(this::showSessionArt);
+            }
             if (lastSessionCard != null) {
                 lastSessionCard.setText(lastSessionText());
             }
@@ -566,6 +588,45 @@ public class MainActivity extends Activity
         header.addView(exit);
         root.addView(header);
 
+        // Reasons to come back: the week's goal, the level and the streak, and a way back in.
+        LinearLayout progressRow = new LinearLayout(this);
+        progressRow.setOrientation(LinearLayout.HORIZONTAL);
+        progressRow.setGravity(Gravity.CENTER_VERTICAL);
+        progressView = new HomeProgressView(this);
+        progressView.setOnLongClickListener(v -> {
+            float[] goals = {30f, 60f, 90f, 120f, 180f};
+            float current = progress.goalMinutes();
+            float next = goals[0];
+            for (int i = 0; i < goals.length; i++) {
+                if (goals[i] == current) {
+                    next = goals[(i + 1) % goals.length];
+                }
+            }
+            progress.setGoalMinutes(next);
+            saveProgress();
+            refreshProgress();
+            toast("Weekly goal: " + Math.round(next) + " minutes");
+            return true;
+        });
+        progressRow.addView(progressView, new LinearLayout.LayoutParams(0, dp(58), 1f));
+        continueChip = chip("CONTINUE");
+        continueChip.setOnClickListener(v -> {
+            View.OnClickListener action = cardActions.get(personalBests.getString("last.game"));
+            if (action != null) {
+                action.onClick(v);
+            } else {
+                toast("Pick a game - CONTINUE will bring you back to it");
+            }
+        });
+        progressRow.addView(continueChip);
+        TextView artChip = chip("SESSION ART");
+        artChip.setOnClickListener(v -> showSessionArt());
+        progressRow.addView(artChip);
+        TextView helpChip = chip("HELP");
+        helpChip.setOnClickListener(v -> showHelpPage(0));
+        progressRow.addView(helpChip);
+        root.addView(progressRow, marginTop(dp(4)));
+
         // Every game on one screen: a fixed grid sized from the display, no scrolling.
         int widthDp = (int) (getResources().getDisplayMetrics().widthPixels
                 / getResources().getDisplayMetrics().density);
@@ -619,7 +680,7 @@ public class MainActivity extends Activity
         // on a constant - removing four games alone made every cell taller.
         int heightDp = (int) (getResources().getDisplayMetrics().heightPixels
                 / getResources().getDisplayMetrics().density);
-        int chromeDp = 96;   // header, last-session line and the paddings around the grid
+        int chromeDp = 160;  // header, progress row, last-session line and the paddings
         int cellDp = Math.max(76, (heightDp - chromeDp) / Math.max(1, rows));
         // What is left after the title and the personal-best line underneath.
         int iconDp = Math.max(58, Math.min(132, cellDp - 46));
@@ -654,7 +715,13 @@ public class MainActivity extends Activity
         card.setPadding(dp(6), dp(6), dp(6), dp(6));
         card.setBackgroundColor(getColorCompat(R.color.surface));
         card.setClickable(true);
-        card.setOnClickListener(onTap);
+        cardActions.put(title, onTap);
+        card.setOnClickListener(v -> {
+            if (!"GAUGES".equals(title)) {
+                personalBests.putString("last.game", title);
+            }
+            onTap.onClick(v);
+        });
 
         GameIconView iconView = new GameIconView(this, icon, color);
         card.addView(iconView, new LinearLayout.LayoutParams(dp(58), dp(58)));
@@ -843,6 +910,12 @@ public class MainActivity extends Activity
             game.start();
         });
         row.addView(dist);
+        TextView share = chip("SHARE");
+        share.setOnClickListener(v -> shareRecording(game));
+        row.addView(share);
+        TextView importChip = chip("IMPORT");
+        importChip.setOnClickListener(v -> importRecording(game));
+        row.addView(importChip);
         showGame(game, gameScreen("RACE", game, row));
     }
 
@@ -892,6 +965,247 @@ public class MainActivity extends Activity
     private void openCollector() {
         CollectorGame game = new CollectorGame(this, personalBests);
         showGame(game, gameScreen("COLLECTOR", game, null));
+    }
+
+    /* ---------- progress, session art, help, sharing ---------- */
+
+    /** Once a second: rowing time (only while strokes land) and metres to today's log. */
+    private void logProgressSecond() {
+        double total = journeyLifetime + journeySession;
+        double metres = lastProgressMetres < 0 ? 0 : Math.max(0, total - lastProgressMetres);
+        lastProgressMetres = total;
+        boolean rowing = lastStatus != null && lastStatus.stillRowing;
+        if (rowing || metres > 0) {
+            progress.addRowing(RegattaGame.today(), rowing ? 1f : 0f, (float) Math.min(metres, 20));
+        }
+    }
+
+    private void saveProgress() {
+        if (personalBests != null) {
+            personalBests.putString("progress", progress.encode());
+        }
+    }
+
+    private void refreshProgress() {
+        if (progressView == null) {
+            return;
+        }
+        long today = RegattaGame.today();
+        progressView.set(progress.totalXp(), progress.weekMinutes(today), progress.goalMinutes(), progress.streak(today));
+        String last = personalBests.getString("last.game");
+        continueChip.setText(last == null ? "CONTINUE" : "CONTINUE  " + last + "  \u25B6");
+    }
+
+    /** The finished session as a poster: one spoke per stroke. */
+    private void showSessionArt() {
+        if (sessionStrokes.size() < 10) {
+            toast("Row a session first - the art is drawn from your strokes");
+            return;
+        }
+        int n = sessionStrokes.size();
+        float[] power = new float[n];
+        float[] rate = new float[n];
+        for (int i = 0; i < n; i++) {
+            power[i] = sessionStrokes.get(i)[0];
+            rate[i] = sessionStrokes.get(i)[1];
+        }
+        float seconds = sessionFirstStrokeMs > 0 ? (System.currentTimeMillis() - sessionFirstStrokeMs) / 1000f : 0f;
+        double kcal = lastStatus != null ? lastStatus.meter.kcal() : 0;
+        SessionArtView art = new SessionArtView(this);
+        art.setSession(power, rate,
+                java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(new java.util.Date()),
+                Math.round(journeySession) + " m", PersonalBests.formatTime(seconds),
+                (sessionWattSamples > 0 ? Math.round(sessionWattSum / sessionWattSamples) : 0) + " W avg",
+                Math.round(kcal) + " kcal");
+
+        FrameLayout frame = new FrameLayout(this);
+        frame.addView(art, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(dp(12), dp(10), dp(12), dp(10));
+        TextView back = chip("\u2039  HOME");
+        back.setOnClickListener(v -> showHome());
+        bar.addView(back);
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            TextView send = chip("SEND TO LAPTOP");
+            send.setOnClickListener(v -> captureScreenshot("session-art"));
+            bar.addView(send);
+        }
+        frame.addView(bar, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT));
+        showScreen(frame);
+    }
+
+    /** First-run tour and HELP: a few short pages, the last ones about numbers and getting back. */
+    private void showHelpPage(int page) {
+        String[][] pages = {
+                {"Welcome to WAKE",
+                        "WAKE reads your rowing monitor and turns every stroke into gauges and games.\n\n"
+                                + "Take a stroke now: the needles rise with the drive and ease off after it, "
+                                + "the way the boat runs."},
+                {"Pick anything",
+                        "Every game tunes itself to you. WAKE learns your typical power, speed and stroke "
+                                + "rate as you row, so targets stay a stretch, not a wall.\n\n"
+                                + "CONTINUE on the home screen takes you straight back to your last game."},
+                {"What your numbers mean",
+                        String.format(Locale.US, "Split: time per 500 m - lower is faster. Yours is typically %s.\n"
+                                        + "Stroke rate: strokes per minute - yours is about %d.\n"
+                                        + "Watts: power you put in - typically %d W for you.\n"
+                                        + "Drive : recovery: coaches aim for 1 : 2.\n"
+                                        + "kcal: food energy, from measured work at 25%% muscle efficiency.",
+                                PersonalBests.formatPace((float) profile.typicalSplit()),
+                                Math.round(profile.typicalRate()), Math.round(profile.typicalWatts()))},
+                {"Real calories",
+                        "Tap CALIBRATE with a luggage scale and a tape measure (about 10 minutes) and WAKE "
+                                + "measures your work from the paddle itself instead of the monitor's formula."},
+                {"Back to Ergatta",
+                        "Exit WAKE with the X at the top right. If Ergatta does not read your strokes "
+                                + "afterwards, restart the tablet - that always hands the rower back."}
+        };
+        if (page < 0 || page >= pages.length) {
+            return;
+        }
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setTitle(pages[page][0] + "  (" + (page + 1) + "/" + pages.length + ")")
+                .setMessage(pages[page][1])
+                .setNegativeButton("Close", (d, w) -> d.dismiss());
+        if (page + 1 < pages.length) {
+            dialog.setPositiveButton("Next", (d, w) -> showHelpPage(page + 1));
+        } else {
+            dialog.setPositiveButton("Row", (d, w) -> d.dismiss());
+        }
+        dialog.show();
+    }
+
+    /** Uploads your best recording at the race distance to the laptop, to hand to a friend. */
+    private void shareRecording(GhostRaceGame game) {
+        String samples = game.bestRecording();
+        if (samples == null || game.bestTime() <= 0) {
+            toast("Finish a " + game.raceMeters() + " m race first - your best is what gets shared");
+            return;
+        }
+        if (TextUtils.isEmpty(serverUrl)) {
+            toast("Sharing goes through the laptop dashboard - start it first");
+            return;
+        }
+        String name = personalBests.getString("rower.name");
+        if (name == null) {
+            android.widget.EditText input = new android.widget.EditText(this);
+            input.setHint("Your rower name");
+            new AlertDialog.Builder(this)
+                    .setTitle("Name on your recording")
+                    .setView(input)
+                    .setNegativeButton("Cancel", (d, w) -> d.dismiss())
+                    .setPositiveButton("Share", (d, w) -> {
+                        String typed = input.getText().toString().trim();
+                        personalBests.putString("rower.name", typed.isEmpty() ? "WAKE rower" : typed);
+                        shareRecording(game);
+                    })
+                    .show();
+            return;
+        }
+        final String base = serverUrl;
+        final int meters = game.raceMeters();
+        final float time = game.bestTime();
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                JSONObject body = new JSONObject();
+                body.put("name", name);
+                body.put("meters", meters);
+                body.put("time", time);
+                body.put("samples", samples);
+                byte[] bytes = body.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                connection = (HttpURLConnection) new URL(base + "/api/ghosts").openConnection();
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(6000);
+                connection.setRequestMethod("POST");
+                connection.setRequestProperty("Content-Type", "application/json");
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(bytes.length);
+                OutputStream out = connection.getOutputStream();
+                out.write(bytes);
+                out.close();
+                int code = connection.getResponseCode();
+                runOnUiThread(() -> toast(code == 200
+                        ? "Shared to the laptop: data/ghosts - copy it to a friend's WAKE laptop"
+                        : "Share refused: " + code));
+            } catch (IOException | JSONException e) {
+                runOnUiThread(() -> toast("Share failed: " + e.getMessage()));
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }, "share-recording").start();
+    }
+
+    /** Lists the recordings on the laptop and races the one picked. */
+    private void importRecording(GhostRaceGame game) {
+        if (TextUtils.isEmpty(serverUrl)) {
+            toast("Importing goes through the laptop dashboard - start it first");
+            return;
+        }
+        final String base = serverUrl;
+        new Thread(() -> {
+            try {
+                JSONObject list = new JSONObject(httpGet(base + "/api/ghosts"));
+                JSONArray ghosts = list.optJSONArray("ghosts");
+                if (ghosts == null || ghosts.length() == 0) {
+                    runOnUiThread(() -> toast("No recordings on the laptop yet - SHARE one, or copy a friend's into data/ghosts"));
+                    return;
+                }
+                String[] labels = new String[ghosts.length()];
+                String[] ids = new String[ghosts.length()];
+                for (int i = 0; i < ghosts.length(); i++) {
+                    JSONObject g = ghosts.getJSONObject(i);
+                    ids[i] = g.optString("id");
+                    labels[i] = g.optString("name") + "  \u00b7  " + g.optInt("meters") + " m  \u00b7  "
+                            + PersonalBests.formatTime((float) g.optDouble("time"));
+                }
+                runOnUiThread(() -> new AlertDialog.Builder(this)
+                        .setTitle("Race a recording")
+                        .setItems(labels, (d, which) -> new Thread(() -> {
+                            try {
+                                JSONObject g = new JSONObject(httpGet(base + "/api/ghosts/" + ids[which]));
+                                String name = g.optString("name", "Friend");
+                                int meters = g.optInt("meters");
+                                float time = (float) g.optDouble("time");
+                                String samples = g.optString("samples");
+                                runOnUiThread(() -> {
+                                    game.importFriend(name, meters, time, samples);
+                                    toast("Racing " + name + " over " + meters + " m");
+                                });
+                            } catch (IOException | JSONException e) {
+                                runOnUiThread(() -> toast("Import failed: " + e.getMessage()));
+                            }
+                        }, "import-recording").start())
+                        .setNegativeButton("Cancel", (dd, w) -> dd.dismiss())
+                        .show());
+            } catch (IOException | JSONException e) {
+                runOnUiThread(() -> toast("Could not reach the laptop: " + e.getMessage()));
+            }
+        }, "list-recordings").start();
+    }
+
+    private static String httpGet(String url) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(6000);
+            java.io.InputStream in = connection.getInputStream();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            in.close();
+            return out.toString("UTF-8");
+        } finally {
+            connection.disconnect();
+        }
     }
 
     /* ---------- calibration ---------- */
@@ -3274,6 +3588,12 @@ public class MainActivity extends Activity
 
             paddleView.setSpeed(onPulses ? shownSpeed : status.waterSpeedMps, driving);
             strokeShapeView.update(status.meter);
+            PulseMeter.Stroke artStroke = status.meter.lastStroke;
+            if (artStroke != null && artStroke != lastArtStroke && sessionStrokes.size() < 4000) {
+                lastArtStroke = artStroke;
+                float power = !Double.isNaN(artStroke.averagePowerW) ? (float) artStroke.averagePowerW : status.watts;
+                sessionStrokes.add(new float[]{power, (float) status.strokeRatePrecise});
+            }
 
             connectionBanner.setText(connectionSummary(status));
             connectionBanner.setTextColor(getColorCompat(status.monitorConnected
@@ -3307,10 +3627,14 @@ public class MainActivity extends Activity
                 if (tickCount % 30 == 0 && lastStatus != null && lastStatus.stillRowing) {
                     profile.sample(lastStatus.watts, lastStatus.waterSpeedMps, lastStatus.strokeRatePrecise);
                 }
+                if (tickCount % 30 == 0) {
+                    logProgressSecond();
+                }
                 if (tickCount % 1800 == 0 && tickCount > 0) {
                     commitJourney();
                     saveMeasuredCalibration();
                     commitProfile(10.0);
+                    saveProgress();
                 }
                 if (gameStrip != null && currentGame != null) {
                     gameStrip.setClock(currentGame.activeSeconds(), currentGame.isClockRunning(),

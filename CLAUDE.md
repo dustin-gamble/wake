@@ -953,6 +953,52 @@ calories now come from the meter and read MEASURED once calibrated.
 **Handing the rower back to Ergatta:** the user decided a tablet (Android) restart is an acceptable
 way back, so the hand-back is no longer an open problem to fix - just keep it documented for users.
 
+## The big build: 3.14.0 - 3.18.0 (the IMPROVEMENT_IDEAS.md list, minus sound)
+
+The rower asked to "do it all, but not sound". What landed, by version. Nothing here has been seen
+on the tablet yet - treat every layout as unverified until the rower reports on it.
+
+**`RowerProfile` (3.14.0) - tune to the person rowing.** Learns low/typical/high watts, speed and
+rate (10th/50th/90th percentile) from sessions with 3+ minutes of rowing, blended by minutes,
+persisted as `profile`. Every `GameView` gets it as `profile` before `start()`. **Set thresholds
+from it, never from constants** - the envelope table above is now just the default. Tested.
+
+**Cards (3.14.0).** RACE replaced Pace Boat + Ghost Race (`GhostRaceGame` with RIVAL / PACE / BEST /
+LAST / FRIEND opponents; RIVAL rubber-bands to your recent average and the gap). ZONE ROW plans
+(PYRAMID, LADDER, SPRINTS, STREAK, HEART) replaced Intervals, Sprint Ladder and The Run; zone edges
+and rate bands come from the profile. CANYON is one card with FLY/DRIVE. Journey's card is gone; its
+lifetime total still counts. `IntervalGame`, `SprintLadderGame`, `TheRunGame`, `JourneyGame` deleted.
+
+**Improvements (3.15.0 - 3.16.0).** Head Race panels (gap graph, power per stroke, ribbon, last
+drive); Row Runner jumps on every stroke (from `status.meter.lastStroke` changing - the drive start),
+with crabs and coin arcs; Wave Rider sweet-spot bar and handle-lean carving; Collector lanes from a
+1.2 s averaged speed with hysteresis; Mega Pull record line and NEW BEST; Skyline block factory
+(strong strokes drop 2-3 floor blocks, windows lit by session energy, TODAY tower); gauges gained a
+STROKE SHAPE panel. Coast Flight (fly.js): hovers until 3 strokes, continuous flapping, weave with
+the rhythm, height above ground 35-700 m with level flight at 90% of typical watts (sent as `p` in
+the feed), 12 km tile preloading, adaptive resolution 0.55-0.9, nearest-five place labels.
+
+**New games (3.17.0).** `RiverExplorerGame` (scanline first-person river; deterministic stretches
+seeded by the fork choices that led there; `river.route`, `river.along`, `river.explored` persist;
+minimap rendered to a cached Bitmap), `StrokeCoachGame`, `CrewBoatGame`, `NightGridGame`,
+`RegattaGame` (one ranked race per local day, `regatta.day`), `DailyRowGame` (challenge by date).
+`HeartRateSensor` speaks the standard BLE Heart Rate service (0x180D/0x2A37) - **untested, no strap
+yet** - and feeds `GameView.heartRate()`; drawer has Find Heart Strap and a Max HR chip (`hr.max`).
+
+**Reasons to come back (3.18.0).** `Progress` (tested): daily minutes and metres, XP = metres/10 +
+minutes x 2, level needs 50 (L-1)^2 XP, Monday-start weekly goal, streak of 5-minute days forgiving
+one miss per seven. Home progress row (long-press cycles the goal), CONTINUE (`last.game`), SESSION
+ART (`SessionArtView`, shown on returning home after 60+ strokes), HELP (first-run tour, `tour.done`).
+RACE SHARE/IMPORT go through the laptop: `GET/POST /api/ghosts`, files in `server/data/ghosts` - swap
+by copying the file. **The dashboard must be restarted to get those routes.**
+
+**Handing back to Ergatta:** the rower decided a tablet restart is the accepted way back. It is in
+the HELP tour and on the GitHub page; it is not a bug to fix.
+
+Tests now: `PulseMeterTest`, `RowerProfileTest`, `ProgressTest`, `S4ProtocolTest`,
+`BoatSpeedModelTest` - compile `S4Protocol`, `PulseMeter`, `Coast`, `BoatSpeedModel`,
+`RowerProfile` and `Progress` together with `tools/prototest/.../*.java`.
+
 ## ZONE ROW (3.12.0)
 
 `ZoneRowGame`: a timed piece (10/20/30/5 min chip) drawn as one full-screen instrument, laid out

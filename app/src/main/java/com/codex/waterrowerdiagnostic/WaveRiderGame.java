@@ -121,6 +121,11 @@ final class WaveRiderGame extends GameView {
             rideSeconds += dt;
             // Position is the integral of the speed difference: match the wave and you hold.
             position += (speed - wave) * dt * 0.42f;
+            // With the handle sensor, leaning carves along the face - a small correction, not a
+            // substitute for matching the wave's pace.
+            if (hasSteering()) {
+                position += steering() * 0.18f * dt;
+            }
             score += dt * (inPocket() ? 2.0 : 1.0) * (inBarrel() ? 3.0 : 1.0);
             if (!inBarrel() && sessionSeconds >= nextBarrelAt) {
                 barrelUntil = sessionSeconds + 6;
