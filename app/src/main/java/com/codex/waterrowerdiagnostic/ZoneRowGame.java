@@ -23,9 +23,9 @@ import android.view.MotionEvent;
  * equal quarter of the bar, so a pace in the middle of a zone sits in the middle of its quarter.
  * Tap a zone name to make it the target; the rate bar's band and the time-in-zone clock follow.
  *
- * <p>Shown without the vitals strip, since it is the vitals. Energy is an estimate - mechanical
- * work at a 25% human efficiency - because polling the monitor's calorie register would slow
- * every other reading (CLAUDE.md, "do not add to the poll loop casually").
+ * <p>Shown without the vitals strip, since it is the vitals. Calories come from {@link PulseMeter}'s
+ * work at a 25% muscle efficiency: measured from the paddle's pulses, and absolute once the rower
+ * has done the load-scale calibration (the label then reads MEASURED).
  */
 final class ZoneRowGame extends GameView {
 
@@ -52,6 +52,9 @@ final class ZoneRowGame extends GameView {
     private double pieceStartMeters;
     private double finalMeters = -1;
     private double joules;
+    /** The meter's session work at the last frame, so only work done during the piece counts. */
+    private double lastMeterWork = -1;
+    private boolean energyMeasured;
     private double inZoneSeconds;
     private boolean paused;
     private boolean finished;
@@ -120,6 +123,7 @@ final class ZoneRowGame extends GameView {
         pieceStartMeters = sessionMeters;
         finalMeters = -1;
         joules = 0;
+        lastMeterWork = -1;
         inZoneSeconds = 0;
         paused = false;
         finished = false;
@@ -158,11 +162,15 @@ final class ZoneRowGame extends GameView {
         float pace = speed >= 0.5f ? 500f / speed : 0f;
         int zone = pace > 0f ? zoneAt(splitFraction(pace)) : -1;
 
+        // Work from the pulse meter: measured from the paddle, calibrated if the rower has done the
+        // load-scale test. Counted only while the piece is running.
+        double meterWork = status == null ? -1 : status.meter.workJoules;
+        double workStep = lastMeterWork >= 0 && meterWork >= lastMeterWork ? meterWork - lastMeterWork : 0;
+        lastMeterWork = meterWork;
+        energyMeasured = status != null && status.meter.source == PulseMeter.EnergySource.PULSES_CALIBRATED;
         if (!paused && !finished && isClockRunning()) {
             pieceSeconds += dt;
-            if (status != null) {
-                joules += Math.max(0, status.watts) * dt;
-            }
+            joules += workStep;
             if (zone == targetZone) {
                 inZoneSeconds += dt;
             }
@@ -435,7 +443,7 @@ final class ZoneRowGame extends GameView {
         String avgSplit = pieceSeconds > 5 && meters > 5
                 ? PersonalBests.formatPace((float) (pieceSeconds * 500.0 / meters)) : "--:--";
         int heart = status == null ? 0 : status.heartRate;
-        long kcal = Math.round(joules * 4.0 / 4184.0);
+        long kcal = Math.round(PulseMeter.kcalForWork(joules));
 
         String[] values = {
                 heart > 0 ? String.valueOf(heart) : "--",
@@ -447,7 +455,7 @@ final class ZoneRowGame extends GameView {
                 String.valueOf(kcal)
         };
         String[] names = {"HEART  BPM", "POWER  W", "RATE  SPM", "SPLIT  /500M", "AVG  /500M",
-                "METERS", "CAL  EST"};
+                "METERS", energyMeasured ? "KCAL  MEASURED" : "KCAL  EST"};
 
         float statsLeft = left + size + dp(28f);
         float statsRight = right - size - dp(28f);

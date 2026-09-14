@@ -197,6 +197,8 @@ public class MainActivity extends Activity
     private TextView stateChip;
     private TextView connectionBanner;
     private TextView strokesValue;
+    private TextView kcalValue;
+    private TextView workValue;
     private Button diagnosticsToggle;
     private LinearLayout diagnosticsPanel;
     private View diagnosticsScrim;
@@ -400,6 +402,7 @@ public class MainActivity extends Activity
      */
     @Override
     protected void onStop() {
+        saveMeasuredCalibration();
         if (!isChangingConfigurations() && openConnection != null) {
             releasedForBackground = true;
             publishSimpleEvent("s4-interface-released", true);
@@ -421,6 +424,7 @@ public class MainActivity extends Activity
         personalBests = new PersonalBests(this);
         autoUpload = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(PREF_STREAM, false);
         journeyLifetime = personalBests.get("journey.total", 0f);
+        loadCalibration();
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(getColorCompat(R.color.background));
 
@@ -532,6 +536,9 @@ public class MainActivity extends Activity
         TextView records = chip("RECORDS");
         records.setOnClickListener(v -> showRecords());
         header.addView(records);
+        TextView calibrate = chip("CALIBRATE");
+        calibrate.setOnClickListener(v -> openCalibrate());
+        header.addView(calibrate);
         streamToggle = chip(autoUpload ? "STREAM ON" : "STREAM OFF");
         streamToggle.setOnClickListener(v -> setStreaming(!autoUpload));
         header.addView(streamToggle);
@@ -898,6 +905,73 @@ public class MainActivity extends Activity
         showGame(game, gameScreen("COLLECTOR", game, null));
     }
 
+    /* ---------- calibration ---------- */
+
+    /**
+     * Applies stored calibration to the pulse meter at launch, so measured energy works from the
+     * first stroke. Measured values (drag, pulses per metre, the monitor-matched scale) are seeds the
+     * meter refines; the handle travel and load-scale inertia are the rower's own test results.
+     */
+    private void loadCalibration() {
+        PulseMeter meter = s4Protocol.meter();
+        meter.setDragSeed(personalBests.get("cal.drag", 0f));
+        meter.setPulsesPerMetreSeed(personalBests.get("cal.ppm", 0f));
+        meter.setInertiaAutoSeed(personalBests.get("cal.inertiaAuto", 0f));
+        meter.setHandleMetresPerPulse(personalBests.get("cal.handle", 0f));
+        meter.setInertia(personalBests.get("cal.inertia", 0f));
+    }
+
+    /** Keeps what this session measured, once there is enough of it to trust. */
+    private void saveMeasuredCalibration() {
+        if (personalBests == null) {
+            return;
+        }
+        PulseMeter.Reading r = s4Protocol.meter().reading(System.currentTimeMillis());
+        if (r.coastFits >= 10 && r.dragPerInertia > 0) {
+            personalBests.putFloat("cal.drag", (float) r.dragPerInertia);
+        }
+        if (r.pulsesPerMetreMeasured) {
+            personalBests.putFloat("cal.ppm", (float) r.pulsesPerMetre);
+        }
+        double auto = s4Protocol.meter().inertiaAuto();
+        if (auto > 0) {
+            personalBests.putFloat("cal.inertiaAuto", (float) auto);
+        }
+    }
+
+    private void openCalibrate() {
+        CalibrateGame game = new CalibrateGame(this, (what, value, detail) -> {
+            PulseMeter meter = s4Protocol.meter();
+            if ("handle".equals(what)) {
+                meter.setHandleMetresPerPulse(value);
+                personalBests.putFloat("cal.handle", (float) value);
+            } else if ("inertia".equals(what)) {
+                meter.setInertia(value);
+                personalBests.putFloat("cal.inertia", (float) value);
+            }
+            saveMeasuredCalibration();
+            try {
+                PulseMeter.Reading r = meter.reading(System.currentTimeMillis());
+                JSONObject payload = new JSONObject();
+                payload.put("what", what);
+                payload.put("value", value);
+                payload.put("detail", detail);
+                payload.put("dragPerInertia", r.dragPerInertia);
+                payload.put("coastFits", r.coastFits);
+                payload.put("pulsesPerMetre", r.pulsesPerMetre);
+                payload.put("handleMetresPerPulse", r.handleMetresPerPulse);
+                payload.put("inertia", r.inertia);
+                payload.put("source", r.source.name());
+                // Forced: a calibration is rare and is exactly what needs checking on the laptop.
+                publishEvent("calibration", payload, true);
+            } catch (JSONException e) {
+                setUploadStatus("Calibration event failed: " + e.getMessage());
+            }
+            toast("Calibration saved");
+        });
+        showGame(game, gameScreen("CALIBRATE", game, null, null, false));
+    }
+
     /** A timed piece on two lane bars. Full-screen instrument, so no vitals strip. */
     private void openZoneRow() {
         ZoneRowGame game = new ZoneRowGame(this, personalBests);
@@ -943,8 +1017,8 @@ public class MainActivity extends Activity
         }
         for (java.util.Map.Entry<String, Object> e : sorted.entrySet()) {
             String key = e.getKey();
-            if (key.startsWith("ghost.")) {
-                continue;   // a recording, not a number anyone wants to read
+            if (key.startsWith("ghost.") || key.startsWith("cal.")) {
+                continue;   // a recording or a calibration constant, not a record
             }
             Object raw = e.getValue();
             if (!(raw instanceof Float)) {
@@ -1913,7 +1987,7 @@ public class MainActivity extends Activity
         return connectionBanner;
     }
 
-    /** Two rows of three, so nothing is orphaned on its own line. */
+    /** Two rows of four, so nothing is orphaned on its own line. */
     private View buildMetricGrid() {
         LinearLayout grid = new LinearLayout(this);
         grid.setOrientation(LinearLayout.VERTICAL);
@@ -1924,12 +1998,14 @@ public class MainActivity extends Activity
         elapsedValue.setTextSize(38);
         distanceValue = addMetric(top, "DISTANCE", "0 m", false);
         paceValue = addMetric(top, "PACE /500", "--:--", true);
+        kcalValue = addMetric(top, "KCAL", "0", false);
         grid.addView(top);
 
         LinearLayout bottom = metricRow();
         strokeRateValue = addMetric(bottom, "STROKES/MIN", "0", false);
         wattsValue = addMetric(bottom, "POWER", "0 W", false);
         strokesValue = addMetric(bottom, "STROKES", "0", false);
+        workValue = addMetric(bottom, "WORK", "0 kJ", false);
         grid.addView(bottom, marginTop(dp(2)));
 
         return grid;
@@ -3097,6 +3173,10 @@ public class MainActivity extends Activity
             // Time and stroke count are exact counters: step them, never interpolate.
             elapsedValue.setText(formatElapsed(status.elapsedSeconds));
             strokesValue.setText(String.valueOf(status.strokes));
+            // Measured from the paddle's pulses (see PulseMeter); "~" until the load-scale test.
+            boolean measured = status.meter.source == PulseMeter.EnergySource.PULSES_CALIBRATED;
+            kcalValue.setText((measured ? "" : "~") + Math.round(status.meter.kcal()));
+            workValue.setText(Math.round(status.meter.workJoules / 1000.0) + " kJ");
 
             targetDistance = status.distanceMeters > 0
                     ? status.distanceMeters
@@ -3182,6 +3262,7 @@ public class MainActivity extends Activity
                 // rise and run, where per-poll sampling would draw a once-a-second staircase.
                 if (tickCount % 1800 == 0 && tickCount > 0) {
                     commitJourney();
+                    saveMeasuredCalibration();
                 }
                 if (gameStrip != null && currentGame != null) {
                     gameStrip.setClock(currentGame.activeSeconds(), currentGame.isClockRunning(),

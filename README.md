@@ -35,6 +35,8 @@ no root, no system changes, and Ergatta itself is untouched and still the fallba
   block per stroke. Each shows the same vitals strip, so the numbers are never hidden by the game.
 - **Zone Row** — a timed piece as one full-screen instrument: split across four effort zones,
   stroke rate against a target band, time in zone.
+- **Measured energy** — work and calories from the paddle's own 40-per-second pulses, with a
+  load-scale calibration so they don't depend on the monitor's formula. See [CALIBRATION.md](CALIBRATION.md).
 - **Coast Flight** — a CesiumJS globe with satellite imagery and terrain. Power above 60 W is
   lift, boat speed is airspeed, the route flies itself, and your progress down the ~900 km coast
   persists across sessions.

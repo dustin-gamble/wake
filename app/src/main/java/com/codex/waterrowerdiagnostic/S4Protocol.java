@@ -88,6 +88,8 @@ final class S4Protocol {
         final int strokeRateAverage;
         /** {@link #strokeRateAverage} before rounding, for a display that shows "25.3". */
         final double strokeRatePrecise;
+        /** Measurements from the pulse stream: paddle rate, stroke shape, work. Never null. */
+        final PulseMeter.Reading meter;
 
         Status(
                 boolean monitorConnected,
@@ -117,7 +119,8 @@ final class S4Protocol {
                 int strokeRateAverage,
                 double pulseEffort,
                 int pulseStrokes,
-                double strokeRatePrecise) {
+                double strokeRatePrecise,
+                PulseMeter.Reading meter) {
             this.monitorConnected = monitorConnected;
             this.rowing = rowing;
             this.elapsedSeconds = elapsedSeconds;
@@ -146,6 +149,7 @@ final class S4Protocol {
             this.pulseEffort = pulseEffort;
             this.pulseStrokes = pulseStrokes;
             this.strokeRatePrecise = strokeRatePrecise;
+            this.meter = meter != null ? meter : PulseMeter.EMPTY;
         }
     }
 
@@ -312,6 +316,11 @@ final class S4Protocol {
     private boolean pulseDriving;
     private long pulseDriveAtMs;
     private int pulseStrokes;
+    /**
+     * The pulse stream as measurements. Deliberately survives reset(), like pulseStrokes: the port
+     * reopens on faults, and a session's work must not vanish with it.
+     */
+    private final PulseMeter meter = new PulseMeter();
 
     S4Protocol(Listener listener) {
         this.listener = listener;
@@ -602,7 +611,8 @@ final class S4Protocol {
                 averagedStrokeRate(now),
                 pulseEffort(),
                 pulseStrokes(),
-                preciseStrokeRate(now));
+                preciseStrokeRate(now),
+                meter.reading(now));
     }
 
     private void recordStrokeTick(long atMs) {
@@ -778,6 +788,7 @@ final class S4Protocol {
         } catch (NumberFormatException ignored) {
             lastPulseValue = 0;
         }
+        meter.onPulse(lastPulseValue, lastPacketAtMs, watts);
         // Pxx is a count per fixed 25ms interval, not a period: packets arrive at 40/s whenever
         // the flywheel turns, and the payload rises monotonically with speed and power (3.75 m/s
         // at 7, 4.53 m/s at 13, over 7330 samples). Noisy per packet, so it is smoothed - but it
@@ -837,6 +848,11 @@ final class S4Protocol {
         }
         double faded = pulseSmoothed * (1.0 - quiet / 1200.0);
         return Math.max(0, Math.min(1, (faded - 1) / 12.0));
+    }
+
+    /** For calibration: seeds and load-scale results are set on the meter from the UI thread. */
+    PulseMeter meter() {
+        return meter;
     }
 
     /** Strokes counted from the pulse stream alone, for when address 140 cannot be read. */
@@ -914,6 +930,7 @@ final class S4Protocol {
                 break;
             case "057":
                 displayDistanceMeters = value;
+                meter.onDistance(value);
                 break;
             case "142":
                 strokeAvgTimeRaw = value;

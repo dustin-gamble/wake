@@ -911,6 +911,48 @@ words is to "hang to speed a little longer, slow down slowly, then go to zero".
 - Tests: `BoatSpeedModelTest` pins hang, midpoint, exact zero, every-frame fall, the pulse-stop
   finish and the drag scaling. Compile `Coast.java` with it.
 
+## Measured energy: PulseMeter and CALIBRATE (3.13.0)
+
+**`PulseMeter.java` turns the 25 ms pulse counts into physics**, fed by `S4Protocol.recordPulse`
+and exposed on every `Status` as `status.meter` (a `PulseMeter.Reading`, never null). Four packets
+make a 100 ms bin; `w` is pulses per second.
+
+- **Power** `P = I w (c w^2 + dw/dt)`. Work is `I (c * integral(w^3 dt) + change in w^2/2)`, which
+  needs no drive/recovery detection and is robust to the integer counts.
+- **`c` (drag / inertia) is measured from every recovery:** `1/w` rises linearly at slope `c`
+  while coasting. The fit runs from after the drive end is confirmed to one bin before the next
+  stroke's raw low point. Including the next drive's accelerating bins had made `c` 10-15% low on
+  the simulated paddle.
+- **Pulses per boat metre** come from the distance register over 100 m windows.
+- **`I` (inertia)** is the only unobservable. Until the rower calibrates it, it is matched to the
+  monitor's watts (`EnergySource.PULSES_MONITOR_SCALED`); the load-scale test sets it absolutely
+  (`PULSES_CALIBRATED`). Before any coast is measured, energy falls back to integrating monitor watts.
+- **Drive end** is where the paddle starts following its fitted coast curve: the last bin clearly
+  below it (tolerance scaled to count resolution, two bins in a row), refined by intersecting a line
+  through the last drive bins with the coast curve. A fixed 2% tolerance let one noisy coast bin
+  end a steady pull 2.5 s late.
+- Calories: `work / 4184 / 0.25` (25% muscle efficiency), resting metabolism excluded.
+
+`PulseMeterTest` checks all of it against a simulated paddle with true integer counts: drag within
+1%, calibrated work within 1%, every stroke counted, pulses per metre within 0.2%, a steady pull's
+handle travel within 2% (the calibration motion), and rowing-stroke drive length within 15%. That
+last one is inherently loose: a real drive's force fades to nothing, so the measured drive is the
+effective one.
+
+**CALIBRATE** (`CalibrateGame`, chip on the home header) walks the rower through boat distance
+(automatic), water drag (automatic), handle travel (tape measure, 3-5 slow steady pulls) and force
+(load scale, 3+ steady pulls at different speeds; at a steady pull `F h w = I c w^3`). Results go
+through `CalibrateGame.Host`, are stored under `cal.*` in `PersonalBests` (hidden from Records),
+and are sent to the laptop as a forced `calibration` event. `saveMeasuredCalibration()` keeps the
+session's drag, pulses per metre and monitor-matched inertia every minute and in `onStop`, so the
+next session starts calibrated. User-facing steps: [CALIBRATION.md](CALIBRATION.md).
+
+The gauge screen gained KCAL ("~" until the force step is saved) and WORK tiles; ZONE ROW's
+calories now come from the meter and read MEASURED once calibrated.
+
+**Handing the rower back to Ergatta:** the user decided a tablet (Android) restart is an acceptable
+way back, so the hand-back is no longer an open problem to fix - just keep it documented for users.
+
 ## ZONE ROW (3.12.0)
 
 `ZoneRowGame`: a timed piece (10/20/30/5 min chip) drawn as one full-screen instrument, laid out
