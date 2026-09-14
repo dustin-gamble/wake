@@ -228,6 +228,15 @@ public class MainActivity extends Activity
     private UsbInterface claimedInterface;
     /** CDC data interface (bulk IN/OUT), kept so the claim can be re-taken after a write fails. */
     private UsbInterface dataInterface;
+    /** CDC control interface (class 2). The kernel cdc_acm driver binds here, so reclaim it too. */
+    private UsbInterface controlInterface;
+    /** Rate limit for reclaiming, so a tug-of-war over the interface cannot spin the CPU. */
+    private static final long RECLAIM_MIN_GAP_MS = 250;
+    private long lastReclaimMs;
+    private long lastReclaimReportMs;
+    private int reclaimsThisSession;
+    /** True once onStop has given the rower back, so onStart knows to take it again. */
+    private boolean releasedForBackground;
     private Thread readerThread;
     private Thread protocolWriterThread;
     private Thread statusHeartbeatThread;
@@ -352,6 +361,44 @@ public class MainActivity extends Activity
             publishSimpleEvent("app-linked", true);
             sendSnapshot("linked-from-browser", true);
         }
+    }
+
+    /**
+     * Take the rower again when WAKE comes back on screen - but only if onStop gave it back.
+     *
+     * <p>onStart also runs straight after onCreate, where auto-connect already opens the port;
+     * the flag stops that turning into a double open.
+     */
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (releasedForBackground) {
+            releasedForBackground = false;
+            resetReopenBudget();
+            if (selectedDevice != null) {
+                log("WAKE is back on screen; taking the rower again");
+                openSelectedDevice();
+            }
+        }
+    }
+
+    /**
+     * Give the rower back the moment WAKE leaves the screen.
+     *
+     * <p>WAKE now reclaims the rower from whatever takes it while WAKE is showing. That is only
+     * acceptable because it stops the instant WAKE is not: Ergatta must get the rower straight
+     * back and keep working as the safe fallback. Before this, WAKE held its connection open when
+     * merely backgrounded - which, with reclaiming added, would have kept stealing from Ergatta
+     * out of sight.
+     */
+    @Override
+    protected void onStop() {
+        if (!isChangingConfigurations() && openConnection != null) {
+            releasedForBackground = true;
+            publishSimpleEvent("s4-interface-released", true);
+            closeCurrentConnection();
+        }
+        super.onStop();
     }
 
     @Override
@@ -2221,6 +2268,7 @@ public class MainActivity extends Activity
             openConnection = connection;
             openSerialPort = port;
             dataInterface = findBulkInterface(device);
+            controlInterface = findControlInterface(device);
             log("Opened serial driver " + driver.getClass().getSimpleName()
                     + " at " + selectedBaud + " 8N1");
             publishDeviceEvent("serial-opened", device, true);
@@ -2233,6 +2281,65 @@ public class MainActivity extends Activity
             safeClose(port);
             connection.close();
         }
+    }
+
+    /** The CDC communication (control) interface - class 2 - the one a kernel ACM driver binds. */
+    private static UsbInterface findControlInterface(UsbDevice device) {
+        for (int i = 0; i < device.getInterfaceCount(); i++) {
+            UsbInterface candidate = device.getInterface(i);
+            if (candidate.getInterfaceClass() == UsbConstants.USB_CLASS_COMM) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Take the rower's interfaces back from whatever grabbed them.
+     *
+     * <p>Measured on 3.9.3: about 2.7s after WAKE opens the port, another owner takes the
+     * interface - a non-forcing claim fails - and both directions die together. The owner is most
+     * likely the kernel cdc_acm driver re-binding: a forcing claim can detach a kernel driver but
+     * not another app's handle, and forcing claims succeeded 18 of 18 times on 3.9.1.
+     *
+     * <p>The user chose to have WAKE take the rower back while WAKE is on screen. That is only
+     * acceptable because {@link #onStop} gives it straight back the moment WAKE is not, so Ergatta
+     * keeps working as the fallback.
+     *
+     * <p>Control interface first, then data: the order the library claims them in at open, and
+     * the kernel driver binds the control interface and claims data through it.
+     */
+    private boolean reclaimInterfaces(String reason) {
+        UsbDeviceConnection connection = openConnection;
+        if (connection == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastReclaimMs < RECLAIM_MIN_GAP_MS) {
+            return false;
+        }
+        lastReclaimMs = now;
+        boolean control;
+        boolean data;
+        synchronized (ioLock) {
+            control = controlInterface != null && connection.claimInterface(controlInterface, true);
+            data = dataInterface != null && connection.claimInterface(dataInterface, true);
+        }
+        reclaimsThisSession++;
+        if (reclaimsThisSession <= 3 || now - lastReclaimReportMs > 5000) {
+            lastReclaimReportMs = now;
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("reason", reason);
+                payload.put("controlClaimed", control);
+                payload.put("dataClaimed", data);
+                payload.put("reclaimsThisSession", reclaimsThisSession);
+                publishEvent("s4-interface-reclaimed", payload, true);
+            } catch (JSONException e) {
+                setUploadStatus("Reclaim report failed: " + e.getMessage());
+            }
+        }
+        return data;
     }
 
     /** The interface holding the bulk OUT endpoint we write commands to. */
@@ -2375,6 +2482,9 @@ public class MainActivity extends Activity
                                 written = true;
                                 break;
                             }
+                            // The probe has already recorded who owned the interface; now take it
+                            // back and retry, rather than waiting for a write that cannot land.
+                            reclaimInterfaces("write-refused");
                             if (System.currentTimeMillis() - retryStart > WRITE_RETRY_BUDGET_MS) {
                                 break;
                             }
@@ -2554,6 +2664,7 @@ public class MainActivity extends Activity
         }
 
         dataInterface = null;
+        controlInterface = null;
         if (openConnection != null && claimedInterface != null) {
             openConnection.releaseInterface(claimedInterface);
             claimedInterface = null;

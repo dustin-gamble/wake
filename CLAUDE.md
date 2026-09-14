@@ -444,6 +444,36 @@ guardrail about preserving Ergatta, so they are the user's decision, not an impl
 - *Find what started the claiming at 08:26 and avoid triggering it.*
 - *Leave Ergatta's claim alone* and accept that WAKE cannot run alongside it.
 
+### The chosen fix: take the rower back while WAKE is on screen, give it back when not (3.10.0)
+
+The user chose this over hunting the trigger or leaving Ergatta's claim alone. Two halves, and the
+second one is the one that must never regress:
+
+**Take it back.** On every refused write, after the ownership probe has recorded who held the
+interface, `reclaimInterfaces()` force-claims the **control interface, then the data interface** on
+the existing connection, and the write is retried. Both, because this device is CDC-ACM:
+
+| iface | class | endpoints | role |
+|---|---|---|---|
+| 0 | 2 communication, ACM | interrupt IN `0x81` | the kernel `cdc_acm` driver binds here |
+| 1 | 10 cdc-data | bulk OUT `0x02`, bulk IN `0x82` | commands, replies and pulses |
+
+A forcing claim detaches a kernel driver; it cannot take an interface from another app's handle.
+Rate-limited to one reclaim per 250 ms so a tug-of-war cannot spin the CPU. Reported as
+`s4-interface-reclaimed` (first three, then one per 5 s) with `controlClaimed` / `dataClaimed`.
+
+**Give it back.** WAKE used to override only `onCreate` and `onDestroy`, so going Home left the
+connection open. With reclaiming added that would have kept stealing from Ergatta out of sight.
+`onStop` now publishes `s4-interface-released` and closes the connection the instant WAKE is not
+visible (skipped for configuration changes); the library's `closeInt` releases both interfaces.
+`onStart` retakes the rower only if `onStop` released it, so the normal launch - where auto-connect
+already opens the port - is not a double open.
+
+**Why this sits inside the Ergatta guardrail:** Ergatta is not disabled, removed or modified, and
+its behaviour with WAKE closed or backgrounded is exactly as before. It only loses the rower while
+WAKE is the app on screen. **If you change this, keep the release in `onStop`.** Without it WAKE
+would deprive Ergatta of the rower whenever it is merely in the background.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
