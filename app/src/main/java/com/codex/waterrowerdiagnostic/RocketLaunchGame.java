@@ -22,10 +22,12 @@ final class RocketLaunchGame extends GameView {
 
     private static final float KARMAN = 100_000f;      // metres, the finish
     private static final float[] STAGE_ALT = {0f, 12_000f, 35_000f, 70_000f};
-    // Was {130, 105, 80, 58}. Measured median power is 129 W, so the first stage asked for
-    // exactly a steady effort just to hover and the rocket never left the pad. Lift-off now
-    // wants a firm pull rather than a personal best, and the ladder still eases as it climbs.
-    private static final float[] STAGE_HOVER = {95f, 82f, 68f, 54f};
+    // Was {130, 105, 80, 58} W, then {95, 82, 68, 54} W tuned to one rower's 129 W median. Now a
+    // share of each rower's own typical power (74% is that 95 W for the original rower), so lift-off
+    // wants a firm pull from anyone, and the ladder still eases as it climbs.
+    private static final float[] STAGE_HOVER_SHARE = {0.74f, 0.64f, 0.53f, 0.42f};
+    /** The power test: how high can you get in one minute. */
+    private static final float TEST_SECONDS = 60f;
     private static final String[] LAYER = {"TROPOSPHERE", "STRATOSPHERE", "MESOSPHERE", "THERMOSPHERE"};
 
     private final PersonalBests bests;
@@ -46,6 +48,10 @@ final class RocketLaunchGame extends GameView {
     private double stageFlash;
     private float plume;
     private double maxAltitude;
+    private boolean testMode;
+    private boolean testDone;
+    private double testSeconds;
+    private double testWattSeconds;
 
     RocketLaunchGame(Context context, PersonalBests bests) {
         super(context);
@@ -67,6 +73,19 @@ final class RocketLaunchGame extends GameView {
         velocity = 0f;
         stage = 0;
         maxAltitude = 0;
+        testDone = false;
+        testSeconds = 0;
+        testWattSeconds = 0;
+    }
+
+    /** A 60-second power test instead of the climb to orbit. Restarts the launch. */
+    void setTestMode(boolean test) {
+        testMode = test;
+        start();
+    }
+
+    boolean testMode() {
+        return testMode;
     }
 
     @Override
@@ -78,7 +97,7 @@ final class RocketLaunchGame extends GameView {
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_DOWN && (over || orbit)) {
+        if (e.getAction() == MotionEvent.ACTION_DOWN && (over || orbit || testDone)) {
             start();
             return true;
         }
@@ -86,7 +105,7 @@ final class RocketLaunchGame extends GameView {
     }
 
     private float hoverWatts() {
-        return STAGE_HOVER[Math.min(stage, STAGE_HOVER.length - 1)];
+        return (float) profile.typicalWatts() * STAGE_HOVER_SHARE[Math.min(stage, STAGE_HOVER_SHARE.length - 1)];
     }
 
     @Override
@@ -98,6 +117,15 @@ final class RocketLaunchGame extends GameView {
         }
         int watts = status == null ? 0 : status.watts;
 
+        if (started && !over && !orbit && testMode) {
+            testSeconds += dt;
+            testWattSeconds += watts * dt;
+            if (testSeconds >= TEST_SECONDS) {
+                over = true;
+                testDone = true;
+                bests.recordHighest("rocket.test60", (float) maxAltitude);
+            }
+        }
         if (started && !over && !orbit) {
             // Net thrust in altitude m/s^2. Thin air above 40 km helps, so the top is a payoff.
             float thin = 1f + Math.min(1.2f, altitude / 60_000f);
@@ -198,7 +226,7 @@ final class RocketLaunchGame extends GameView {
 
         // Exhaust plume, then the rocket.
         float rx = w * 0.5f;
-        if (plume > 0.05f && !over) {
+        if (plume > 0.05f && (!over || testDone) && !testDone) {
             float len = dp(20f) + plume * dp(90f);
             paint.setColor(0xFFFFD36A);
             path.reset();
@@ -217,7 +245,7 @@ final class RocketLaunchGame extends GameView {
             c.drawPath(path, paint);
             Fx.glow(c, rx, rocketY + dp(40f), len * 0.8f, 0x55FF9A4D);
         }
-        if (!over) {
+        if (!over || testDone) {
             paint.setColor(0xFFE6EDF7);
             path.reset();
             path.moveTo(rx, rocketY - dp(40f));
@@ -275,8 +303,11 @@ final class RocketLaunchGame extends GameView {
         String big;
         int col;
         if (!started) {
-            big = "HOLD " + Math.round(hoverWatts()) + " W TO LIFT OFF";
+            big = testMode ? "60-SECOND POWER TEST" : "HOLD " + Math.round(hoverWatts()) + " W TO LIFT OFF";
             col = DIM;
+        } else if (testDone) {
+            big = String.format(java.util.Locale.US, "%.1f km", maxAltitude / 1000f);
+            col = ACCENT;
         } else if (orbit) {
             big = "ORBIT";
             col = ACCENT;
@@ -292,7 +323,12 @@ final class RocketLaunchGame extends GameView {
                 Paint.Align.CENTER);
         String cap;
         if (!started) {
-            cap = "thrust is your watts - gravity never stops pulling";
+            cap = testMode ? "climb as high as you can in one minute - lift-off at " + Math.round(hoverWatts()) + " W"
+                    : "thrust is your watts - gravity never stops pulling";
+        } else if (testDone) {
+            cap = "TEST COMPLETE  ·  average " + Math.round(testWattSeconds / TEST_SECONDS) + " W"
+                    + (bests.has("rocket.test60") ? "  ·  best " + String.format(java.util.Locale.US, "%.1f km", bests.get("rocket.test60", 0f) / 1000f) : "")
+                    + "  ·  tap to test again";
         } else if (orbit) {
             cap = "you made the Karman line  ·  tap to launch again";
         } else if (over) {
@@ -300,6 +336,8 @@ final class RocketLaunchGame extends GameView {
                     + "  ·  tap to launch again";
         } else if (stageFlash > 0) {
             cap = "STAGE " + (stage + 1) + " - MASS SHED, HOVER NOW " + Math.round(hoverWatts()) + " W";
+        } else if (testMode) {
+            cap = clock(Math.max(0, TEST_SECONDS - testSeconds)) + " LEFT  ·  " + (watts >= hoverWatts() ? "CLIMBING" : "NEED " + Math.round(hoverWatts()) + " W");
         } else if (watts >= hoverWatts()) {
             cap = "CLIMBING  ·  " + Math.round(velocity * 26f) + " m/s";
         } else {

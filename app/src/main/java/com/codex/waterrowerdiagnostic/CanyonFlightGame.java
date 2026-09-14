@@ -9,13 +9,21 @@ import android.view.MotionEvent;
 /**
  * Canyon Flight: your boat speed is your altitude. Ring gates come at you at different heights;
  * fly through them or lose a life. Gates step up and down, so you are changing gear every hundred
- * metres - it is intervals wearing a wingsuit. Altitude follows speed with a glide, not a snap.
+ * metres - it is intervals wearing a wingsuit.
+ *
+ * <p>Made easier in 3.14.0 after "too hard to get inside the ring given our method of capturing
+ * row": altitude follows a rolling average of speed with a small dead zone, so one weak stroke no
+ * longer drops you; rings are 60% taller and pull you toward their centre in the last 30 m; the
+ * altitude scale spans the rower's own range; and each ring is placed around the speed you have
+ * actually been holding, rather than on a fixed random walk.
  */
 final class CanyonFlightGame extends GameView {
 
     private static final int LIVES = 3;
-    private static final float MIN_SPEED = 1.2f;
-    private static final float MAX_SPEED = 4.6f;
+    /** Half-height of a ring as a share of the sky: was 0.10. */
+    private static final float RING_BAND = 0.16f;
+    /** Within this many metres of a ring, altitude is pulled toward its centre. */
+    private static final float MAGNET_METRES = 30f;
 
     private static final class Gate {
         final float at;        // metres
@@ -44,6 +52,14 @@ final class CanyonFlightGame extends GameView {
     private double x;
     private float altitude;      // 0..1
     private double hurtUntil;
+    private float minSpeed = 1.2f;
+    private float maxSpeed = 4.6f;
+    /** Speed the altitude follows: a rolling average with a dead zone. */
+    private float flightSpeed;
+    /** What the rower has been holding lately, for placing the next ring. */
+    private float recentSpeed;
+    private float nextGateAt;
+    private final java.util.Random rng = new java.util.Random();
 
     CanyonFlightGame(Context context, PersonalBests bests) {
         super(context);
@@ -59,15 +75,30 @@ final class CanyonFlightGame extends GameView {
         x = 0;
         altitude = 0f;
         gates.clear();
-        java.util.Random r = new java.util.Random(77);
-        float at = 80f;
-        float target = 2.6f;
-        while (at < 8000f) {
-            // Gates wander: a step of up to 0.8 m/s, biased back toward the middle.
-            target += (r.nextFloat() - 0.5f) * 1.6f + (2.8f - target) * 0.25f;
-            target = Math.max(MIN_SPEED + 0.3f, Math.min(MAX_SPEED - 0.3f, target));
-            gates.add(new Gate(at, target));
-            at += 90f + r.nextFloat() * 60f;
+        // The altitude scale covers this rower: from well below their low speed to a little above
+        // their high, so a change in effort is a visible change in height.
+        minSpeed = (float) Math.max(0.8, profile.lowSpeed() - 1.2);
+        maxSpeed = (float) profile.highSpeed() + 0.6f;
+        flightSpeed = 0f;
+        recentSpeed = (float) profile.typicalSpeed();
+        nextGateAt = 80f;
+        rng.setSeed(77);
+    }
+
+    /** Rings are made just ahead of the rower, around the speed they have been holding. */
+    private void spawnGates() {
+        float low = (float) profile.lowSpeed() - 0.4f;
+        float high = (float) profile.highSpeed() + 0.2f;
+        while (nextGateAt < x + 160f) {
+            float centre = recentSpeed + ((float) profile.typicalSpeed() - recentSpeed) * 0.3f;
+            float target = centre + (rng.nextFloat() - 0.5f) * 0.8f;
+            target = Math.max(Math.max(minSpeed + 0.3f, low), Math.min(Math.min(maxSpeed - 0.3f, high), target));
+            gates.add(new Gate(nextGateAt, target));
+            nextGateAt += 90f + rng.nextFloat() * 60f;
+        }
+        // Forget rings well behind, so the list does not grow for a whole session.
+        while (gates.size() > 12 && gates.get(0).resolved && gates.get(0).at < x - 80f) {
+            gates.remove(0);
         }
     }
 
@@ -89,7 +120,7 @@ final class CanyonFlightGame extends GameView {
     }
 
     private float altFor(float speed) {
-        return Math.max(0f, Math.min(1f, (speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)));
+        return Math.max(0f, Math.min(1f, (speed - minSpeed) / (maxSpeed - minSpeed)));
     }
 
     @Override
@@ -103,8 +134,17 @@ final class CanyonFlightGame extends GameView {
         if (started && !over) {
             x = sessionMeters - runStart;
         }
-        // Glide: altitude eases toward where speed says it should be.
-        altitude += (altFor(speed) - altitude) * Math.min(1f, 2.2f * dt);
+        spawnGates();
+        // Altitude follows a rolling average of speed (about 1.5 s) and ignores changes under
+        // 0.1 m/s, so the dip between two strokes no longer sends the wing through the floor.
+        float averaged = flightSpeed + (speed - flightSpeed) * Math.min(1f, dt / 1.5f);
+        if (Math.abs(averaged - flightSpeed) > 0.1f * dt || flightSpeed == 0f) {
+            flightSpeed = averaged;
+        }
+        if (started && !over) {
+            recentSpeed += (speed - recentSpeed) * Math.min(1f, dt / 8f);
+        }
+        altitude += (altFor(flightSpeed) - altitude) * Math.min(1f, 2.2f * dt);
         shake.step(dt);
         fx.step(dt, 0f);
 
@@ -113,7 +153,22 @@ final class CanyonFlightGame extends GameView {
         float youX = w * 0.28f;
         float ppm = w / 60f;
         float youY = skyBottom - (skyBottom - skyTop) * altitude;
-        float band = (skyBottom - skyTop) * 0.10f;   // half-height of a ring: ~0.34 m/s each way
+        float band = (skyBottom - skyTop) * RING_BAND;
+        // Magnet: close to the next ring and roughly lined up, drift toward its centre.
+        for (Gate g : gates) {
+            if (g.resolved) {
+                continue;
+            }
+            float ahead = g.at - (float) x;
+            if (ahead >= 0f && ahead < MAGNET_METRES) {
+                float gy = skyBottom - (skyBottom - skyTop) * altFor(g.speed);
+                if (Math.abs(youY - gy) < band * 2.2f) {
+                    float pull = 0.45f * (1f - ahead / MAGNET_METRES);
+                    youY += (gy - youY) * pull;
+                }
+            }
+            break;
+        }
 
         if (started && !over) {
             for (Gate g : gates) {
@@ -164,7 +219,7 @@ final class CanyonFlightGame extends GameView {
             c.drawPath(path, paint);
         }
         // Speed lanes on the left as a subtle altitude scale.
-        for (float sp = 1.5f; sp <= 4.5f; sp += 0.5f) {
+        for (float sp = (float) Math.ceil(minSpeed * 2f) / 2f; sp <= maxSpeed; sp += 0.5f) {
             float ly = skyBottom - (skyBottom - skyTop) * altFor(sp);
             paint.setColor(0x22FFFFFF);
             c.drawLine(0, ly, w, ly, paint);
@@ -237,10 +292,10 @@ final class CanyonFlightGame extends GameView {
             col = BAD;
         } else if (next != null) {
             float diff = next.speed - speed;
-            cap = Math.abs(diff) < 0.35f ? "LINED UP - HOLD IT"
+            cap = Math.abs(diff) < 0.5f ? "LINED UP - HOLD IT"
                     : diff > 0 ? String.format(java.util.Locale.US, "CLIMB  +%.1f m/s  ·  %d m", diff, Math.round(next.at - x))
                     : String.format(java.util.Locale.US, "DIVE  %.1f m/s  ·  %d m", diff, Math.round(next.at - x));
-            col = Math.abs(diff) < 0.35f ? ACCENT : WARN;
+            col = Math.abs(diff) < 0.5f ? ACCENT : WARN;
         } else {
             cap = "CLEAR SKIES";
         }

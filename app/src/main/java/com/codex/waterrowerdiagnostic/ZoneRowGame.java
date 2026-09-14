@@ -18,10 +18,15 @@ import android.view.MotionEvent;
  * target band, and a row of figures along the bottom - with WAKE's own names, colours and zone
  * scale. Deliberately not a copy: nothing here uses another product's name, marks or type.
  *
- * <p>Zones are fixed split ranges centred on this rower's measured envelope (median 2:08/500m,
- * best 1:59): GLIDE above 2:35, CRUISE to 2:15, PUSH to 1:59, SURGE beyond. Each zone gets an
- * equal quarter of the bar, so a pace in the middle of a zone sits in the middle of its quarter.
- * Tap a zone name to make it the target; the rate bar's band and the time-in-zone clock follow.
+ * <p>Zones are split ranges set from the rower's learned profile at the start of every piece: 50,
+ * 25 and 7 seconds slower than their typical split, then 9 and 23 faster (for a 2:08 rower, 3:00 /
+ * 2:35 / 2:15 / 1:59 / 1:45). Each zone gets an equal quarter of the bar. In FREE and STREAK, tap a
+ * zone name to make it the target; the rate bar's band follows.
+ *
+ * <p>Plans replace the old Intervals, Sprint Ladder and The Run cards. PYRAMID, LADDER and SPRINTS
+ * are schedules of {zone, seconds} segments drawn as a coloured timeline along the top, scored by
+ * the share of time spent in each segment's zone. STREAK counts the longest run at the target zone
+ * or faster, with three seconds' grace for a stroke that dips.
  *
  * <p>Shown without the vitals strip, since it is the vitals. Calories come from {@link PulseMeter}'s
  * work at a 25% muscle efficiency: measured from the paddle's pulses, and absolute once the rower
@@ -31,10 +36,48 @@ final class ZoneRowGame extends GameView {
 
     static final String[] ZONES = {"GLIDE", "CRUISE", "PUSH", "SURGE"};
     private static final int[] ZONE_COLORS = {0xFF6F8CFF, 0xFF35D0BA, 0xFFF0B132, 0xFFF0655D};
-    /** Zone edges in seconds per 500 m, slowest first: the bar runs from 3:00 to 1:45. */
-    private static final float[] EDGES = {180f, 155f, 135f, 119f, 105f};
-    /** Stroke-rate target band per zone, strokes per minute. */
-    private static final float[][] RATE_BANDS = {{16f, 20f}, {20f, 24f}, {24f, 28f}, {28f, 34f}};
+    /** Zone edges in seconds per 500 m, slowest first. Set from the profile in applyProfile(). */
+    private final float[] edges = {180f, 155f, 135f, 119f, 105f};
+    /** Stroke-rate target band per zone, strokes per minute, around the rower's typical rate. */
+    private final float[][] rateBands = {{16f, 20f}, {20f, 24f}, {24f, 28f}, {28f, 34f}};
+
+    /** Workout plans. Each segment is {zone, seconds}; FREE and STREAK use the length chip. */
+    enum Plan {
+        FREE(null),
+        PYRAMID(new int[][]{{0, 120}, {1, 120}, {2, 120}, {3, 60}, {2, 120}, {1, 120}, {0, 60}}),
+        LADDER(new int[][]{{1, 180}, {0, 60}, {2, 180}, {0, 60}, {3, 120}, {0, 60}, {2, 180}, {1, 120}}),
+        SPRINTS(sprints()),
+        STREAK(null);
+
+        final int[][] segments;
+
+        Plan(int[][] segments) {
+            this.segments = segments;
+        }
+
+        int seconds() {
+            int total = 0;
+            if (segments != null) {
+                for (int[] s : segments) {
+                    total += s[1];
+                }
+            }
+            return total;
+        }
+
+        /** Three minutes CRUISE, eight 30 s SURGE / 90 s GLIDE, two minutes CRUISE. */
+        private static int[][] sprints() {
+            int[][] plan = new int[18][];
+            plan[0] = new int[]{1, 180};
+            for (int i = 0; i < 8; i++) {
+                plan[1 + i * 2] = new int[]{3, 30};
+                plan[2 + i * 2] = new int[]{0, 90};
+            }
+            plan[17] = new int[]{1, 120};
+            return plan;
+        }
+    }
+
     private static final float RATE_MAX = 45f;
     private static final int[] PIECE_MINUTES = {10, 20, 30, 5};
 
@@ -47,6 +90,11 @@ final class ZoneRowGame extends GameView {
     private final PersonalBests bests;
     private int pieceIndex;
     private int targetZone = 2;
+    private Plan plan = Plan.FREE;
+    private final double[] segmentInZone = new double[18];
+    private double streak;
+    private double bestStreak;
+    private double streakGrace;
 
     private double pieceSeconds;
     private double pieceStartMeters;
@@ -105,12 +153,86 @@ final class ZoneRowGame extends GameView {
     }
 
     void nextPieceLength() {
+        if (!usesLengthChip()) {
+            return;
+        }
         pieceIndex = (pieceIndex + 1) % PIECE_MINUTES.length;
         restart();
     }
 
+    Plan plan() {
+        return plan;
+    }
+
+    void nextPlan() {
+        Plan[] all = Plan.values();
+        plan = all[(plan.ordinal() + 1) % all.length];
+        if (plan == Plan.STREAK) {
+            targetZone = 2;
+        }
+        restart();
+    }
+
+    boolean usesLengthChip() {
+        return plan.segments == null;
+    }
+
+    String lengthLabel() {
+        return (plan.segments != null ? plan.seconds() / 60 : pieceMinutes()) + " MIN";
+    }
+
     private double pieceLength() {
-        return pieceMinutes() * 60.0;
+        return plan.segments != null ? plan.seconds() : pieceMinutes() * 60.0;
+    }
+
+    /** Zones and rate bands from the rower's learned range. */
+    private void applyProfile() {
+        float m = (float) profile.typicalSplit();
+        float[] offsets = {50f, 25f, 7f, -9f, -23f};
+        for (int i = 0; i < 5; i++) {
+            edges[i] = m + offsets[i];
+        }
+        float r = (float) profile.typicalRate();
+        float[] lows = {-9f, -5f, -1f, 3f};
+        float[] highs = {-5f, -1f, 3f, 9f};
+        for (int i = 0; i < 4; i++) {
+            rateBands[i][0] = Math.max(8f, r + lows[i]);
+            rateBands[i][1] = r + highs[i];
+        }
+    }
+
+    private int segmentAt(double seconds) {
+        if (plan.segments == null) {
+            return -1;
+        }
+        int t = 0;
+        for (int i = 0; i < plan.segments.length; i++) {
+            t += plan.segments[i][1];
+            if (seconds < t) {
+                return i;
+            }
+        }
+        return plan.segments.length - 1;
+    }
+
+    private double segmentRemaining(double seconds) {
+        int t = 0;
+        for (int[] s : plan.segments) {
+            t += s[1];
+            if (seconds < t) {
+                return t - seconds;
+            }
+        }
+        return 0;
+    }
+
+    /** Share of the whole plan spent in each segment's zone, as a percentage. */
+    private double planScore() {
+        double in = 0;
+        for (double v : segmentInZone) {
+            in += v;
+        }
+        return plan.seconds() > 0 ? 100.0 * in / plan.seconds() : 0;
     }
 
     @Override
@@ -125,6 +247,14 @@ final class ZoneRowGame extends GameView {
         joules = 0;
         lastMeterWork = -1;
         inZoneSeconds = 0;
+        applyProfile();
+        java.util.Arrays.fill(segmentInZone, 0);
+        streak = 0;
+        bestStreak = 0;
+        streakGrace = 0;
+        if (plan.segments != null) {
+            targetZone = plan.segments[0][0];
+        }
         paused = false;
         finished = false;
         newBest = false;
@@ -135,20 +265,24 @@ final class ZoneRowGame extends GameView {
         return finalMeters >= 0 ? finalMeters : Math.max(0, sessionMeters - pieceStartMeters);
     }
 
-    /** Where a split sits along the bar, 0 (3:00 or slower) to 1 (1:45 or faster). */
-    static float splitFraction(float secondsPer500) {
-        if (secondsPer500 >= EDGES[0]) {
+    /** Where a split sits along the bar, 0 (slowest edge or slower) to 1 (fastest or faster). */
+    float splitFraction(float secondsPer500) {
+        if (secondsPer500 >= edges[0]) {
             return 0f;
         }
-        if (secondsPer500 <= EDGES[EDGES.length - 1]) {
+        if (secondsPer500 <= edges[edges.length - 1]) {
             return 1f;
         }
         for (int i = 0; i < 4; i++) {
-            if (secondsPer500 <= EDGES[i] && secondsPer500 >= EDGES[i + 1]) {
-                return (i + (EDGES[i] - secondsPer500) / (EDGES[i] - EDGES[i + 1])) / 4f;
+            if (secondsPer500 <= edges[i] && secondsPer500 >= edges[i + 1]) {
+                return (i + (edges[i] - secondsPer500) / (edges[i] - edges[i + 1])) / 4f;
             }
         }
         return 0f;
+    }
+
+    private String planKey() {
+        return "zonerow.plan." + plan.name().toLowerCase(java.util.Locale.US);
     }
 
     private static int zoneAt(float fraction) {
@@ -171,14 +305,36 @@ final class ZoneRowGame extends GameView {
         if (!paused && !finished && isClockRunning()) {
             pieceSeconds += dt;
             joules += workStep;
+            int seg = segmentAt(pieceSeconds);
+            if (seg >= 0) {
+                targetZone = plan.segments[seg][0];
+                if (zone == targetZone) {
+                    segmentInZone[seg] += dt;
+                }
+            }
             if (zone == targetZone) {
                 inZoneSeconds += dt;
+            }
+            if (plan == Plan.STREAK) {
+                if (zone >= targetZone) {
+                    streak += dt;
+                    streakGrace = 0;
+                    bestStreak = Math.max(bestStreak, streak);
+                } else if ((streakGrace += dt) > 3.0) {
+                    streak = 0;
+                }
             }
             if (pieceSeconds >= pieceLength()) {
                 pieceSeconds = pieceLength();
                 finished = true;
                 finalMeters = Math.max(0, sessionMeters - pieceStartMeters);
-                newBest = bests.recordHighest("zonerow." + pieceMinutes(), (float) finalMeters);
+                if (plan.segments != null) {
+                    newBest = bests.recordHighest(planKey(), (float) planScore());
+                } else if (plan == Plan.STREAK) {
+                    newBest = bests.recordHighest("zonerow.streak", (float) bestStreak);
+                } else {
+                    newBest = bests.recordHighest("zonerow." + pieceMinutes(), (float) finalMeters);
+                }
             }
         }
 
@@ -278,6 +434,27 @@ final class ZoneRowGame extends GameView {
 
     private void drawProgress(Canvas c, float w) {
         float frac = (float) Math.min(1.0, pieceSeconds / pieceLength());
+        if (plan.segments != null) {
+            // The schedule as a coloured timeline: faint ahead, full colour behind, a marker at now.
+            float total = plan.seconds();
+            float x = 0f;
+            for (int[] seg : plan.segments) {
+                float segW = w * seg[1] / total;
+                float right = x + segW - dp(2f);
+                fill.setColor(ZONE_COLORS[seg[0]]);
+                fill.setAlpha(60);
+                c.drawRect(x, 0, right, dp(9f), fill);
+                fill.setAlpha(255);
+                float done = Math.min(right, w * frac);
+                if (done > x) {
+                    c.drawRect(x, 0, done, dp(9f), fill);
+                }
+                x += segW;
+            }
+            fill.setColor(TEXT);
+            c.drawRect(w * frac - dp(1.5f), 0, w * frac + dp(1.5f), dp(14f), fill);
+            return;
+        }
         fill.setColor(0xFF16294A);
         c.drawRect(0, 0, w, dp(4f), fill);
         fill.setColor(ACCENT);
@@ -319,8 +496,20 @@ final class ZoneRowGame extends GameView {
 
         float cx = w / 2f;
         if (!hasClockStarted()) {
-            text(c, "TAP A ZONE TO SET YOUR TARGET", cx, labelY, labelSize, FAINT, Paint.Align.CENTER, labels, 0.25f);
+            String hint = plan.segments != null
+                    ? plan.name() + "  ·  " + plan.segments.length + " SEGMENTS  ·  " + lengthLabel()
+                    : plan == Plan.STREAK ? "STREAK  ·  TAP A ZONE TO SET THE BAR" : "TAP A ZONE TO SET YOUR TARGET";
+            text(c, hint, cx, labelY, labelSize, FAINT, Paint.Align.CENTER, labels, 0.25f);
             text(c, "ROW TO START", cx, valueY, valueSize * 0.7f, ACCENT, Paint.Align.CENTER, numbers, 0.12f);
+        } else if (plan.segments != null) {
+            int seg = segmentAt(pieceSeconds);
+            text(c, "SEGMENT " + (seg + 1) + "/" + plan.segments.length + "  ·  " + ZONES[targetZone],
+                    cx, labelY, labelSize, ZONE_COLORS[targetZone], Paint.Align.CENTER, numbers, 0.2f);
+            text(c, clock(segmentRemaining(pieceSeconds)), cx, valueY, valueSize, TEXT, Paint.Align.CENTER, numbers, 0.02f);
+        } else if (plan == Plan.STREAK) {
+            text(c, "STREAK  ·  " + ZONES[targetZone] + " OR FASTER", cx, labelY, labelSize,
+                    ZONE_COLORS[targetZone], Paint.Align.CENTER, numbers, 0.2f);
+            text(c, clock(streak), cx, valueY, valueSize, streakGrace > 0 ? WARN : TEXT, Paint.Align.CENTER, numbers, 0.02f);
         } else {
             text(c, "IN " + ZONES[targetZone], cx, labelY, labelSize, ZONE_COLORS[targetZone],
                     Paint.Align.CENTER, numbers, 0.25f);
@@ -383,7 +572,7 @@ final class ZoneRowGame extends GameView {
         float radius = (bottom - top) / 2f;
         float scale = (right - left) / RATE_MAX;
         float rateX = left + Math.min(RATE_MAX, Math.max(0f, shownRate)) * scale;
-        float[] band = RATE_BANDS[targetZone];
+        float[] band = rateBands[targetZone];
         boolean inBand = shownRate >= band[0] && shownRate <= band[1];
 
         rect.set(left, top, right, bottom);
@@ -536,15 +725,34 @@ final class ZoneRowGame extends GameView {
         c.drawRect(0, h * 0.18f, w, h * 0.77f, fill);
         float cx = w / 2f;
         text(c, "PIECE COMPLETE", cx, h * 0.34f, h * 0.05f, ACCENT, Paint.Align.CENTER, numbers, 0.3f);
-        text(c, Math.round(pieceMeters()) + " m", cx, h * 0.5f, h * 0.15f, TEXT, Paint.Align.CENTER, numbers, 0.02f);
-        String sub = pieceMinutes() + " MIN  ·  " + clock(inZoneSeconds) + " IN " + ZONES[targetZone];
-        if (newBest) {
-            sub += "  ·  NEW BEST";
-        } else if (bests.has("zonerow." + pieceMinutes())) {
-            sub += "  ·  BEST " + Math.round(bests.get("zonerow." + pieceMinutes(), 0f)) + " m";
+        String headline;
+        String sub;
+        String best = "";
+        if (plan.segments != null) {
+            headline = Math.round(planScore()) + "%";
+            sub = plan.name() + " ON SCHEDULE  ·  " + Math.round(pieceMeters()) + " m";
+            if (!newBest && bests.has(planKey())) {
+                best = "  ·  BEST " + Math.round(bests.get(planKey(), 0f)) + "%";
+            }
+        } else if (plan == Plan.STREAK) {
+            headline = clock(bestStreak);
+            sub = "LONGEST STREAK AT " + ZONES[targetZone] + "  ·  " + Math.round(pieceMeters()) + " m";
+            if (!newBest && bests.has("zonerow.streak")) {
+                best = "  ·  BEST " + clock(bests.get("zonerow.streak", 0f));
+            }
+        } else {
+            headline = Math.round(pieceMeters()) + " m";
+            sub = pieceMinutes() + " MIN  ·  " + clock(inZoneSeconds) + " IN " + ZONES[targetZone];
+            if (!newBest && bests.has("zonerow." + pieceMinutes())) {
+                best = "  ·  BEST " + Math.round(bests.get("zonerow." + pieceMinutes(), 0f)) + " m";
+            }
         }
-        text(c, sub, cx, h * 0.6f, h * 0.035f, newBest ? WARN : DIM, Paint.Align.CENTER, labels, 0.15f);
-        text(c, "TAP  ↺  TO ROW AGAIN", cx, h * 0.7f, h * 0.026f, FAINT, Paint.Align.CENTER, labels, 0.25f);
+        if (newBest) {
+            best = "  ·  NEW BEST";
+        }
+        text(c, headline, cx, h * 0.5f, h * 0.15f, TEXT, Paint.Align.CENTER, numbers, 0.02f);
+        text(c, sub + best, cx, h * 0.6f, h * 0.035f, newBest ? WARN : DIM, Paint.Align.CENTER, labels, 0.15f);
+        text(c, "TAP  \u21BA  TO ROW AGAIN", cx, h * 0.7f, h * 0.026f, FAINT, Paint.Align.CENTER, labels, 0.25f);
     }
 
     private void text(Canvas c, String s, float x, float y, float size, int color, Paint.Align align,
@@ -572,7 +780,7 @@ final class ZoneRowGame extends GameView {
                 } else {
                     paused = !paused;
                 }
-            } else if (y >= zoneTop && y <= zoneBottom && span > 0f) {
+            } else if (y >= zoneTop && y <= zoneBottom && span > 0f && plan.segments == null) {
                 int z = (int) ((x - x0) / (span / 4f));
                 if (z >= 0 && z < 4) {
                     targetZone = z;

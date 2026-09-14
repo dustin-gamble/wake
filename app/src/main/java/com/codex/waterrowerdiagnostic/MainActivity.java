@@ -259,6 +259,10 @@ public class MainActivity extends Activity
     private final java.util.concurrent.atomic.AtomicInteger reopenCount =
             new java.util.concurrent.atomic.AtomicInteger();
     private final S4Protocol s4Protocol = new S4Protocol(this::handleS4Packet);
+    /** The rower's learned range, shared by every game. See RowerProfile. */
+    private final RowerProfile profile = new RowerProfile();
+    /** Latest status on the UI thread, for once-a-second sampling. */
+    private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
     private final BlockingQueue<String> uploadQueue = new ArrayBlockingQueue<>(256);
     private final AtomicBoolean uploading = new AtomicBoolean(false);
@@ -403,6 +407,7 @@ public class MainActivity extends Activity
     @Override
     protected void onStop() {
         saveMeasuredCalibration();
+        commitProfile(RowerProfile.MIN_MINUTES);
         if (!isChangingConfigurations() && openConnection != null) {
             releasedForBackground = true;
             publishSimpleEvent("s4-interface-released", true);
@@ -425,6 +430,7 @@ public class MainActivity extends Activity
         autoUpload = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(PREF_STREAM, false);
         journeyLifetime = personalBests.get("journey.total", 0f);
         loadCalibration();
+        profile.decode(personalBests.getString("profile"));
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(getColorCompat(R.color.background));
 
@@ -501,6 +507,7 @@ public class MainActivity extends Activity
         showScreen(screen);
         currentGame = game;
         game.setDrag(coastDrag);
+        game.setProfile(profile);
         game.start();
     }
 
@@ -568,17 +575,11 @@ public class MainActivity extends Activity
         cards.add(gridCard("COAST FLIGHT", GameIconView.Kind.FLY, 0xFF7FC6EE, null, null, v -> openCoastFlight()));
         cards.add(gridCard("SKYLINE", GameIconView.Kind.CITY, 0xFF9A6BB0, "city.blocks", "blocks", v -> openSkyline()));
         cards.add(gridCard("WAVE RIDER", GameIconView.Kind.SURF, 0xFF7FC6EE, "surf.score", "pts", v -> openWaveRider()));
-        cards.add(gridCard("CANYON CHASE", GameIconView.Kind.CHASE, 0xFFFF7A3D, "chase.distance", "m", v -> openCanyonChase()));
         cards.add(gridCard("ROCKET LAUNCH", GameIconView.Kind.ROCKET, 0xFFBFE3FF, "rocket.altitude", "", v -> openRocketLaunch()));
-        cards.add(gridCard("CANYON FLIGHT", GameIconView.Kind.CANYON, warn, "canyon.gates", "gates", v -> openCanyonFlight()));
+        cards.add(gridCard("CANYON", GameIconView.Kind.CANYON, warn, "canyon.gates", "gates", v -> openCanyon(true)));
         cards.add(gridCard("MEGA PULL", GameIconView.Kind.MEGAPULL, 0xFFF5C518, "megapull.peak", "W", v -> openMegaPull()));
-        cards.add(gridCard("PACE BOAT", GameIconView.Kind.PACE, accent, "time.1000", "1k", v -> openPaceBoat()));
-        cards.add(gridCard("GHOST RACE", GameIconView.Kind.GHOST, blue, "time.2000", "2k", v -> openGhostRace()));
+        cards.add(gridCard("RACE", GameIconView.Kind.GHOST, blue, "time.1000", "1k", v -> openRace()));
         cards.add(gridCard("HEAD RACE", GameIconView.Kind.HEADRACE, warn, "time.2000", "2k", v -> openHeadRace()));
-        cards.add(gridCard("THE RUN", GameIconView.Kind.RUN, accent, "run.streak", "streak", v -> openTheRun()));
-        cards.add(gridCard("INTERVALS", GameIconView.Kind.INTERVALS, blue, "intervals.sprints", "in band", v -> openIntervals()));
-        cards.add(gridCard("JOURNEY", GameIconView.Kind.JOURNEY, accent, "journey.total", "", v -> openJourney()));
-        cards.add(gridCard("SPRINT LADDER", GameIconView.Kind.LADDER, warn, "ladder.120", "rung", v -> openSprintLadder()));
         cards.add(gridCard("TUG OF WAR", GameIconView.Kind.TUG, bad, "tug.2", "held", v -> openTugOfWar()));
         cards.add(gridCard("COLLECTOR", GameIconView.Kind.COLLECTOR, accent, "collector.score", "pts", v -> openCollector()));
 
@@ -773,54 +774,41 @@ public class MainActivity extends Activity
         }
     }
 
-    private void openJourney() {
-        JourneyGame game = new JourneyGame(this);
-        game.setTotalMeters(journeyLifetime + journeySession);
-        showGame(game, gameScreen("JOURNEY", game, journeyChips(game)));
-    }
-
-    /** The journey is a lifetime total, so the only control it needs is a way to start again. */
-    private View journeyChips(JourneyGame game) {
-        TextView reset = chip("RESTART");
-        reset.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setTitle("Restart the journey?")
-                .setMessage("This clears the lifetime distance and starts the route again from the"
-                        + " beginning. Your other records are untouched.")
-                .setNegativeButton("Cancel", (d, w) -> d.dismiss())
-                .setPositiveButton("Restart", (d, w) -> {
-                    journeyLifetime = 0;
-                    journeySession = 0;
-                    personalBests.putFloat("journey.total", 0f);
-                    game.setTotalMeters(0);
-                    game.start();
-                    toast("Journey restarted");
-                })
-                .show());
-        return reset;
-    }
-
     /* ---------- pace boat ---------- */
 
-    // Re-centred on measured ability: 3221 samples of real rowing gave a median pace of
-    // 128 s/500m and a best of 119. The old set started at 150 and defaulted to 135, so the
-    // pace boat was slower than the rower and simply fell away - no race at all.
+    // Horde paces for Zombie Run, around the measured 2:08 median (3221 samples; best 1:59).
     private static final float[] PACE_CHOICES = {145f, 138f, 132f, 126f, 120f, 114f};
     private static final int[] DISTANCE_CHOICES = {500, 1000, 2000, 5000};
 
-    private void openPaceBoat() {
-        PaceBoatGame game = new PaceBoatGame(this, personalBests);
-        showGame(game, gameScreen("PACE BOAT", game, gameChips(game)));
-    }
-
-    private void openGhostRace() {
+    /** RACE: one card, four opponents. Pace choices sit around the rower's own typical split. */
+    private void openRace() {
         GhostRaceGame game = new GhostRaceGame(this, personalBests);
-        showGame(game, gameScreen("GHOST RACE", game, ghostChips(game)));
-    }
-
-    /** Distance chip only: the ghost sets its own pace. */
-    private View ghostChips(GhostRaceGame game) {
+        game.setProfile(profile);
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
+        TextView who = chip("VS " + game.opponent().label);
+        TextView pace = chip(PersonalBests.formatPace(game.targetPace()) + " /500");
+        who.setOnClickListener(v -> {
+            game.nextOpponent();
+            who.setText("VS " + game.opponent().label);
+            pace.setVisibility(game.opponent() == GhostRaceGame.Opponent.PACE ? View.VISIBLE : View.GONE);
+        });
+        row.addView(who);
+        int typical = (int) Math.round(profile.typicalSplit());
+        final float[] choices = {typical + 12, typical + 6, typical + 2, typical - 2, typical - 6, typical - 12};
+        pace.setOnClickListener(v -> {
+            int i = 0;
+            for (int k = 0; k < choices.length; k++) {
+                if (choices[k] == game.targetPace()) {
+                    i = (k + 1) % choices.length;
+                }
+            }
+            game.choosePace(choices[i]);
+            pace.setText(PersonalBests.formatPace(choices[i]) + " /500");
+            game.start();
+        });
+        pace.setVisibility(View.GONE);
+        row.addView(pace);
         TextView dist = chip(game.raceMeters() + " m");
         dist.setOnClickListener(v -> {
             int i = 0;
@@ -834,35 +822,15 @@ public class MainActivity extends Activity
             game.start();
         });
         row.addView(dist);
-        return row;
+        showGame(game, gameScreen("RACE", game, row));
     }
 
-    /** A single watts chip that cycles through a range in steps of 20. */
-    private interface IntSetter {
-        void accept(int value);
-    }
-
-    private View wattsChip(String prefix, int initial, int min, int max, IntSetter onChange) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        TextView chip = chip(prefix + initial + " W");
-        final int[] current = {initial};
-        chip.setOnClickListener(v -> {
-            current[0] += 20;
-            if (current[0] > max) {
-                current[0] = min;
-            }
-            onChange.accept(current[0]);
-            chip.setText(prefix + current[0] + " W");
-        });
-        row.addView(chip);
-        return row;
-    }
-
-    private void openSprintLadder() {
-        SprintLadderGame game = new SprintLadderGame(this, personalBests);
-        showGame(game, gameScreen("SPRINT LADDER", game, wattsChip("start ", game.startWatts(), 80,
-                200, game::setStartWatts)));
+    /** CANYON: fly through rings on speed, or drive the gorge (steered by the handle sensor). */
+    private void openCanyon(boolean fly) {
+        GameView game = fly ? new CanyonFlightGame(this, personalBests) : new CanyonChaseGame(this, personalBests);
+        TextView mode = chip(fly ? "MODE: FLY" : "MODE: DRIVE");
+        mode.setOnClickListener(v -> openCanyon(!fly));
+        showGame(game, gameScreen("CANYON", game, mode));
     }
 
     private void openTugOfWar() {
@@ -912,6 +880,18 @@ public class MainActivity extends Activity
      * first stroke. Measured values (drag, pulses per metre, the monitor-matched scale) are seeds the
      * meter refines; the handle travel and load-scale inertia are the rower's own test results.
      */
+    /**
+     * Blends the session into the stored profile once it holds enough rowing.
+     *
+     * @param minMinutes commit only with at least this much rowing - the minute tick waits for ten,
+     *                   so a long session is folded in as it goes rather than only at the end
+     */
+    private void commitProfile(double minMinutes) {
+        if (personalBests != null && profile.sessionSamples() >= minMinutes * 60 && profile.commitSession()) {
+            personalBests.putString("profile", profile.encode());
+        }
+    }
+
     private void loadCalibration() {
         PulseMeter meter = s4Protocol.meter();
         meter.setDragSeed(personalBests.get("cal.drag", 0f));
@@ -975,12 +955,22 @@ public class MainActivity extends Activity
     /** A timed piece on two lane bars. Full-screen instrument, so no vitals strip. */
     private void openZoneRow() {
         ZoneRowGame game = new ZoneRowGame(this, personalBests);
-        TextView length = chip(game.pieceMinutes() + " MIN");
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        TextView plan = chip(game.plan().name());
+        TextView length = chip(game.lengthLabel());
+        plan.setOnClickListener(v -> {
+            game.nextPlan();
+            plan.setText(game.plan().name());
+            length.setText(game.lengthLabel());
+        });
         length.setOnClickListener(v -> {
             game.nextPieceLength();
-            length.setText(game.pieceMinutes() + " MIN");
+            length.setText(game.lengthLabel());
         });
-        showGame(game, gameScreen("ZONE ROW", game, length, null, false));
+        row.addView(plan);
+        row.addView(length);
+        showGame(game, gameScreen("ZONE ROW", game, row, null, false));
     }
 
         /** All personal bests as a plain list. Rebuilt each time it is opened. */
@@ -1068,7 +1058,11 @@ public class MainActivity extends Activity
         if (key.startsWith("ladder.")) return "Sprint Ladder - rung from " + key.substring(7) + " W";
         if (key.startsWith("tug.")) return "Tug of War - held level " + key.substring(4);
         if (key.equals("collector.score")) return "Collector - best score";
+        if (key.startsWith("zonerow.plan.")) return "Zone Row - " + key.substring(13) + " on schedule";
+        if (key.equals("zonerow.streak")) return "Zone Row - longest streak";
         if (key.startsWith("zonerow.")) return "Zone Row - most metres in " + key.substring(8) + " min";
+        if (key.equals("rocket.test60")) return "Rocket - 60 s power test";
+        if (key.startsWith("timelast.")) return key.substring(9) + " m - last race";
         if (key.equals("dive.joules")) return "Depth Dive - deepest";
         if (key.startsWith("zombie.")) return "Zombie Run - survived vs " + PersonalBests.formatPace(Float.parseFloat(key.substring(7))) + " horde";
         if (key.equals("runner.distance")) return "Row Runner - furthest run";
@@ -1500,19 +1494,14 @@ public class MainActivity extends Activity
         showGame(game, gameScreen("WAVE RIDER", game, null));
     }
 
-    private void openCanyonChase() {
-        CanyonChaseGame game = new CanyonChaseGame(this, personalBests);
-        showGame(game, gameScreen("CANYON CHASE", game, null));
-    }
-
     private void openRocketLaunch() {
         RocketLaunchGame game = new RocketLaunchGame(this, personalBests);
-        showGame(game, gameScreen("ROCKET LAUNCH", game, null));
-    }
-
-    private void openCanyonFlight() {
-        CanyonFlightGame game = new CanyonFlightGame(this, personalBests);
-        showGame(game, gameScreen("CANYON FLIGHT", game, null));
+        TextView mode = chip("LAUNCH");
+        mode.setOnClickListener(v -> {
+            game.setTestMode(!game.testMode());
+            mode.setText(game.testMode() ? "60 S TEST" : "LAUNCH");
+        });
+        showGame(game, gameScreen("ROCKET LAUNCH", game, mode));
     }
 
     private void openMegaPull() {
@@ -1543,46 +1532,6 @@ public class MainActivity extends Activity
     private void openRowRunner() {
         RowRunnerGame game = new RowRunnerGame(this, personalBests);
         showGame(game, gameScreen("ROW RUNNER", game, null));
-    }
-
-        private void openTheRun() {
-        TheRunGame game = new TheRunGame(this, personalBests);
-        showGame(game, gameScreen("THE RUN", game, null));
-    }
-
-    private void openIntervals() {
-        IntervalGame game = new IntervalGame(this, personalBests);
-        showGame(game, gameScreen("INTERVALS", game, intervalChips(game)));
-    }
-
-    /** Plan and power-target chips for the interval coach. */
-    private View intervalChips(IntervalGame game) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        TextView planChip = chip(game.plan().label());
-        planChip.setOnClickListener(v -> {
-            int i = 0;
-            for (int k = 0; k < IntervalGame.PLANS.length; k++) {
-                if (IntervalGame.PLANS[k] == game.plan()) {
-                    i = (k + 1) % IntervalGame.PLANS.length;
-                }
-            }
-            game.setPlan(IntervalGame.PLANS[i]);
-            planChip.setText(IntervalGame.PLANS[i].label());
-            game.start();
-        });
-        row.addView(planChip);
-        TextView wattsChip = chip(game.targetWatts() + " W");
-        wattsChip.setOnClickListener(v -> {
-            int next = game.targetWatts() + 20;
-            if (next > 260) {
-                next = 80;
-            }
-            game.setTargetWatts(next);
-            wattsChip.setText(next + " W");
-        });
-        row.addView(wattsChip);
-        return row;
     }
 
     /** Standard game chrome: a header with back, then the game filling the rest. */
@@ -1679,39 +1628,6 @@ public class MainActivity extends Activity
             root.addView(stack, gameParams);
         }
         return root;
-    }
-
-    /** Pace and distance selectors as tappable chips; tapping cycles to the next option. */
-    private View gameChips(PaceBoatGame game) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        TextView pace = chip(PersonalBests.formatPace(game.targetPace()) + " /500");
-        pace.setOnClickListener(v -> {
-            int i = 0;
-            for (int k = 0; k < PACE_CHOICES.length; k++) {
-                if (PACE_CHOICES[k] == game.targetPace()) {
-                    i = (k + 1) % PACE_CHOICES.length;
-                }
-            }
-            game.setTargetPace(PACE_CHOICES[i]);
-            pace.setText(PersonalBests.formatPace(PACE_CHOICES[i]) + " /500");
-            game.start();
-        });
-        row.addView(pace);
-        TextView dist = chip(game.raceMeters() + " m");
-        dist.setOnClickListener(v -> {
-            int i = 0;
-            for (int k = 0; k < DISTANCE_CHOICES.length; k++) {
-                if (DISTANCE_CHOICES[k] == game.raceMeters()) {
-                    i = (k + 1) % DISTANCE_CHOICES.length;
-                }
-            }
-            game.setRaceMeters(DISTANCE_CHOICES[i]);
-            dist.setText(DISTANCE_CHOICES[i] + " m");
-            game.start();
-        });
-        row.addView(dist);
-        return row;
     }
 
     private TextView chip(String text) {
@@ -3164,6 +3080,7 @@ public class MainActivity extends Activity
         }
         lastUiUpdateMs = now;
         runOnUiThread(() -> {
+            lastStatus = status;
             boolean rowing = status.rowing;
             stateChip.setText(status.monitorConnected ? (rowing ? "ROWING" : "READY") : "WAITING");
             stateChip.setTextColor(getColorCompat(status.monitorConnected
@@ -3209,9 +3126,6 @@ public class MainActivity extends Activity
             }
             if (currentGame != null) {
                 currentGame.onStatus(status, driving);
-                if (currentGame instanceof JourneyGame) {
-                    ((JourneyGame) currentGame).setTotalMeters(journeyLifetime + journeySession);
-                }
             }
             // Pxx is not calibrated speed (r = +0.24 per sample), so it is scaled onto the
             // dial only to show motion and shape, never presented as a measurement.
@@ -3260,9 +3174,14 @@ public class MainActivity extends Activity
             public void run() {
                 // Trace the needle, not the poll: 5Hz of the coasted value shows each stroke's
                 // rise and run, where per-poll sampling would draw a once-a-second staircase.
+                // One profile sample a second, only while strokes are actually being taken.
+                if (tickCount % 30 == 0 && lastStatus != null && lastStatus.stillRowing) {
+                    profile.sample(lastStatus.watts, lastStatus.waterSpeedMps, lastStatus.strokeRatePrecise);
+                }
                 if (tickCount % 1800 == 0 && tickCount > 0) {
                     commitJourney();
                     saveMeasuredCalibration();
+                    commitProfile(10.0);
                 }
                 if (gameStrip != null && currentGame != null) {
                     gameStrip.setClock(currentGame.activeSeconds(), currentGame.isClockRunning(),

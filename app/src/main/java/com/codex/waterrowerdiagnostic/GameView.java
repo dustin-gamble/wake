@@ -21,6 +21,11 @@ abstract class GameView extends View {
     protected S4Protocol.Status status;
     protected boolean driving;
     protected final BoatSpeedModel boat = new BoatSpeedModel();
+    /**
+     * The rower's learned range. Set targets from this, never from a constant: every "the bar won't
+     * move" complaint on this project came from a threshold that ignored who was rowing.
+     */
+    protected RowerProfile profile = new RowerProfile();
 
     /** Metres rowed since the game started, smoothed so a boat on screen moves continuously. */
     protected double sessionMeters;
@@ -104,6 +109,13 @@ abstract class GameView extends View {
 
     void setDrag(float k) {
         boat.setDrag(k);
+    }
+
+    /** Called by the activity before {@link #start()}. */
+    void setProfile(RowerProfile p) {
+        if (p != null) {
+            profile = p;
+        }
     }
 
     void start() {

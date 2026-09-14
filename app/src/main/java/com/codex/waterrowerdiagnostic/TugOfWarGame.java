@@ -64,10 +64,18 @@ final class TugOfWarGame extends GameView {
         return super.onTouchEvent(event);
     }
 
-    /** Opponent watts: a base by level, ramping 1 W every two seconds. */
+    /** Opponent strength per level, as a share of the rower's own typical watts. */
+    private static final float[] LEVEL_SHARE = {0.75f, 0.88f, 1.0f, 1.1f, 1.22f};
+    static final String[] LEVEL_NAMES = {"EASY", "STEADY", "EVEN", "STRONG", "BRUTAL"};
+
+    /**
+     * Opponent watts: a share of YOUR typical power by level, ramping 1 W every four seconds.
+     * Was 60 + 25 W per level, which put level 3 at 135 W against a 129 W rower and made levels 4-5
+     * unwinnable for most people - "we might need levels" really meant levels that fit the rower.
+     */
     private float opponentWatts() {
-        float base = 60f + level * 25f;
-        return base + (float) pullSeconds * 0.5f;
+        float base = (float) profile.typicalWatts() * LEVEL_SHARE[level - 1];
+        return base + (float) pullSeconds * 0.25f;
     }
 
     @Override
@@ -122,8 +130,9 @@ final class TugOfWarGame extends GameView {
         bold(c, watts + " W", right - dp(10f), ropeY - dp(50f), 30f, ACCENT, Paint.Align.RIGHT);
         label(c, "YOU", right - dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT, Paint.Align.RIGHT);
         bold(c, Math.round(them) + " W", left + dp(10f), ropeY - dp(50f), 30f, BAD, Paint.Align.LEFT);
-        label(c, "THEM  ·  LEVEL " + level, left + dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT,
-                Paint.Align.LEFT);
+        label(c, "THEM  ·  LEVEL " + level + " " + LEVEL_NAMES[level - 1] + "  ·  "
+                        + Math.round(LEVEL_SHARE[level - 1] * 100) + "% OF YOUR " + Math.round(profile.typicalWatts()) + " W",
+                left + dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT, Paint.Align.LEFT);
 
         String big;
         String cap;
