@@ -406,6 +406,44 @@ non-forcing - which succeeds if this process still owns the interface and fails 
 taken it. It takes nothing back. `verdict: interface-taken` would confirm another claimant; a
 `true` refutes that theory too. No rowing needed: the failure arrives ~3 s after opening WAKE.
 
+### ROOT CAUSE, measured (3.9.3): something else takes the rower's interface ~2.7 s after open
+
+Two probes, both the same answer:
+
+```
+18:23:08   2.7 s after open   interfaceStillOurs false   reader silent 167 ms
+18:23:18  12.7 s after open   interfaceStillOurs false   reader silent 10,185 ms
+verdict: interface-taken
+```
+
+`claimInterface(iface, false)` is non-forcing: it succeeds if this process still owns the
+interface and fails if anything else does. It failed. **About 2.7 s after WAKE opens the port,
+another owner takes the interface, and both directions die together** - the 2.68 s median across
+48 opens is that handover, not a timeout, not a stall, not the monitor.
+
+This is the first theory today confirmed by direct measurement rather than inference. Everything
+before it - build, relaunch timing, pulse load, cable, monitor state, saved prefs, endpoint halt,
+driver state, a monitor watchdog - was refuted by its own data.
+
+**Who the owner is, stated with its uncertainty.** Android's `claimInterface(iface, true)` can
+detach a *kernel driver* but cannot take an interface from another app's usbfs handle. On 3.9.1
+those forcing claims returned true all 18 times and pulse data flowed in bursts afterwards. So the
+owner is most likely the **kernel serial driver re-binding** to the rower - plausibly because
+Ergatta's software opens the device through it - rather than another app holding it directly. Not
+proven which. Either way it sits on Ergatta's side, which fits Ergatta reading the rower perfectly
+while WAKE cannot.
+
+**Why it worked this morning** is still open: WAKE ran 18 minutes clean from 08:07, and the
+handover began at 08:26, immediately after the user exited WAKE back to Ergatta. Something on
+Ergatta's side started claiming the device then, and it re-arms on boot.
+
+**This is not fixable by retrying.** A USB interface has one owner. The options all touch the hard
+guardrail about preserving Ergatta, so they are the user's decision, not an implementation detail:
+- *Take it back while WAKE is in front* (force-claim when `interface-taken`). Makes WAKE work;
+  whatever Ergatta runs in the background loses the rower until WAKE exits.
+- *Find what started the claiming at 08:26 and avoid triggering it.*
+- *Leave Ergatta's claim alone* and accept that WAKE cannot run alongside it.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
