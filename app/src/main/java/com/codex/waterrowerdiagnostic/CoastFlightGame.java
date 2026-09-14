@@ -229,9 +229,10 @@ class CoastFlightGame extends GameView {
         // The page must never re-derive speed or the clock: `s` is the coasted needle value and
         // `t` already carries the 15-second pause rule. Holding a value flat is the one mistake
         // this project keeps making.
+        // `p` is the rower's typical power: level flight is set from it, not from a fixed 60 W.
         String js = String.format(Locale.US,
-                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d});",
-                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes);
+                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d,p:%.0f});",
+                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes, profile.typicalWatts());
         web.evaluateJavascript(js, null);
     }
 

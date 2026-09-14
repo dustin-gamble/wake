@@ -116,14 +116,21 @@ var ROUTE = [
 
 /* ---------------- flight model ---------------- */
 
-var GLIDE_WATTS = 60;        // below this the bird sinks
-var CLIMB_PER_WATT = 0.055;  // m/s of climb per watt above glide
-var MAX_ALT = 4200;
-var MIN_ALT = 25;
-// Tuned for a sense of place rather than raw pace: a good rowing speed gives about 250 km/h,
-// so landmarks arrive every minute or two. An earlier setting hit 550 km/h and the coast blurred.
-var BASE_AIRSPEED = 22;      // m/s with the boat stopped but airborne
-var AIRSPEED_PER_MPS = 16;   // m/s of airspeed per m/s of boat speed
+/* 3.16.0, from the rower: "start paused in the air until rowing solidly begins, see some flapping,
+   not a straight line but move with the row, fly low, terrain follow a little, preload maps, higher
+   resolution, labels on the ground". Altitude is now height above the ground or sea, and level
+   flight is set from the rower's own typical power rather than a fixed 60 W. */
+var TAKEOFF_STROKES = 3;     // strokes before the bird leaves its hover
+var MIN_AGL = 35;            // metres above the ground or sea
+var MAX_AGL = 700;
+var START_AGL = 140;
+var CLIMB_SCALE = 22;        // m/s of climb per typical-watts above level flight
+var LEVEL_SHARE = 0.9;       // holding 90% of typical power holds your height
+// Low flight feels fast: ~50 m/s (180 km/h) at a typical pace keeps the coast readable. It was
+// 250 km/h at 600 m, and 550 km/h before that, which blurred.
+var BASE_AIRSPEED = 15;      // m/s gliding with the boat stopped
+var AIRSPEED_PER_MPS = 9;    // m/s of airspeed per m/s of boat speed
+var WEAVE_METRES = 260;      // how far either side of the route the flight swings
 
 var state = {
   watts: 0,
@@ -131,14 +138,24 @@ var state = {
   boatSpeed: 0,
   clock: 0,
   strokes: -1,
-  altitude: 600,
-  airspeed: BASE_AIRSPEED,
+  altitude: START_AGL,
+  airspeed: 0,
   along: loadTrip(),   // metres along the route, carried across sessions
   bank: 0,
   flapPhase: 0,
   lastData: 0,
   ditched: false,
-  started: false
+  started: false,
+  typicalWatts: 129,     // replaced by the rower's profile from the feed
+  smoothWatts: 0,
+  agl: START_AGL,
+  ground: 0,
+  hovering: true,
+  strokesAtStart: -1,
+  weavePhase: 0,
+  weaveOffset: 0,
+  bob: 0,
+  wingPhase: 0
 };
 
 function loadTrip() {
@@ -303,9 +320,12 @@ function initGlobe() {
   }
 
   // ---- performance, all of it aimed at the tablet ----
-  viewer.resolutionScale = LEGACY ? 0.6 : 1.0;
-  viewer.scene.globe.maximumScreenSpaceError = LEGACY ? 6 : 2;   // far fewer tiles to fetch and draw
-  viewer.scene.globe.tileCacheSize = LEGACY ? 60 : 100;
+  // Sharper than the 0.6 / SSE 6 this started at ("higher resolutions"); adaptQuality() steps the
+  // scale down if the frame rate drops and back up when there is headroom.
+  viewer.resolutionScale = LEGACY ? 0.75 : 1.0;
+  viewer.scene.globe.maximumScreenSpaceError = LEGACY ? 4 : 2;
+  viewer.scene.globe.tileCacheSize = LEGACY ? 150 : 200;
+  viewer.scene.globe.preloadSiblings = true;   // tiles beside the view are ready when the flight weaves
   viewer.scene.globe.showGroundAtmosphere = !LEGACY;
   viewer.scene.fxaa = false;
   viewer.scene.postProcessStages.fxaa.enabled = false;
@@ -340,26 +360,9 @@ function initGlobe() {
       position: Cesium.Cartesian3.fromDegrees(ROUTE[p].lon, ROUTE[p].lat),
       point: { pixelSize: 6, color: Cesium.Color.fromCssColorString('#35d0ba').withAlpha(0.8) }
     };
-    if (LEGACY) {
-      // 26 outlined labels re-laid out every frame is real cost on this engine, and the footer
-      // already names the landmark you are heading for.
-      viewer.entities.add(marker);
-      continue;
-    }
-    viewer.entities.add({
-      position: marker.position,
-      point: marker.point,
-      label: {
-        text: ROUTE[p].name,
-        font: '12px sans-serif',
-        fillColor: Cesium.Color.WHITE.withAlpha(0.85),
-        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-        outlineWidth: 2,
-        outlineColor: Cesium.Color.fromCssColorString('#03080f'),
-        pixelOffset: new Cesium.Cartesian2(0, -16),
-        distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 120000)
-      }
-    });
+    // Names are not added here: 26 outlined labels re-laid out every frame is real cost on the old
+    // engine. updateLabels() keeps only the few nearest places ahead labelled.
+    viewer.entities.add(marker);
   }
 }
 
@@ -375,9 +378,19 @@ window.wakeFeed = function (d) {
   state.spm = Number(d.r) || 0;
   state.boatSpeed = Number(d.s) || 0;
   state.clock = Number(d.t) || 0;
+  if (Number(d.p) > 0) {
+    state.typicalWatts = Number(d.p);
+  }
   var strokes = Number(d.k) || 0;
+  if (state.strokesAtStart < 0) {
+    state.strokesAtStart = strokes;
+  }
   if (state.strokes >= 0 && strokes > state.strokes) {
-    state.flapPhase = 0;          // a stroke is a wingbeat
+    state.flapPhase = 0;          // a stroke is a big wingbeat
+    state.bob = 14;               // and a lift you can feel, settling before the next
+  }
+  if (state.hovering && strokes - state.strokesAtStart >= TAKEOFF_STROKES) {
+    state.hovering = false;
   }
   state.strokes = strokes;
   state.lastData = Date.now();
@@ -392,6 +405,30 @@ window.wakeFeed = function (d) {
 var lastFrame = 0;
 var lastCameraMs = 0;
 
+var lastPreloadMs = 0;
+var lastLabelMs = 0;
+
+/** Ground or sea height under a point, if its terrain tile is loaded; null otherwise. */
+function groundAt(lat, lon) {
+  if (!viewer || !viewer.scene.globe.show) {
+    return null;
+  }
+  try {
+    var h = viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat));
+    return typeof h === 'number' && isFinite(h) ? Math.max(0, h) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** A point `metres` to the right of the heading (negative: to the left). */
+function offsetPoint(p, metres) {
+  var brg = toRad(p.heading + 90);
+  var dLat = (metres * Math.cos(brg)) / R;
+  var dLon = (metres * Math.sin(brg)) / (R * Math.cos(toRad(p.lat)));
+  return { lat: p.lat + toDeg(dLat), lon: p.lon + toDeg(dLon), heading: p.heading };
+}
+
 function frame(now) {
   var dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0;
   lastFrame = now;
@@ -400,43 +437,77 @@ function frame(now) {
   var fresh = Date.now() - state.lastData < 3000;
   var watts = fresh ? state.watts : 0;
   var boat = fresh ? state.boatSpeed : 0;
+  // The monitor's watts land once a stroke and read zero between some; average over ~3 s so
+  // height does not jitter stroke to stroke.
+  state.smoothWatts += (watts - state.smoothWatts) * Math.min(1, dt / 3);
+  var typical = Math.max(40, state.typicalWatts);
 
-  // Lift: power above the glide threshold climbs, below it sinks. Thinner air up high trims
-  // the climb rate so the ceiling is earned.
-  var thin = 1 - Math.min(0.55, (state.altitude / MAX_ALT) * 0.55);
-  var climb = (watts - GLIDE_WATTS) * CLIMB_PER_WATT * thin;
-  state.altitude = Math.max(MIN_ALT, Math.min(MAX_ALT, state.altitude + climb * dt * 12));
-  state.ditched = state.altitude <= MIN_ALT + 1;
+  var climb = 0;
+  if (!state.hovering) {
+    // Hold 90% of your typical power and you hold your height; more climbs, less sinks.
+    climb = ((state.smoothWatts - typical * LEVEL_SHARE) / typical) * CLIMB_SCALE;
+    climb = Math.max(-14, Math.min(9, climb));
+    state.agl = Math.max(MIN_AGL, Math.min(MAX_AGL, state.agl + climb * dt));
+    var targetAir = BASE_AIRSPEED + boat * AIRSPEED_PER_MPS;
+    state.airspeed += (targetAir - state.airspeed) * Math.min(1, 1.5 * dt);
+    state.along += state.airspeed * dt;
+    // The swing across the route quickens with stroke rate: the flight moves with the row.
+    state.weavePhase += dt * (0.18 + Math.min(40, state.spm) * 0.012);
+  } else {
+    state.airspeed += (0 - state.airspeed) * Math.min(1, dt);
+  }
+  state.ditched = !state.hovering && state.agl <= MIN_AGL + 1;
+  state.bob *= Math.exp(-dt * 1.6);
+  var targetOffset = state.hovering ? 0 : Math.sin(state.weavePhase) * WEAVE_METRES;
+  state.weaveOffset += (targetOffset - state.weaveOffset) * Math.min(1, dt * 1.2);
 
-  // Airspeed from boat speed, eased so the camera never snaps.
-  var targetAir = BASE_AIRSPEED + boat * AIRSPEED_PER_MPS;
-  state.airspeed += (targetAir - state.airspeed) * Math.min(1, 1.5 * dt);
-  state.along += state.airspeed * dt;
-
-  var here = atDistance(state.along);
+  var onRoute = atDistance(state.along);
+  var here = offsetPoint(onRoute, state.weaveOffset);
   var ahead = atDistance(state.along + 900);
-  // Bank into the turn: compare the heading now with the heading a little way ahead.
-  var turn = ahead.heading - here.heading;
+  // Bank into the turn, and into each swing of the weave.
+  var turn = ahead.heading - onRoute.heading;
   if (turn > 180) { turn -= 360; }
   if (turn < -180) { turn += 360; }
-  var targetBank = Math.max(-32, Math.min(32, turn * 1.6));
+  var weaveBank = state.hovering ? 0 : Math.cos(state.weavePhase) * 12;
+  var targetBank = Math.max(-32, Math.min(32, turn * 1.6 + weaveBank));
   state.bank += (targetBank - state.bank) * Math.min(1, 2.0 * dt);
+
+  // Terrain following, a little: the ground under you and a little ahead, smoothed so hills
+  // lift you gently and let you down slowly.
+  var probe = offsetPoint(atDistance(state.along + 500), state.weaveOffset);
+  var under = groundAt(here.lat, here.lon);
+  var front = groundAt(probe.lat, probe.lon);
+  var target = Math.max(under === null ? state.ground : under, front === null ? 0 : front * 0.8);
+  state.ground += (target - state.ground) * Math.min(1, dt * (target > state.ground ? 1.4 : 0.5));
+  var hoverBob = state.hovering ? Math.sin(now / 900) * 4 : 0;
+  var altitude = state.ground + state.agl + state.bob + hoverBob;
+  state.altitude = state.agl;
 
   // ~30Hz camera on the old engine: each setView is a full scene traversal, and the flight is
   // smooth long before 60. Stamp the clock only when a frame actually goes through.
   if (viewer && (!LEGACY || now - lastCameraMs >= 28)) {
     lastCameraMs = now;
     viewer.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(here.lon, here.lat, state.altitude),
+      destination: Cesium.Cartesian3.fromDegrees(here.lon, here.lat, altitude),
       orientation: {
-        heading: Cesium.Math.toRadians(here.heading),
-        pitch: Cesium.Math.toRadians(-10 - Math.min(14, state.altitude / 300)),
+        heading: Cesium.Math.toRadians(here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6)),
+        pitch: Cesium.Math.toRadians(-8 - Math.min(16, state.agl / 60)),
         roll: Cesium.Math.toRadians(state.bank)
       }
     });
   }
 
-  drawWings(dt);
+  adaptQuality(dt);
+  if (now - lastPreloadMs > 700) {
+    lastPreloadMs = now;
+    planPreload(state.along);
+  }
+  pumpPreload();
+  if (now - lastLabelMs > 1000) {
+    lastLabelMs = now;
+    updateLabels(onRoute);
+  }
+  drawWings(dt, fresh);
   updateHud(fresh, climb);
   if (Math.floor(now / 1000) % 10 === 0) {
     saveTrip();
@@ -444,14 +515,189 @@ function frame(now) {
   window.requestAnimationFrame(frame);
 }
 
+/* ---------------- keeping it sharp and loaded ---------------- */
+
+var quality = { avg: 1 / 30, lastChange: 0 };
+
+/** Steps the render resolution to hold roughly 20-27 frames a second. */
+function adaptQuality(dt) {
+  if (!viewer || dt <= 0) {
+    return;
+  }
+  quality.avg += (dt - quality.avg) * 0.05;
+  var now = Date.now();
+  if (now - quality.lastChange < 4000) {
+    return;
+  }
+  var fps = 1 / quality.avg;
+  var scale = viewer.resolutionScale;
+  var top = LEGACY ? 0.9 : 1.0;
+  var bottom = LEGACY ? 0.55 : 0.75;
+  if (fps < 20 && scale > bottom) {
+    viewer.resolutionScale = Math.max(bottom, scale - 0.05);
+    quality.lastChange = now;
+  } else if (fps > 27 && scale < top) {
+    viewer.resolutionScale = Math.min(top, scale + 0.05);
+    quality.lastChange = now;
+  }
+}
+
+/* Preloading: the map tiles the camera will need over the next 12 km are requested ahead of time,
+   so they come from the browser's cache when the flight gets there instead of popping in late. */
+var preload = { keys: {}, queue: [], done: 0, total: 0 };
+
+function preloadProvider() {
+  if (!viewer || viewer.imageryLayers.length === 0) {
+    return null;
+  }
+  var provider = viewer.imageryLayers.get(0).imageryProvider;
+  // CesiumJS 1.95 providers are not usable until ready; current ones are ready on construction.
+  if (!provider || provider.ready === false) {
+    return null;
+  }
+  return provider;
+}
+
+function planPreload(alongMetres) {
+  var provider = preloadProvider();
+  if (!provider) {
+    return;
+  }
+  var maxLevel = 18;
+  try {
+    maxLevel = provider.maximumLevel || 18;
+  } catch (e) { /* some providers only know after ready */ }
+  for (var d = 0; d <= 12000; d += 600) {
+    var pos = atDistance(alongMetres + d);
+    var carto = Cesium.Cartographic.fromDegrees(pos.lon, pos.lat);
+    for (var level = 12; level <= Math.min(15, maxLevel); level++) {
+      var xy;
+      try {
+        xy = provider.tilingScheme.positionToTileXY(carto, level);
+      } catch (e) {
+        return;
+      }
+      if (!xy) {
+        continue;
+      }
+      var key = level + '/' + xy.x + '/' + xy.y;
+      if (!preload.keys[key]) {
+        preload.keys[key] = 1;
+        preload.queue.push([xy.x, xy.y, level]);
+        preload.total++;
+      }
+    }
+  }
+}
+
+function pumpPreload() {
+  var provider = preloadProvider();
+  if (!provider) {
+    return;
+  }
+  for (var n = 0; n < 3 && preload.queue.length > 0; n++) {
+    var tile = preload.queue.shift();
+    var result;
+    try {
+      result = provider.requestImage(tile[0], tile[1], tile[2]);
+    } catch (e) {
+      preload.done++;
+      continue;
+    }
+    if (result === undefined) {
+      // The request scheduler is busy with visible tiles, which come first. Try again later.
+      preload.queue.unshift(tile);
+      return;
+    }
+    Promise.resolve(result).then(function () { preload.done++; }, function () { preload.done++; });
+  }
+}
+
+/* Place names on the ground: the route's landmarks plus the towns between them. Only the few
+   nearest places ahead carry a label at any moment, so the old engine never lays out dozens. */
+var PLACES = ROUTE.concat([
+  { name: 'Pescadero', lat: 37.2552, lon: -122.3830 },
+  { name: 'Davenport', lat: 37.0116, lon: -122.1919 },
+  { name: 'Capitola', lat: 36.9752, lon: -121.9533 },
+  { name: 'Moss Landing', lat: 36.8044, lon: -121.7869 },
+  { name: 'Pacific Grove', lat: 36.6177, lon: -121.9166 },
+  { name: 'Carmel-by-the-Sea', lat: 36.5552, lon: -121.9233 },
+  { name: 'McWay Falls', lat: 36.1582, lon: -121.6719 },
+  { name: 'San Simeon', lat: 35.6436, lon: -121.1900 },
+  { name: 'Cambria', lat: 35.5641, lon: -121.0808 },
+  { name: 'Cayucos', lat: 35.4428, lon: -120.8921 },
+  { name: 'Avila Beach', lat: 35.1799, lon: -120.7318 },
+  { name: 'Gaviota', lat: 34.4719, lon: -120.2285 },
+  { name: 'Carpinteria', lat: 34.3989, lon: -119.5185 },
+  { name: 'Oxnard', lat: 34.1975, lon: -119.1771 },
+  { name: 'Redondo Beach', lat: 33.8492, lon: -118.3884 },
+  { name: 'Long Beach', lat: 33.7701, lon: -118.1937 },
+  { name: 'Dana Point', lat: 33.4669, lon: -117.6981 },
+  { name: 'Oceanside', lat: 33.1959, lon: -117.3795 },
+  { name: 'Carlsbad', lat: 33.1581, lon: -117.3506 },
+  { name: 'Del Mar', lat: 32.9595, lon: -117.2653 }
+]);
+var activeLabels = {};
+
+function updateLabels(pos) {
+  if (!viewer) {
+    return;
+  }
+  var near = [];
+  for (var i = 0; i < PLACES.length; i++) {
+    var d = haversine(pos, PLACES[i]);
+    if (d < 28000) {
+      var off = Math.abs(((bearing(pos, PLACES[i]) - pos.heading + 540) % 360) - 180);
+      if (off < 110 || d < 3000) {
+        near.push({ i: i, d: d });
+      }
+    }
+  }
+  near.sort(function (a, b) { return a.d - b.d; });
+  var keep = {};
+  for (var n = 0; n < near.length && n < 5; n++) {
+    var place = PLACES[near[n].i];
+    keep[place.name] = true;
+    if (!activeLabels[place.name]) {
+      var h = groundAt(place.lat, place.lon);
+      activeLabels[place.name] = viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(place.lon, place.lat, (h === null ? 0 : h) + 25),
+        label: {
+          text: place.name.toUpperCase(),
+          font: 'bold 18px sans-serif',
+          fillColor: Cesium.Color.WHITE,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          outlineWidth: 3,
+          outlineColor: Cesium.Color.fromCssColorString('#03080f'),
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          scaleByDistance: new Cesium.NearFarScalar(1500, 1.2, 25000, 0.55)
+        }
+      });
+    }
+  }
+  for (var name in activeLabels) {
+    if (Object.prototype.hasOwnProperty.call(activeLabels, name) && !keep[name]) {
+      viewer.entities.remove(activeLabels[name]);
+      delete activeLabels[name];
+    }
+  }
+}
+
 /**
  * Slim wings tucked into the bottom corners, beating once per stroke and flexing with the bank.
  * They frame the view rather than fill it - an earlier version stretched across half the screen.
  */
-function drawWings(dt) {
+function drawWings(dt, rowing) {
   state.flapPhase = Math.min(1.4, state.flapPhase + dt * 2.2);
   var beat = Math.exp(-state.flapPhase * 2.6) * Math.sin(state.flapPhase * Math.PI * 2);
-  var lift = beat * 26;
+  // Continuous flapping while rowing - faster with rate, bigger with power - small wingbeats while
+  // hovering, and wings held up in a glide once the rowing stops. Each stroke adds a big beat.
+  var active = state.hovering ? 0.55 : rowing ? 1 : 0;
+  var freq = 0.6 + (Math.min(40, state.spm) / 60) * 1.2;
+  state.wingPhase += dt * Math.PI * 2 * freq;
+  var typical = Math.max(40, state.typicalWatts);
+  var amp = active * (10 + 16 * Math.min(1.3, state.smoothWatts / typical));
+  var lift = beat * 30 + Math.sin(state.wingPhase) * amp - (active > 0 ? 0 : 8);
   var bankL = -state.bank * 0.9;
   var bankR = state.bank * 0.9;
 
@@ -493,16 +739,25 @@ function updateHud(fresh, climb) {
   }
 
   var next = nextLandmark(state.along);
-  el('landmark').textContent = fresh
-    ? next.name + ' — ' + (next.remaining / 1000).toFixed(1) + ' km ahead'
-    : 'Resting — gliding down';
-  el('hint').textContent = !fresh
-    ? 'Take a stroke to climb again.'
-    : state.ditched
-      ? 'On the deck — pull harder than ' + GLIDE_WATTS + ' W to climb'
-      : state.watts < GLIDE_WATTS
-        ? 'Sinking — ' + GLIDE_WATTS + ' W holds you level'
-        : '';
+  var level = Math.round(Math.max(40, state.typicalWatts) * LEVEL_SHARE);
+  if (state.hovering) {
+    var left = TAKEOFF_STROKES - Math.max(0, state.strokes - state.strokesAtStart);
+    var loaded = preload.total > 0 ? Math.round((100 * preload.done) / preload.total) : 0;
+    el('landmark').textContent = 'Hovering over ' + next.name + ' — row to take off';
+    el('hint').textContent = left + (left === 1 ? ' stroke' : ' strokes') + ' to take off · map ahead '
+      + loaded + '% loaded';
+  } else {
+    el('landmark').textContent = fresh
+      ? next.name + ' — ' + (next.remaining / 1000).toFixed(1) + ' km ahead'
+      : 'Resting — gliding down';
+    el('hint').textContent = !fresh
+      ? 'Take a stroke to climb again.'
+      : state.ditched
+        ? 'Skimming the water — ' + level + ' W holds your height, more climbs'
+        : state.smoothWatts < level
+          ? 'Sinking — ' + level + ' W holds you level'
+          : '';
+  }
 
   el('progressFill').style.width =
     (((state.along % routeLength) / routeLength) * 100).toFixed(2) + '%';
@@ -549,7 +804,7 @@ el('reset').addEventListener('click', function (ev) {
   state.along = 0;
   saveTrip();
 });
-el('splashState').textContent = 'Take a stroke to launch.';
+el('splashState').textContent = 'Take three strokes to take off.';
 if (bridge && bridge.ready) {
   try {
     bridge.ready();
