@@ -306,6 +306,22 @@ After a clean 10km session on 3.7.3, the link began failing again mid-morning: `
 timeout, at idle, surviving every reset, is what a marginal physical connection looks like. Note
 that the 0.6.x episode above also ended around a physical reconnection.
 
+**3.9.0 stops guessing and asks the USB stack.** On a write failure, `probeWritePath()` checks
+four things at the moment it happens and publishes an `s4-write-probe` event with a `verdict`:
+
+| verdict | what it means | what to do |
+|---|---|---|
+| `driver-state` | a raw `bulkTransfer` works where the driver's `write()` did not | fault is inside usb-serial-for-android's port state; write directly or reinit the driver object |
+| `endpoint-halt` | `CLEAR_FEATURE(ENDPOINT_HALT)` then a retry works | the bulk OUT endpoint stalls; the app now clears it in place on every failure instead of reopening |
+| `connection-dead` | the connection's file descriptor is invalid | the `UsbDeviceConnection` is gone; reopening is correct |
+| `unrecovered` | raw transfer and halt-clear both fail | none of the above; read `rawBulkTransferRc`, `clearHaltRc`, `interfaceClaimed` |
+
+A stalled endpoint is the strongest prior: it fails instantly (the `after=0msec`), persists across
+app restarts, and only clears on an explicit request or a full device reset. Clearing a halt is a
+standard request every USB device must accept - the Linux kernel does exactly this on a stalled
+pipe - and changes nothing on the monitor. The probe is capped at 12 reports a session and one
+per 10s, because it holds the I/O lock for up to three 250ms timeouts.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.

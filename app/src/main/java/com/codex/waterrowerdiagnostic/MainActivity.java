@@ -207,6 +207,14 @@ public class MainActivity extends Activity
     private UsbDevice selectedDevice;
     private UsbSerialPort openSerialPort;
     private UsbDeviceConnection openConnection;
+    /** Write-path probe: rate-limited, because it holds the I/O lock while it runs. */
+    private static final long PROBE_EVERY_MS = 10000;
+    private static final int MAX_PROBES_PER_SESSION = 12;
+    private static final int PROBE_TIMEOUT_MS = 250;
+    private long lastProbeMs;
+    private int probesThisSession;
+    /** Set once clearing an endpoint halt has been seen to recover a refused write. */
+    private volatile boolean clearHaltRecovers;
     private UsbInterface claimedInterface;
     /** CDC data interface (bulk IN/OUT), kept so the claim can be re-taken after a write fails. */
     private UsbInterface dataInterface;
@@ -2356,6 +2364,18 @@ public class MainActivity extends Activity
                         // A failed bulk transfer is a USB stall, not a refused command: keep the
                         // field in rotation and back off so the pipe can recover.
                         s4Protocol.abandonPoll();
+                        // Probe before counting it: if the write can be recovered in place, the
+                        // backoff and the port teardown that follows it are what the user saw as
+                        // "dead for a bit, then a spike".
+                        if (probeWritePath(port, command, e.getMessage())) {
+                            if (consecutiveWriteFailures > 0) {
+                                publishSimpleEvent("s4-write-recovered", false);
+                            }
+                            consecutiveWriteFailures = 0;
+                            writePathStalled = false;
+                            Thread.sleep(commandGapMs);
+                            continue;
+                        }
                         consecutiveWriteFailures++;
                         if (consecutiveWriteFailures <= 3
                                 || consecutiveWriteFailures % WRITE_FAILURES_BEFORE_COOLDOWN == 0) {
@@ -2684,6 +2704,101 @@ public class MainActivity extends Activity
         } catch (JSONException e) {
             setUploadStatus("S4 error upload failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Ask the USB stack what is actually failing, rather than guessing a sixth time.
+     *
+     * <p>On 2026-09-13 the write path failed with rc=-1 after 0msec on every open, and five
+     * theories were refuted by experiment: the build, relaunch timing, pulse load, the cable and
+     * monitor state, and Ergatta holding the device. The USB descriptors were identical to the
+     * morning session that worked, and so was every saved preference. This probe replaces theory
+     * with four direct questions, asked at the moment a write fails:
+     *
+     * <ol>
+     *   <li>Is the connection's file descriptor still valid?</li>
+     *   <li>Does a raw bulkTransfer to the same endpoint work when the driver's write() did not?
+     *       If so, the driver's own state is the fault and USB is fine.</li>
+     *   <li>Does CLEAR_FEATURE(ENDPOINT_HALT) followed by a retry work? A stalled bulk OUT
+     *       endpoint fails instantly and stays stalled until cleared - which fits rc=-1 at 0msec
+     *       exactly. Every USB device must accept this request; it is what the Linux kernel
+     *       itself does on a stalled pipe, and it changes nothing on the monitor.</li>
+     *   <li>Is the data interface still claimable?</li>
+     * </ol>
+     *
+     * <p>If clearing the halt recovers the write, it is repeated on every later failure instead of
+     * tearing the port down - so this can be the fix and not just the diagnosis. Rate-limited,
+     * because it holds the I/O lock for up to three short timeouts.
+     *
+     * @return true if the write went through
+     */
+    private boolean probeWritePath(UsbSerialPort port, String command, String driverError) {
+        UsbDeviceConnection connection = openConnection;
+        UsbEndpoint endpoint;
+        try {
+            endpoint = port.getWriteEndpoint();
+        } catch (RuntimeException e) {
+            endpoint = null;
+        }
+        if (connection == null || endpoint == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        boolean report = probesThisSession < MAX_PROBES_PER_SESSION
+                && now - lastProbeMs > PROBE_EVERY_MS;
+        if (!report && !clearHaltRecovers) {
+            return false;
+        }
+        byte[] bytes = command.getBytes(StandardCharsets.US_ASCII);
+        int fd = connection.getFileDescriptor();
+        int direct;
+        int clear = Integer.MIN_VALUE;
+        int afterClear = Integer.MIN_VALUE;
+        boolean claimed = false;
+        synchronized (ioLock) {
+            direct = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
+            if (direct < 0) {
+                // requestType 0x02: host-to-device, standard, recipient endpoint.
+                // request 0x01 CLEAR_FEATURE, value 0 ENDPOINT_HALT, index = endpoint address.
+                clear = connection.controlTransfer(0x02, 0x01, 0x00, endpoint.getAddress(),
+                        null, 0, PROBE_TIMEOUT_MS);
+                afterClear = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
+            }
+            if (report && dataInterface != null) {
+                claimed = connection.claimInterface(dataInterface, true);
+            }
+        }
+        boolean recovered = direct >= 0 || afterClear >= 0;
+        if (direct < 0 && afterClear >= 0) {
+            clearHaltRecovers = true;
+        }
+        if (report) {
+            lastProbeMs = now;
+            probesThisSession++;
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("command", command.trim());
+                payload.put("driverError", driverError == null ? "" : driverError);
+                payload.put("fileDescriptor", fd);
+                payload.put("endpointAddress", String.format(Locale.US, "0x%02X", endpoint.getAddress()));
+                payload.put("endpointMaxPacket", endpoint.getMaxPacketSize());
+                payload.put("rawBulkTransferRc", direct);
+                payload.put("clearHaltRc", clear == Integer.MIN_VALUE ? JSONObject.NULL : clear);
+                payload.put("afterClearHaltRc", afterClear == Integer.MIN_VALUE ? JSONObject.NULL : afterClear);
+                payload.put("interfaceClaimed", claimed);
+                payload.put("recovered", recovered);
+                payload.put("verdict", direct >= 0
+                        ? "driver-state: raw transfer works, driver write does not"
+                        : afterClear >= 0
+                                ? "endpoint-halt: clearing the halt recovers it"
+                                : fd < 0 ? "connection-dead: file descriptor invalid"
+                                        : "unrecovered: raw transfer and halt-clear both fail");
+                publishEvent("s4-write-probe", payload, true);
+            } catch (JSONException e) {
+                setUploadStatus("Probe report failed: " + e.getMessage());
+            }
+        }
+        return recovered;
     }
 
     private void publishWriteFailure(String command, String error, int attempt) {
