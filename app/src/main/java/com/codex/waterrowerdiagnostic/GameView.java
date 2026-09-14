@@ -38,6 +38,8 @@ abstract class GameView extends View {
      */
     protected double activeSeconds;
     private float steering;
+    /** From a Bluetooth heart strap; 0 when none is connected. */
+    private int bleHeartRate;
     private boolean steeringLive;
     private long lastDrivingMs;
     private static final long CLOCK_GRACE_MS = 15000;
@@ -171,6 +173,18 @@ abstract class GameView extends View {
      */
     protected float steering() {
         return steering;
+    }
+
+    void setHeartRate(int bpm) {
+        bleHeartRate = Math.max(0, bpm);
+    }
+
+    /** Heart rate from a Bluetooth strap, else the monitor's register (which reads 0 on this machine). */
+    protected int heartRate() {
+        if (bleHeartRate > 0) {
+            return bleHeartRate;
+        }
+        return status != null ? status.heartRate : 0;
     }
 
     void setSteering(float value) {

@@ -81,7 +81,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity
-        implements CoastFlightGame.Host, HandleSensor.Listener {
+        implements CoastFlightGame.Host, HandleSensor.Listener, HeartRateSensor.Listener {
     private static final String ACTION_USB_PERMISSION =
             "com.codex.waterrowerdiagnostic.USB_PERMISSION";
     private static final String APP_NAME = "WAKE";
@@ -179,6 +179,12 @@ public class MainActivity extends Activity
     private TextView handleView;
     private HandleSensor handleSensor;
     private String handleState = "Handle sensor: not started";
+    private HeartRateSensor heartSensor;
+    private TextView heartView;
+    private String heartState = "Heart strap: not started";
+    /** From the Bluetooth strap; 0 without one. */
+    private int bleHeartRate;
+    private static final int PERM_HEART = 4712;
     /** Roll treated as straight ahead; the sensor can be strapped on at any angle. */
     private float handleZeroRoll = Float.NaN;
     private float handleRoll;
@@ -509,6 +515,7 @@ public class MainActivity extends Activity
         currentGame = game;
         game.setDrag(coastDrag);
         game.setProfile(profile);
+        game.setHeartRate(bleHeartRate);
         game.start();
     }
 
@@ -571,6 +578,8 @@ public class MainActivity extends Activity
         int bad = getColorCompat(R.color.bad);
         cards.add(gridCard("GAUGES", GameIconView.Kind.GAUGES, accent, null, null, v -> showInstruments()));
         cards.add(gridCard("ZONE ROW", GameIconView.Kind.ZONEROW, warn, "zonerow.10", "m", v -> openZoneRow()));
+        cards.add(gridCard("RIVER", GameIconView.Kind.RIVER, 0xFF5AA7D6, "river.km", "km", v -> openGame(new RiverExplorerGame(this, personalBests), "RIVER EXPLORER")));
+        cards.add(gridCard("COACH", GameIconView.Kind.COACH, accent, "coach.score", "score", v -> openGame(new StrokeCoachGame(this, personalBests), "STROKE COACH")));
         cards.add(gridCard("ZOMBIE RUN", GameIconView.Kind.ZOMBIE, bad, "zombie.150", "m", v -> openZombieRun()));
         cards.add(gridCard("ROW RUNNER", GameIconView.Kind.RUNNER, 0xFFE84C3D, "runner.distance", "m", v -> openRowRunner()));
         cards.add(gridCard("COAST FLIGHT", GameIconView.Kind.FLY, 0xFF7FC6EE, null, null, v -> openCoastFlight()));
@@ -580,6 +589,10 @@ public class MainActivity extends Activity
         cards.add(gridCard("CANYON", GameIconView.Kind.CANYON, warn, "canyon.gates", "gates", v -> openCanyon(true)));
         cards.add(gridCard("MEGA PULL", GameIconView.Kind.MEGAPULL, 0xFFF5C518, "megapull.peak", "W", v -> openMegaPull()));
         cards.add(gridCard("RACE", GameIconView.Kind.GHOST, blue, "time.1000", "1k", v -> openRace()));
+        cards.add(gridCard("CREW BOAT", GameIconView.Kind.CREW, 0xFF3A5BD9, "crew.sync", "% sync", v -> openGame(new CrewBoatGame(this, personalBests), "CREW BOAT")));
+        cards.add(gridCard("REGATTA", GameIconView.Kind.REGATTA, warn, "regatta.best", "", v -> openGame(new RegattaGame(this, personalBests), "REGATTA")));
+        cards.add(gridCard("DAILY ROW", GameIconView.Kind.DAILY, bad, "daily.streak", "day streak", v -> openGame(new DailyRowGame(this, personalBests), "DAILY ROW")));
+        cards.add(gridCard("NIGHT GRID", GameIconView.Kind.GRID, 0xFFF5C518, "grid.houses", "houses", v -> openGame(new NightGridGame(this, personalBests), "NIGHT GRID")));
         cards.add(gridCard("HEAD RACE", GameIconView.Kind.HEADRACE, warn, "time.2000", "2k", v -> openHeadRace()));
         cards.add(gridCard("TUG OF WAR", GameIconView.Kind.TUG, bad, "tug.2", "held", v -> openTugOfWar()));
         cards.add(gridCard("COLLECTOR", GameIconView.Kind.COLLECTOR, accent, "collector.score", "pts", v -> openCollector()));
@@ -691,6 +704,8 @@ public class MainActivity extends Activity
                             ? PersonalBests.formatTime(v)
                     : key.equals("dive.joules") ? String.format(Locale.US, "%.0f m", v / 1000f)
                     : key.equals("rocket.altitude") ? String.format(Locale.US, "%.0f km", v / 1000f)
+                    : key.equals("regatta.best") ? RegattaGame.DIVISIONS[Math.max(0, Math.min(RegattaGame.DIVISIONS.length - 1, Math.round(v) - 1))]
+                    : key.equals("river.km") ? String.format(Locale.US, "%.1f", v)
                     : key.startsWith("zombie.") || key.equals("runner.distance")
                             ? String.valueOf(Math.round(v))
                     : String.valueOf(Math.round(v));
@@ -780,6 +795,11 @@ public class MainActivity extends Activity
     // Horde paces for Zombie Run, around the measured 2:08 median (3221 samples; best 1:59).
     private static final float[] PACE_CHOICES = {145f, 138f, 132f, 126f, 120f, 114f};
     private static final int[] DISTANCE_CHOICES = {500, 1000, 2000, 5000};
+
+    /** A game with no controls of its own: the standard chrome and vitals strip. */
+    private void openGame(GameView game, String title) {
+        showGame(game, gameScreen(title, game, null));
+    }
 
     /** RACE: one card, four opponents. Pace choices sit around the rower's own typical split. */
     private void openRace() {
@@ -1008,7 +1028,8 @@ public class MainActivity extends Activity
         }
         for (java.util.Map.Entry<String, Object> e : sorted.entrySet()) {
             String key = e.getKey();
-            if (key.startsWith("ghost.") || key.startsWith("cal.")) {
+            if (key.startsWith("ghost.") || key.startsWith("cal.") || key.equals("regatta.day")
+                    || key.equals("regatta.division") || key.equals("hr.max")) {
                 continue;   // a recording or a calibration constant, not a record
             }
             Object raw = e.getValue();
@@ -1063,6 +1084,19 @@ public class MainActivity extends Activity
         if (key.equals("zonerow.streak")) return "Zone Row - longest streak";
         if (key.startsWith("zonerow.")) return "Zone Row - most metres in " + key.substring(8) + " min";
         if (key.equals("rocket.test60")) return "Rocket - 60 s power test";
+        if (key.equals("river.km")) return "River Explorer - km explored";
+        if (key.equals("river.landmarks")) return "River Explorer - landmarks found";
+        if (key.equals("river.along")) return "River Explorer - metres up the river";
+        if (key.equals("coach.score")) return "Stroke Coach - best session average";
+        if (key.equals("coach.bestPower")) return "Stroke Coach - best stroke power (W)";
+        if (key.equals("crew.sync")) return "Crew Boat - best crew sync %";
+        if (key.startsWith("crew.time.")) return "Crew Boat - " + key.substring(10) + " m fastest";
+        if (key.equals("grid.houses")) return "Night Grid - houses in the town";
+        if (key.equals("grid.percent")) return "Night Grid - best % lit";
+        if (key.equals("grid.joules")) return "Night Grid - lifetime energy (J)";
+        if (key.equals("regatta.best")) return "Regatta - highest division (1 club - 6 Olympic)";
+        if (key.equals("daily.streak")) return "Daily Row - longest streak (days)";
+        if (key.startsWith("daily.best.")) return "Daily Row - best " + key.substring(11).replace('_', ' ');
         if (key.startsWith("timelast.")) return key.substring(9) + " m - last race";
         if (key.equals("dive.joules")) return "Depth Dive - deepest";
         if (key.startsWith("zombie.")) return "Zombie Run - survived vs " + PersonalBests.formatPace(Float.parseFloat(key.substring(7))) + " horde";
@@ -1149,6 +1183,51 @@ public class MainActivity extends Activity
         }
     }
 
+    /* ---------- HeartRateSensor.Listener ---------- */
+
+    @Override
+    public void onHeartState(String state) {
+        heartState = "Heart strap: " + state;
+        if (heartView != null) {
+            heartView.setText(heartState);
+        }
+        log(heartState);
+    }
+
+    @Override
+    public void onHeartRate(int bpm) {
+        bleHeartRate = bpm;
+        if (currentGame != null) {
+            currentGame.setHeartRate(bpm);
+        }
+    }
+
+    @Override
+    public void onHeartReport(String stage, String detail) {
+        log("Heart " + stage + ": " + detail);
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("stage", stage);
+            payload.put("detail", detail == null ? "" : detail);
+            publishEvent("heart-sensor", payload, true);
+        } catch (JSONException e) {
+            setUploadStatus("Event failed: " + e.getMessage());
+        }
+    }
+
+    private void startHeartSensor() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] {android.Manifest.permission.ACCESS_FINE_LOCATION},
+                    PERM_HEART);
+            return;
+        }
+        if (heartSensor == null) {
+            heartSensor = new HeartRateSensor(this, this);
+        }
+        heartSensor.start();
+    }
+
     /** Android 9 returns an empty BLE scan without location permission, and no error with it. */
     private void startHandleSensor() {
         if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
@@ -1166,6 +1245,15 @@ public class MainActivity extends Activity
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode == PERM_HEART) {
+            if (results.length > 0
+                    && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                startHeartSensor();
+            } else {
+                onHeartState("location permission refused, cannot scan");
+            }
+            return;
+        }
         if (requestCode == PERM_SCAN) {
             if (results.length > 0
                     && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -2072,6 +2160,28 @@ public class MainActivity extends Activity
         handleControls.addView(zeroHandle, weightParams());
         panel.addView(handleControls, marginTop(dp(4)));
 
+        heartView = new TextView(this);
+        heartView.setText(heartState);
+        heartView.setTextColor(getColorCompat(R.color.text_faint));
+        heartView.setTextSize(11);
+        panel.addView(heartView, marginTop(dp(6)));
+        LinearLayout heartControls = new LinearLayout(this);
+        heartControls.setOrientation(LinearLayout.HORIZONTAL);
+        Button findHeart = button("Find Heart Strap");
+        findHeart.setOnClickListener(v -> startHeartSensor());
+        heartControls.addView(findHeart, weightParams());
+        Button maxHeart = button("Max HR " + Math.round(personalBests.get("hr.max", 185f)));
+        maxHeart.setOnClickListener(v -> {
+            int next = Math.round(personalBests.get("hr.max", 185f)) + 5;
+            if (next > 200) {
+                next = 170;
+            }
+            personalBests.putFloat("hr.max", next);
+            maxHeart.setText("Max HR " + next);
+        });
+        heartControls.addView(maxHeart, weightParams());
+        panel.addView(heartControls, marginTop(dp(4)));
+
         controllerView = new TextView(this);
         controllerView.setText("Controller: none paired");
         controllerView.setTextColor(getColorCompat(R.color.text_faint));
@@ -2796,6 +2906,9 @@ public class MainActivity extends Activity
     private void exitApp() {
         if (handleSensor != null) {
             handleSensor.stop();
+        }
+        if (heartSensor != null) {
+            heartSensor.stop();
         }
         saveLastSession();
         commitJourney();

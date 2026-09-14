@@ -47,7 +47,9 @@ final class ZoneRowGame extends GameView {
         PYRAMID(new int[][]{{0, 120}, {1, 120}, {2, 120}, {3, 60}, {2, 120}, {1, 120}, {0, 60}}),
         LADDER(new int[][]{{1, 180}, {0, 60}, {2, 180}, {0, 60}, {3, 120}, {0, 60}, {2, 180}, {1, 120}}),
         SPRINTS(sprints()),
-        STREAK(null);
+        STREAK(null),
+        /** Zones by heart rate from a Bluetooth strap, as a share of max heart rate. */
+        HEART(null);
 
         final int[][] segments;
 
@@ -95,6 +97,10 @@ final class ZoneRowGame extends GameView {
     private double streak;
     private double bestStreak;
     private double streakGrace;
+    /** Max heart rate for the HEART plan's zones. */
+    private float maxHeart = 185f;
+    private float shownHeart;
+    private static final float[][] HEART_BANDS = {{0.55f, 0.65f}, {0.65f, 0.75f}, {0.75f, 0.85f}, {0.85f, 0.95f}};
 
     private double pieceSeconds;
     private double pieceStartMeters;
@@ -201,6 +207,16 @@ final class ZoneRowGame extends GameView {
         }
     }
 
+    /** The heart-rate zone right now, or -1 without a strap. */
+    private int heartZone() {
+        int hr = heartRate();
+        if (hr <= 0) {
+            return -1;
+        }
+        float share = hr / maxHeart;
+        return share < 0.65f ? 0 : share < 0.75f ? 1 : share < 0.85f ? 2 : 3;
+    }
+
     private int segmentAt(double seconds) {
         if (plan.segments == null) {
             return -1;
@@ -294,7 +310,9 @@ final class ZoneRowGame extends GameView {
     private void advance(float dt) {
         float speed = boat.value();
         float pace = speed >= 0.5f ? 500f / speed : 0f;
-        int zone = pace > 0f ? zoneAt(splitFraction(pace)) : -1;
+        int zone = plan == Plan.HEART ? heartZone() : pace > 0f ? zoneAt(splitFraction(pace)) : -1;
+        maxHeart = bests.get("hr.max", 185f);
+        shownHeart += (heartRate() - shownHeart) * Math.min(1f, 3f * dt);
 
         // Work from the pulse meter: measured from the paddle, calibrated if the rower has done the
         // load-scale test. Counted only while the piece is running.
@@ -498,7 +516,9 @@ final class ZoneRowGame extends GameView {
         if (!hasClockStarted()) {
             String hint = plan.segments != null
                     ? plan.name() + "  ·  " + plan.segments.length + " SEGMENTS  ·  " + lengthLabel()
-                    : plan == Plan.STREAK ? "STREAK  ·  TAP A ZONE TO SET THE BAR" : "TAP A ZONE TO SET YOUR TARGET";
+                    : plan == Plan.STREAK ? "STREAK  ·  TAP A ZONE TO SET THE BAR"
+                    : plan == Plan.HEART ? (heartRate() > 0 ? "HEART ZONES  ·  TAP A ZONE" : "CONNECT A HEART STRAP IN DIAGNOSTICS")
+                    : "TAP A ZONE TO SET YOUR TARGET";
             text(c, hint, cx, labelY, labelSize, FAINT, Paint.Align.CENTER, labels, 0.25f);
             text(c, "ROW TO START", cx, valueY, valueSize * 0.7f, ACCENT, Paint.Align.CENTER, numbers, 0.12f);
         } else if (plan.segments != null) {
@@ -567,6 +587,10 @@ final class ZoneRowGame extends GameView {
     }
 
     private void drawRateBar(Canvas c, float h, float left, float right) {
+        if (plan == Plan.HEART) {
+            drawHeartBar(c, h, left, right);
+            return;
+        }
         float top = h * 0.585f;
         float bottom = top + h * 0.05f;
         float radius = (bottom - top) / 2f;
@@ -612,6 +636,39 @@ final class ZoneRowGame extends GameView {
         text(c, "SPM", cx + rateW / 2f + dp(10f), baseline, h * 0.032f, FAINT, Paint.Align.LEFT, labels, 0.2f);
     }
 
+    /** In the HEART plan the lower bar is heart rate, with the target zone's band of beats. */
+    private void drawHeartBar(Canvas c, float h, float left, float right) {
+        float top = h * 0.585f;
+        float bottom = top + h * 0.05f;
+        float radius = (bottom - top) / 2f;
+        float lo = 60f;
+        float hi = 200f;
+        float scale = (right - left) / (hi - lo);
+        float bandLo = maxHeart * HEART_BANDS[targetZone][0];
+        float bandHi = maxHeart * HEART_BANDS[targetZone][1];
+        float hx = left + Math.max(0f, Math.min(hi - lo, shownHeart - lo)) * scale;
+        boolean inBand = shownHeart >= bandLo && shownHeart <= bandHi;
+        rect.set(left, top, right, bottom);
+        fill.setColor(TRACK);
+        c.drawRoundRect(rect, radius, radius, fill);
+        rect.set(left + (bandLo - lo) * scale, top - dp(7f), left + (bandHi - lo) * scale, bottom + dp(7f));
+        fill.setColor(0x55F0655D);
+        c.drawRoundRect(rect, dp(4f), dp(4f), fill);
+        if (shownHeart > lo) {
+            fill.setColor(0xFFF0655D);
+            rect.set(left, top, hx, bottom);
+            c.drawRoundRect(rect, radius, radius, fill);
+            fill.setColor(inBand ? ACCENT : TEXT);
+            c.drawRect(hx - dp(2f), top - dp(10f), hx + dp(2f), bottom + dp(10f), fill);
+        }
+        String value = heartRate() > 0 ? String.valueOf(Math.round(shownHeart)) : "--";
+        float baseline = bottom + h * 0.125f;
+        text(c, value, Math.max(left + dp(60f), Math.min(right - dp(140f), hx)), baseline, h * 0.1f,
+                inBand ? ACCENT : TEXT, Paint.Align.CENTER, numbers, 0.02f);
+        text(c, "BPM  ·  MAX " + Math.round(maxHeart), Math.max(left + dp(60f), Math.min(right - dp(140f), hx)) + dp(70f),
+                baseline, h * 0.03f, FAINT, Paint.Align.LEFT, labels, 0.2f);
+    }
+
     private void drawStats(Canvas c, float w, float h, float left, float right, int zone) {
         float rowTop = h * 0.80f;
         float rowBottom = h * 0.98f;
@@ -631,7 +688,7 @@ final class ZoneRowGame extends GameView {
         double meters = pieceMeters();
         String avgSplit = pieceSeconds > 5 && meters > 5
                 ? PersonalBests.formatPace((float) (pieceSeconds * 500.0 / meters)) : "--:--";
-        int heart = status == null ? 0 : status.heartRate;
+        int heart = heartRate();
         long kcal = Math.round(PulseMeter.kcalForWork(joules));
 
         String[] values = {

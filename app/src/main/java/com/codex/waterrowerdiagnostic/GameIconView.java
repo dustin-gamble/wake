@@ -13,7 +13,7 @@ final class GameIconView extends View {
     enum Kind {
         GAUGES, ZOMBIE, RUNNER, BOSS, PACE, GHOST, RUN, INTERVALS, JOURNEY, STORM, ZONES,
         LADDER, TUG, COLLECTOR, DIVE, HEADRACE, CANYON, MEGAPULL, CHASE, ROCKET, CITY, SURF,
-        FLY, ZONEROW
+        FLY, ZONEROW, RIVER, COACH, CREW, GRID, REGATTA, DAILY
     }
 
     private final Kind kind;
@@ -176,6 +176,97 @@ final class GameIconView extends View {
                 path.lineTo(u(14), u(15));
                 path.close();
                 c.drawPath(path, p);
+                break;
+            case RIVER:
+                // A winding river with a boat on it.
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(u(3.2f));
+                path.reset();
+                path.moveTo(u(4), u(22));
+                path.cubicTo(u(4), u(14), u(18), u(16), u(15), u(9));
+                path.cubicTo(u(13), u(5), u(19), u(3), u(21), u(2));
+                c.drawPath(path, p);
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(0xFFF5C518);
+                c.drawCircle(u(12), u(13), u(2.2f), p);
+                break;
+            case COACH:
+                // A drive curve over a faint best-stroke outline.
+                p.setAlpha(70);
+                path.reset();
+                path.moveTo(u(3), u(20));
+                path.cubicTo(u(7), u(4), u(13), u(4), u(21), u(20));
+                path.close();
+                c.drawPath(path, p);
+                p.setAlpha(255);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(u(2.4f));
+                path.reset();
+                path.moveTo(u(3), u(20));
+                path.cubicTo(u(8), u(7), u(12), u(6), u(21), u(20));
+                c.drawPath(path, p);
+                p.setStyle(Paint.Style.FILL);
+                break;
+            case CREW:
+                // A long hull with oars in time.
+                r.set(u(2), u(12), u(22), u(15));
+                c.drawRoundRect(r, u(1.5f), u(1.5f), p);
+                p.setStrokeWidth(u(1.6f));
+                for (int i = 0; i < 4; i++) {
+                    float x = u(5 + i * 4.5f);
+                    c.drawLine(x, u(12), x - u(3), u(20), p);
+                    c.drawCircle(x, u(10), u(1.4f), p);
+                }
+                break;
+            case GRID:
+                // A house with a lit window and a spark.
+                path.reset();
+                path.moveTo(u(3), u(12));
+                path.lineTo(u(10), u(6));
+                path.lineTo(u(17), u(12));
+                path.close();
+                c.drawPath(path, p);
+                c.drawRect(u(4.5f), u(12), u(15.5f), u(21), p);
+                p.setColor(0xFFFFE08A);
+                c.drawRect(u(8), u(14), u(12), u(18), p);
+                path.reset();
+                path.moveTo(u(20), u(3));
+                path.lineTo(u(17), u(10));
+                path.lineTo(u(20), u(10));
+                path.lineTo(u(18), u(16));
+                path.lineTo(u(23), u(8));
+                path.lineTo(u(20), u(8));
+                path.close();
+                c.drawPath(path, p);
+                break;
+            case REGATTA:
+                // A pennant flag over lane lines.
+                c.drawRect(u(6), u(3), u(7.5f), u(21), p);
+                path.reset();
+                path.moveTo(u(7.5f), u(3));
+                path.lineTo(u(19), u(6.5f));
+                path.lineTo(u(7.5f), u(10));
+                path.close();
+                c.drawPath(path, p);
+                p.setAlpha(110);
+                c.drawRect(u(3), u(15), u(22), u(16), p);
+                c.drawRect(u(3), u(19), u(22), u(20), p);
+                p.setAlpha(255);
+                break;
+            case DAILY:
+                // A calendar page with a tick.
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(u(2f));
+                r.set(u(3), u(5), u(21), u(21));
+                c.drawRoundRect(r, u(2), u(2), p);
+                c.drawLine(u(3), u(9.5f), u(21), u(9.5f), p);
+                p.setStrokeWidth(u(2.6f));
+                path.reset();
+                path.moveTo(u(7.5f), u(15));
+                path.lineTo(u(11), u(18));
+                path.lineTo(u(17), u(12));
+                c.drawPath(path, p);
+                p.setStyle(Paint.Style.FILL);
                 break;
             case ZONEROW:
                 // Two lane bars, the upper one filled to a marker, the lower one shorter.
