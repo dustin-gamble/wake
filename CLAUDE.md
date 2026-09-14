@@ -618,11 +618,20 @@ Four changes, all at the rower's request once the link was working again:
   between every stroke even while the figure it was fed held.
 - **The paddle wheel shows RPM, and turns at the RPM it shows.** The S4 memory map has no rotation
   register, only m/s. The monitor measures distance by counting paddle turns, so rotations are
-  proportional to metres at any pace: `RPM = speed x 60 x rotations-per-metre`. First calibration:
-  12 turns over 32 m, **0.375 per metre**, about 87 RPM at 3.85 m/s. **Provisional, +/-25%** -
-  counting a slowing paddle for 35 s is hard, and 25 of those metres arrived 4 s after the paddle
-  stopped because distance (`057`) is polled slowly. To refine: one firm stroke from still, count
-  turns until it stops, wait 30 s for distance to catch up, repeat three times, divide.
+  proportional to metres at any pace: `RPM = speed x 60 x rotations-per-metre`.
+  **Calibrated at 0.65 per metre** (about 1.5 m per turn, ~150 RPM at 3.85 m/s): the rower counted
+  two firm strokes at 10 turns each against 29 m of settled distance, 0.69/m, and 0.61/m if the
+  uncounted first stroke was also 10. Settled readings:
+
+  ```
+  strokes 126  1279 m  ->  127  1299 m  ->  128  1312 m (+13, 10 turns)  ->  129  1328 m (+16, 10 turns)
+  ```
+
+  **A first attempt gave 0.375 and was wrong by 1.7x.** 25 of its 32 m landed after the paddle had
+  stopped; at the true rate its 12 turns are ~18 m, so ~13 m was the previous piece's distance not
+  yet read. **Distance (`057`) is polled slowly - always let it settle before calibrating**, and
+  start from a distance reading taken well after any earlier rowing.
+  To re-check: one firm stroke from still, count turns until it stops, wait 30 s, repeat.
 - **The plot scrolls smoothly.** It used to jump a column left every 200 ms when a sample landed,
   and allocated a `Path` and `LinearGradient` on every draw. It now slides by the elapsed fraction
   of a measured sample period, redraws every frame while visible, eases its scale, and allocates

@@ -23,11 +23,17 @@ final class PaddleView extends View {
      *
      * <p>The S4 memory map has no rotation or RPM register, only speed, so RPM is derived. The
      * monitor measures distance by counting paddle turns, which makes rotations proportional to
-     * metres whatever the pace: RPM = speed x 60 x rotations-per-metre. Calibrated by the rower
-     * counting turns against the distance the monitor recorded - 12 turns over 32 m on the first
-     * attempt, 0.375 per metre. Provisional (+/-25%) until repeated single-stroke counts refine it.
+     * metres whatever the pace: RPM = speed x 60 x rotations-per-metre.
+     *
+     * <p>Calibrated by the rower counting paddle turns against the distance the monitor settled
+     * on: two firm strokes, 10 turns each, over 29 m - 0.69 per metre - and 0.61 if the uncounted
+     * first stroke was also 10. 0.65 sits between them, about 1.5 m per turn.
+     *
+     * <p>A first attempt gave 0.375 and was wrong by 1.7x. Distance (057) is polled slowly, and 25
+     * of that attempt's 32 m landed after the paddle had stopped - most of it the previous piece's
+     * distance not yet read. Always let distance settle before trusting a calibration.
      */
-    static final double RPM_PER_MPS = 60.0 * 0.375;
+    static final double RPM_PER_MPS = 60.0 * 0.65;
     /** The wheel on screen turns at exactly the RPM it displays. */
     private static final double DEGREES_PER_MPS = RPM_PER_MPS * 6.0;
     /**
