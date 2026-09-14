@@ -69,6 +69,10 @@
       .shots figure { margin: 0; }
       .shots img { width: 100%; display: block; border-radius: 10px; border: 1px solid var(--line); }
       .shots figcaption { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-top: 6px; }
+      .prompt { position: relative; }
+      .prompt pre { white-space: pre-wrap; color: var(--ink); padding-top: 16px; }
+      .copy { position: absolute; top: 8px; right: 8px; font: 600 12px var(--sans); color: #04211D;
+        background: var(--accent); border: 0; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
       .tag { display: inline-block; font-size: 11px; font-family: var(--mono); color: var(--warn);
         border: 1px solid rgba(240,177,50,0.35); border-radius: 999px; padding: 2px 9px; }
     </style>
@@ -157,6 +161,38 @@
       </div>
 
       <div class="panel">
+        <h2>Make it yours</h2>
+        <p>WAKE was built with an AI coding agent, one build at a time, with the rower rowing and
+          reporting back — and everything learned the hard way is written down for the next agent.
+          Want a different game, zones tuned to your pace, your own colours? Open
+          <a href="https://claude.com/claude-code">Claude Code</a> or any coding agent, paste this,
+          and describe the change:</p>
+        <div class="prompt">
+          <button class="copy" type="button" id="copyPrompt">Copy</button>
+          <pre id="agentPrompt">I want to customize WAKE, a rowing app for the WaterRower S4 on an Ergatta tablet.
+
+1. Fork https://github.com/dustin-gamble/wake to my GitHub account, clone my fork,
+   and create a branch called my-wake.
+2. Before changing anything, read AGENTS.md, then README.md, then CLAUDE.md.
+3. Help me with this: &lt;describe what you want - e.g. "a game where I race a shark
+   that speeds up whenever my stroke rate drops"&gt;
+4. There is no emulator for this tablet. Build the APK, tell me how to get it onto
+   my rower, and ask me what I see before moving on.</pre>
+        </div>
+        <ul>
+          <li><a href="https://github.com/dustin-gamble/wake/blob/main/AGENTS.md"><strong>AGENTS.md</strong></a>
+            — the agent's starting point: setup, getting a build onto the rower, and the rules.</li>
+          <li><a href="https://github.com/dustin-gamble/wake/blob/main/README.md"><strong>README.md</strong></a>
+            — what the app is and how it reads the monitor.</li>
+          <li><a href="https://github.com/dustin-gamble/wake/blob/main/CLAUDE.md"><strong>CLAUDE.md</strong></a>
+            — the full engineering log: what was measured, what was ruled out, and why.</li>
+        </ul>
+        <p class="note" style="margin:10px 0 0">Your agent can't see the tablet, so you are its eyes:
+          install each build, row, and tell it what you see. Made something good?
+          <a href="https://github.com/dustin-gamble/wake/pulls">Send a pull request.</a></p>
+      </div>
+
+      <div class="panel">
         <h2>Built to be safe on a leased machine</h2>
         <ul>
           <li><strong>No root.</strong> No system modification. No changes to boot behaviour.</li>
@@ -185,6 +221,25 @@ Decoded: 088 watts · 14A speed · 1A9 rate · 140 strokes
 
     </div>
     <script>
+      // Copy the agent prompt. The textarea fallback covers browsers without the async clipboard.
+      document.getElementById('copyPrompt').addEventListener('click', function () {
+        var button = this;
+        var text = document.getElementById('agentPrompt').textContent;
+        function done() { button.textContent = 'Copied'; setTimeout(function () { button.textContent = 'Copy'; }, 1600); }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, fallback);
+        } else {
+          fallback();
+        }
+        function fallback() {
+          var area = document.createElement('textarea');
+          area.value = text;
+          document.body.appendChild(area);
+          area.select();
+          try { document.execCommand('copy'); done(); } catch (e) {}
+          document.body.removeChild(area);
+        }
+      });
       // The launch link is only meaningful where the app exists. Say so rather than appearing broken.
       document.getElementById('openApp').addEventListener('click', function () {
         var started = Date.now();

@@ -90,14 +90,39 @@ Decoded: 088 watts · 14A speed · 1A9 rate · 140 strokes
 Any WaterRower S4 exposing USB serial should work, as should other Android tablets. Reports from
 different hardware are very welcome — open an issue.
 
+## Make it yours with an AI agent
+
+WAKE was built with an AI coding agent, and everything learned the hard way is written down for
+the next one. Open [Claude Code](https://claude.com/claude-code) or any coding agent, paste this,
+and describe what you want:
+
+```text
+I want to customize WAKE, a rowing app for the WaterRower S4 on an Ergatta tablet.
+
+1. Fork https://github.com/dustin-gamble/wake to my GitHub account, clone my fork,
+   and create a branch called my-wake.
+2. Before changing anything, read AGENTS.md, then README.md, then CLAUDE.md.
+3. Help me with this: <describe what you want - e.g. "a game where I race a shark
+   that speeds up whenever my stroke rate drops">
+4. There is no emulator for this tablet. Build the APK, tell me how to get it onto
+   my rower, and ask me what I see before moving on.
+```
+
+- **[AGENTS.md](AGENTS.md)** — the agent's starting point: setup, getting a build onto the rower,
+  the signing clash, and the rules it must not break.
+- **[CLAUDE.md](CLAUDE.md)** — the full engineering log: what was measured, what was ruled out, why.
+
+Your agent can't see the tablet, so you are its eyes: install each build, row, and tell it what you
+see. Made something others would enjoy? Send a pull request.
+
 ## Build it yourself
 
 ```sh
-# Android SDK required; the app has one dependency (usb-serial-for-android).
-gradle assembleDebug
+# JDK 17+ and the Android SDK (platform 35); one dependency, usb-serial-for-android.
+./gradlew assembleDebug
 
 # Optionally bake in your laptop's dashboard URL, otherwise it is discovered over UDP:
-gradle assembleDebug -PdiagnosticServerUrl=http://<your-laptop-ip>:8787
+./gradlew assembleDebug -PdiagnosticServerUrl=http://<your-laptop-ip>:8787
 ```
 
 The dashboard needs no dependencies at all:
@@ -114,9 +139,11 @@ into the APK.** Without one the flight falls back to OpenStreetMap.
 Protocol and physics run without Android, so they are tested with plain `javac`:
 
 ```sh
-javac -d /tmp/t app/src/main/java/com/codex/waterrowerdiagnostic/S4Protocol.java \
-  tools/prototest/com/codex/waterrowerdiagnostic/S4ProtocolTest.java
+S=app/src/main/java/com/codex/waterrowerdiagnostic T=tools/prototest/com/codex/waterrowerdiagnostic
+javac -d /tmp/t $S/S4Protocol.java $S/Coast.java $S/BoatSpeedModel.java \
+  $T/S4ProtocolTest.java $T/BoatSpeedModelTest.java
 java -cp /tmp/t com.codex.waterrowerdiagnostic.S4ProtocolTest
+java -cp /tmp/t com.codex.waterrowerdiagnostic.BoatSpeedModelTest
 ```
 
 ## Layout
@@ -126,6 +153,7 @@ app/          Android app: protocol, instruments, games, Coast Flight WebView
 server/       Optional laptop dashboard: HTTP, SSE, capture, UDP discovery
 tools/        Capture analysis (Python) and offline tests (plain javac)
 docs/         The GitHub Pages site and the published APK
+AGENTS.md     Start here if an AI agent is customizing it
 CLAUDE.md     Engineering notes: what was measured, what was ruled out, and why
 ```
 
