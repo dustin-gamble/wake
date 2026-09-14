@@ -474,6 +474,29 @@ already opens the port - is not a double open.
 writes, zero probes, zero status and zero raw bytes. Checked with `giveback.py` (scratchpad),
 which also bounds the window at the next `app-started` so a reopen is not miscounted.
 
+**GUARDRAIL BROKEN (3.11.0): Ergatta did not read strokes after WAKE exited.** The Exit check
+above said "let go cleanly", and it was true - WAKE closed its connection and never touched the
+rower again. **But that is not the guardrail.** The rower left WAKE, opened Ergatta, and Ergatta was
+not reading strokes; recovery was a reboot. *WAKE stopping is necessary, not sufficient: the only
+valid test of the hand-back is Ergatta reading strokes.* Do not report the guardrail as met from
+WAKE-side telemetry again.
+
+What is and is not known:
+- **Not simply "forced claim detaches the driver."** Earlier WAKE builds force-claimed at open too
+  (`CdcAcmSerialPort.openInterface` uses `claimInterface(iface, true)`) and Ergatta rowed
+  perfectly after them. What 3.10+ adds is reclaiming every ~3 s for a whole session. The likely
+  culprit is that tug-of-war leaving Ergatta's own reconnect path failed or backed off - but
+  Ergatta does not report to this dashboard, so this is inference, not measurement.
+- **No public way to reset the USB device on Android 9.** `UsbDeviceConnection` exposes only
+  `claimInterface`, `releaseInterface` and `close`; the public `android.system.Os` has no `ioctl`.
+  A reset-on-exit (to force re-enumeration, as a reboot does) would need hidden APIs or native
+  code. Not attempted.
+- **Reboot restores it** is the working assumption; confirm by checking Ergatta after a reboot
+  *before* opening WAKE.
+
+Until this is resolved, **using WAKE 3.10+ may leave Ergatta unable to read the rower until the
+tablet is rebooted.** The user must know that before each session.
+
 **Not yet verified - Home/background path.** Exit already closed the connection before the
 take-it-back change, so it proves little about the new code. The path that change added is
 `onStop` releasing the rower while the process keeps running (Home, or switching straight to
