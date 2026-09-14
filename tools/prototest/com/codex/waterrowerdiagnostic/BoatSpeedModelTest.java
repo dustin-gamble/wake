@@ -70,9 +70,20 @@ public class BoatSpeedModelTest {
         BoatSpeedModel m = new BoatSpeedModel();
         long t = 1000;
         for (int i = 0; i < 120; i++) { t += 16; if (i % 30 == 0) m.setTarget(3.0, true, t); m.step(1 / 60f, t); }
+        float before = m.value();
+        long sinceLast = t - 2456;   // last reading landed at i = 90
         // No readings at all for 4 seconds: treated as coasting, not held flat.
         run(m, t, 4f);
-        check("stale readings do not hold the value flat", m.value() < 2.0f, true);
+        // The property, not a number tuned to one drag. The first "< 2.0" pass mark only held for
+        // the old default of 0.12; at 0.04 the model correctly fell 3.0 -> ~2.16 and still failed.
+        check("stale readings do not hold the value flat", m.value() < before * 0.85f, true);
+        // And it follows quadratic drag at whatever the default is. Readings go stale 1.2 s after
+        // the last one, so the coast itself is 4 s minus what remained of that window.
+        double coast = 4.0 - (1.2 - sinceLast / 1000.0);
+        double k = BoatSpeedModel.DEFAULT_DRAG;
+        double expected = before / (1.0 + k * before * coast);
+        check("stale coast follows the drag curve at the default drag",
+                Math.abs(m.value() - expected) < 0.15, true);
     }
 
     private static void check(String label, Object actual, Object expected) {

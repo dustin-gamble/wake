@@ -18,8 +18,18 @@ final class PaddleView extends View {
     private static final int BLADES = 8;
     /** Visible motion as soon as the flywheel turns, before 14A catches up. */
     private static final double MOVING_FLOOR = 0.8;
-    /** Degrees per second per m/s. Tuned so a hard pull clearly outruns a gentle one. */
-    private static final double DEGREES_PER_MPS = 105.0;
+    /**
+     * Paddle revolutions per minute per m/s of boat speed.
+     *
+     * <p>The S4 memory map has no rotation or RPM register, only speed, so RPM is derived. The
+     * monitor measures distance by counting paddle turns, which makes rotations proportional to
+     * metres whatever the pace: RPM = speed x 60 x rotations-per-metre. Calibrated by the rower
+     * counting turns against the distance the monitor recorded - 12 turns over 32 m on the first
+     * attempt, 0.375 per metre. Provisional (+/-25%) until repeated single-stroke counts refine it.
+     */
+    static final double RPM_PER_MPS = 60.0 * 0.375;
+    /** The wheel on screen turns at exactly the RPM it displays. */
+    private static final double DEGREES_PER_MPS = RPM_PER_MPS * 6.0;
     /**
      * Quadratic drag constant for the coast-down. The monitor stops reporting the instant you stop
      * pulling, so the wheel's wind-down is modelled: v(t) = v0 / (1 + k*v0*t).
@@ -28,7 +38,7 @@ final class PaddleView extends View {
      * Water drag, quadratic in speed. On this machine the paddle in the tank is the entire
      * resistance, so nothing else is modelled: v(t) = v0 / (1 + DRAG*v0*t).
      */
-    private volatile double drag = 0.12;
+    private volatile double drag = 0.04;
 
     private final Paint bladePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hubPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -158,9 +168,9 @@ final class PaddleView extends View {
         labelPaint.setTextSize(dp(9f));
         valuePaint.setTextSize(dp(13f));
         String value = shownSpeed > 0.02
-                ? String.format(java.util.Locale.US, "%.1f", shownSpeed)
+                ? String.valueOf(Math.round(shownSpeed * RPM_PER_MPS))
                 : "--";
-        String label = "m/s";
+        String label = "rpm";
         canvas.drawText(value, cx - valuePaint.measureText(value) / 2f, h - dp(13f), valuePaint);
         canvas.drawText(label, cx - labelPaint.measureText(label) / 2f, h - dp(3f), labelPaint);
 

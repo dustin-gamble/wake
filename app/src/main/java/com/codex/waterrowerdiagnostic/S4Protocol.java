@@ -263,6 +263,21 @@ final class S4Protocol {
     private int previousClockSec = -1;
     private int distanceMeters;
     private int strokes;
+    /**
+     * Recent stroke-counter tick times, for the displayed rate. Only usable since the link was
+     * fixed: while strokes arrived in lumps there was no interval to measure.
+     */
+    private static final int STROKE_TICKS = 8;
+    private final long[] strokeTickAtMs = new long[STROKE_TICKS];
+    private int strokeTickCount;
+    /** Strokes averaged for the displayed rate - about 15 s at a typical rating. */
+    private static final int RATE_INTERVALS = 6;
+    /** Plausible stroke gaps: 50 spm to 10 spm. Outside that it is noise, not rowing. */
+    private static final long MIN_STROKE_MS = 1200;
+    private static final long MAX_STROKE_MS = 6000;
+    /** A stroke this much later than expected starts pulling the displayed rate down. */
+    private static final double LATE_FACTOR = 1.35;
+    private static final long STOPPED_MS = 12000;
     /** 15s of 1A9 samples at ~1Hz, for the displayed average. */
     private static final int RATE_WINDOW = 20;
     private static final long RATE_WINDOW_MS = 15000;
@@ -312,6 +327,7 @@ final class S4Protocol {
         previousClockSec = -1;
         distanceMeters = 0;
         strokes = 0;
+        strokeTickCount = 0;
         strokeRate = 0;
         java.util.Arrays.fill(rateAtMs, 0L);
         rateWrite = 0;
@@ -584,8 +600,59 @@ final class S4Protocol {
                 pulseStrokes());
     }
 
+    private void recordStrokeTick(long atMs) {
+        // A gap longer than any real stroke means the rower stopped; start the history over so
+        // the first strokes back are not averaged against the rest.
+        if (strokeTickCount > 0 && atMs - strokeTickAtMs[strokeTickCount - 1] > MAX_STROKE_MS) {
+            strokeTickCount = 0;
+        }
+        if (strokeTickCount < STROKE_TICKS) {
+            strokeTickAtMs[strokeTickCount++] = atMs;
+        } else {
+            System.arraycopy(strokeTickAtMs, 1, strokeTickAtMs, 0, STROKE_TICKS - 1);
+            strokeTickAtMs[STROKE_TICKS - 1] = atMs;
+        }
+    }
+
     /**
-     * Stroke rate averaged for display.
+     * Stroke rate as displayed: timed from the strokes themselves, held until the next is due.
+     *
+     * <p>The rower's own description of what it should do, and the right model: once the rate is
+     * known, the next stroke is expected a known interval after the last. So the figure is the
+     * average of the last six stroke intervals - it only moves when a stroke lands, by a sixth of
+     * the change - and between strokes it holds. Only when a stroke is clearly late does it start
+     * to fall, as 60 / time-since-the-last-stroke, which is exactly what the rate has become.
+     *
+     * <p>This was not possible before the interface-ownership fix. While strokes arrived in lumps
+     * - eleven in one update after 25 s of silence - there was no interval to time. Measured on
+     * 3.10.0 every stroke now lands on its own, a median 1.8 s apart at 29-30 spm.
+     *
+     * <p>Until three intervals exist it falls back to the 1A9 reading. Display only: the coast
+     * trigger and the games keep the raw value.
+     */
+    private int averagedStrokeRate(long now) {
+        int intervals = strokeTickCount - 1;
+        if (intervals < 3) {
+            return trimmedRate(now);
+        }
+        int use = Math.min(RATE_INTERVALS, intervals);
+        long last = strokeTickAtMs[strokeTickCount - 1];
+        long first = strokeTickAtMs[strokeTickCount - 1 - use];
+        double expected = (last - first) / (double) use;
+        expected = Math.max(MIN_STROKE_MS, Math.min(MAX_STROKE_MS, expected));
+        long elapsed = now - last;
+        if (elapsed > STOPPED_MS) {
+            return 0;
+        }
+        double rate = 60000.0 / expected;
+        if (elapsed > expected * LATE_FACTOR) {
+            rate = Math.min(rate, 60000.0 / elapsed);
+        }
+        return (int) Math.round(rate);
+    }
+
+    /**
+     * Fallback displayed rate from 1A9 alone, used until enough strokes have been timed.
      *
      * <p>1A9 is steadier than it looks - measured over 2700 samples of a held 25spm it has a
      * standard deviation of 1.6spm - but it dips to 19-21 in about 9% of them, and a needle
@@ -599,7 +666,7 @@ final class S4Protocol {
      *
      * <p>Display only. The coast trigger below and the games keep the raw value.
      */
-    private int averagedStrokeRate(long now) {
+    private int trimmedRate(long now) {
         int count = 0;
         int sum = 0;
         int lowest = Integer.MAX_VALUE;
@@ -820,9 +887,18 @@ final class S4Protocol {
             case "055":
                 distanceMeters = value;
                 break;
-            case "140":
+            case "140": {
+                int delta = value - strokes;
+                if (strokes > 0 && delta == 1) {
+                    recordStrokeTick(System.currentTimeMillis());
+                } else if (delta != 0) {
+                    // A reset to zero on reopen, the re-read jump after it, a lumped read or a
+                    // monitor restart: an interval measured across any of those is fiction.
+                    strokeTickCount = 0;
+                }
                 strokes = value;
                 break;
+            }
             case "088":
                 watts = value;
                 break;

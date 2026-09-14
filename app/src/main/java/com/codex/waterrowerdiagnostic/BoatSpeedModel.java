@@ -11,7 +11,7 @@ package com.codex.waterrowerdiagnostic;
 final class BoatSpeedModel {
 
     /** Default drag; matches the instrument default and is retuned from the drawer. */
-    static final float DEFAULT_DRAG = 0.12f;
+    static final float DEFAULT_DRAG = 0.04f;
 
     private float drag = DEFAULT_DRAG;
     private float attackPerSecond = 4.0f;

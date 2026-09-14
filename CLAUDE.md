@@ -601,6 +601,33 @@ mid-stroke. If you add a hot field, everything else gets slower; check the cost.
 Command gap is user-selectable in diagnostics (60-400ms, default 150ms). Lower is fresher
 but historically destabilised the write path.
 
+## Instrument feel, as tuned by the rower on the fixed link (3.11.0)
+
+Four changes, all at the rower's request once the link was working again:
+
+- **Speed bleeds slowly.** Coast drag default lowered a fourth time, 0.12 -> **0.04**, in the
+  gauge, the paddle and `BoatSpeedModel` alike. At 3.85 m/s across a 2.4 s stroke gap, 0.12 shed
+  53% of the speed and 0.04 sheds 27%. Options now 0.02-0.12, default index 2.
+- **Stroke rate timed from strokes and held until the next is due** (the rower's own model).
+  `S4Protocol.averagedStrokeRate` averages the last six stroke-counter intervals, so it moves only
+  when a stroke lands and by a sixth of the change. Between strokes it holds. Once a stroke is
+  later than 1.35x the expected interval it falls as 60 / time-since-last-stroke. Counter resets
+  and lumped reads clear the timing; under three intervals it falls back to the 1A9 trimmed mean.
+  **Only possible since the ownership fix** - strokes arriving eleven at a time had no interval.
+  The rate needle no longer has water drag: a rate is not a flywheel, and with drag the needle sank
+  between every stroke even while the figure it was fed held.
+- **The paddle wheel shows RPM, and turns at the RPM it shows.** The S4 memory map has no rotation
+  register, only m/s. The monitor measures distance by counting paddle turns, so rotations are
+  proportional to metres at any pace: `RPM = speed x 60 x rotations-per-metre`. First calibration:
+  12 turns over 32 m, **0.375 per metre**, about 87 RPM at 3.85 m/s. **Provisional, +/-25%** -
+  counting a slowing paddle for 35 s is hard, and 25 of those metres arrived 4 s after the paddle
+  stopped because distance (`057`) is polled slowly. To refine: one firm stroke from still, count
+  turns until it stops, wait 30 s for distance to catch up, repeat three times, divide.
+- **The plot scrolls smoothly.** It used to jump a column left every 200 ms when a sample landed,
+  and allocated a `Path` and `LinearGradient` on every draw. It now slides by the elapsed fraction
+  of a measured sample period, redraws every frame while visible, eases its scale, and allocates
+  nothing in `onDraw`.
+
 ## Tune games to THIS envelope, not to a guess (3.7.0)
 
 Measured from 3221 samples of real rowing on this machine. Every game constant that gates

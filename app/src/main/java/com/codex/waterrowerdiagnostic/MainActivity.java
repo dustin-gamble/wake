@@ -99,15 +99,19 @@ public class MainActivity extends Activity
     /** Coast drag options, slowest wind-down first. Labelled by feel, not by unit. */
     // Measured by feel on the machine: 0.6 was much too fast, 0.3 still too fast. A real paddle
     // holds its run far longer than a naive drag constant suggests.
-    private static final float[] DRAG_OPTIONS = {0.04f, 0.08f, 0.12f, 0.20f, 0.35f};
+    // Lowered a fourth time (0.6 -> 0.3 -> 0.12 -> 0.04) on the rower's word that speed should
+    // bleed away slowly. At 3.85 m/s over a 2.4 s stroke gap, 0.12 shed 53% of the speed; 0.04
+    // sheds 27%.
+    private static final float[] DRAG_OPTIONS = {0.02f, 0.03f, 0.04f, 0.06f, 0.08f, 0.12f};
     private static final String[] DRAG_LABELS = {
-            "Very long glide", "Long glide", "Standard", "Short glide", "Stops quickly"};
+            "Longest glide", "Very long glide", "Long glide", "Medium glide", "Short glide",
+            "Quick stop"};
     /**
      * Gap between S4 commands. Lower means fresher gauges; too low historically wedged the write
      * path, so it is adjustable from diagnostics and reported with every event.
      */
     private volatile long commandGapMs = 150;
-    private volatile float coastDrag = 0.12f;
+    private volatile float coastDrag = 0.04f;
 
     /** Swappable content area: home, instruments, or a game. Drawer and scrim sit above it. */
     private FrameLayout screenHost;
@@ -1592,11 +1596,11 @@ public class MainActivity extends Activity
         LinearLayout gauges = new LinearLayout(this);
         gauges.setOrientation(LinearLayout.HORIZONTAL);
         speedGauge = new GaugeView(this, "SPEED", "m/s",
-                getColorCompat(R.color.primary), 5f, 1).waterDrag(0.12f).attack(4.0f);
+                getColorCompat(R.color.primary), 5f, 1).waterDrag(0.04f).attack(4.0f);
         powerGauge = new GaugeView(this, "POWER", "watts",
                 getColorCompat(R.color.accent_blue), 250f, 0).waterDrag(0.012f).attack(4.5f);
         rateGauge = new GaugeView(this, "RATE", "str/min",
-                getColorCompat(R.color.warn), 45f, 0).waterDrag(0.06f).attack(4.5f);
+                getColorCompat(R.color.warn), 45f, 0).coasting(1.8f, 1.2f);
         gauges.addView(gaugeCell(speedGauge, 1.25f));
         gauges.addView(gaugeCell(powerGauge, 1f));
         gauges.addView(gaugeCell(rateGauge, 1f));

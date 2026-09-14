@@ -9,7 +9,18 @@ import android.graphics.Path;
 import android.graphics.Shader;
 import android.view.View;
 
-/** Rolling two-series trace of power and stroke rate. */
+/**
+ * Rolling trace of boat speed (filled) over power.
+ *
+ * <p>Scrolls continuously rather than in steps. Samples arrive about five times a second, and the
+ * first version redrew only when one did, so the whole trace jumped a column left every 200 ms.
+ * Now the newest sample slides in: between samples everything is offset by the fraction of a
+ * sample period that has elapsed, and the view redraws every frame while it is on screen.
+ *
+ * <p>No allocation in {@link #onDraw}. The first version built a new {@link Path} and a new
+ * {@link LinearGradient} on every draw, which on this tablet means garbage-collection pauses -
+ * hitches in exactly the motion that is meant to look smooth.
+ */
 final class SparklineView extends View {
 
     /** 60 seconds at 5Hz. Long history matters less than resolving individual strokes. */
@@ -20,15 +31,30 @@ final class SparklineView extends View {
     private int count;
     private int head;
 
+    /** When the newest sample landed, and the measured gap between samples. */
+    private long lastSampleAtMs;
+    private float samplePeriodMs = 200f;
+    private long lastFrameMs;
+
+    /**
+     * Scales ease toward their targets. A peak scrolling out of the window used to rescale the
+     * whole plot in one frame, which reads as a jolt even when the scrolling is smooth.
+     */
+    private float shownMaxSpeed = 2f;
+    private float shownMaxPower = 60f;
+
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint powerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ratePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint speedPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Path path = new Path();
+    private final Path speedPath = new Path();
+    private final Path powerPath = new Path();
+    private final Path fillPath = new Path();
+    private float shaderHeight = -1f;
 
-    private int powerColor = Color.parseColor("#35D0BA");
-    private int rateColor = Color.parseColor("#6F8CFF");
+    private final int speedColor = Color.parseColor("#35D0BA");
+    private final int powerColor = Color.parseColor("#6F8CFF");
 
     SparklineView(Context context) {
         super(context);
@@ -40,13 +66,13 @@ final class SparklineView extends View {
         powerPaint.setStrokeWidth(dp(1.6f));
         powerPaint.setStrokeJoin(Paint.Join.ROUND);
         powerPaint.setStrokeCap(Paint.Cap.ROUND);
-        powerPaint.setColor(rateColor);
+        powerPaint.setColor(powerColor);
 
-        ratePaint.setStyle(Paint.Style.STROKE);
-        ratePaint.setStrokeWidth(dp(2.4f));
-        ratePaint.setStrokeJoin(Paint.Join.ROUND);
-        ratePaint.setColor(powerColor);
-        ratePaint.setStrokeCap(Paint.Cap.ROUND);
+        speedPaint.setStyle(Paint.Style.STROKE);
+        speedPaint.setStrokeWidth(dp(2.4f));
+        speedPaint.setStrokeJoin(Paint.Join.ROUND);
+        speedPaint.setStrokeCap(Paint.Cap.ROUND);
+        speedPaint.setColor(speedColor);
 
         fillPaint.setStyle(Paint.Style.FILL);
 
@@ -61,6 +87,14 @@ final class SparklineView extends View {
      *                 because the monitor only refreshes about once a second.
      */
     void addSample(double speedMps, int watts) {
+        long now = System.currentTimeMillis();
+        if (lastSampleAtMs > 0) {
+            // Measured, not assumed: the UI ticker drifts, and a wrong period makes the scroll
+            // lurch at each sample instead of meeting it.
+            float gap = Math.max(50f, Math.min(1000f, now - lastSampleAtMs));
+            samplePeriodMs = samplePeriodMs * 0.8f + gap * 0.2f;
+        }
+        lastSampleAtMs = now;
         speed[head] = (float) speedMps;
         power[head] = watts;
         head = (head + 1) % CAPACITY;
@@ -73,6 +107,9 @@ final class SparklineView extends View {
     void clear() {
         count = 0;
         head = 0;
+        lastSampleAtMs = 0;
+        shownMaxSpeed = 2f;
+        shownMaxPower = 60f;
         postInvalidateOnAnimation();
     }
 
@@ -90,6 +127,14 @@ final class SparklineView extends View {
         return max;
     }
 
+    /** Rise at once so nothing clips; fall gently so a peak leaving the window does not jolt. */
+    private static float easeScale(float shown, float target, float dt) {
+        if (target >= shown) {
+            return target;
+        }
+        return shown + (target - shown) * Math.min(1f, 1.2f * dt);
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -97,6 +142,13 @@ final class SparklineView extends View {
         float h = getHeight();
         float padBottom = dp(14f);
         float plotH = h - padBottom;
+        if (w <= 0 || plotH <= 0) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        float dt = lastFrameMs > 0 ? Math.min(0.1f, (now - lastFrameMs) / 1000f) : 0f;
+        lastFrameMs = now;
 
         for (int i = 0; i <= 3; i++) {
             float y = plotH * i / 3f;
@@ -108,50 +160,68 @@ final class SparklineView extends View {
             return;
         }
 
-        float maxSpeed = maxOf(speed, 2f);
-        float maxPower = maxOf(power, 60f);
+        shownMaxSpeed = easeScale(shownMaxSpeed, maxOf(speed, 2f), dt);
+        shownMaxPower = easeScale(shownMaxPower, maxOf(power, 60f), dt);
+
         float stepX = w / (CAPACITY - 1f);
-        float firstX = w - (count - 1) * stepX;
+        // How far through the gap to the next sample we are. Sliding by that fraction makes the
+        // trace move continuously; at 1 it rests where the next sample will pick it up.
+        float frac = lastSampleAtMs > 0
+                ? Math.max(0f, Math.min(1f, (now - lastSampleAtMs) / samplePeriodMs))
+                : 0f;
+        float firstX = w - (count - 1) * stepX - frac * stepX;
+        float lastX = firstX + (count - 1) * stepX;
+
+        canvas.save();
+        canvas.clipRect(0, 0, w, plotH);
 
         // Speed leads: it is the boat's run, and the reason to take the next stroke.
-        path.reset();
+        speedPath.rewind();
         for (int i = 0; i < count; i++) {
             float x = firstX + i * stepX;
-            float y = plotH * (1f - valueAt(speed, i) / maxSpeed);
+            float y = plotH * (1f - valueAt(speed, i) / shownMaxSpeed);
             if (i == 0) {
-                path.moveTo(x, y);
+                speedPath.moveTo(x, y);
             } else {
-                path.lineTo(x, y);
+                speedPath.lineTo(x, y);
             }
         }
-        Path fill = new Path(path);
-        fill.lineTo(firstX + (count - 1) * stepX, plotH);
-        fill.lineTo(firstX, plotH);
-        fill.close();
-        fillPaint.setShader(new LinearGradient(0, 0, 0, plotH,
-                (powerColor & 0x00FFFFFF) | 0x59000000,
-                powerColor & 0x00FFFFFF,
-                Shader.TileMode.CLAMP));
-        canvas.drawPath(fill, fillPaint);
-        canvas.drawPath(path, ratePaint);
+        fillPath.set(speedPath);
+        fillPath.lineTo(lastX, plotH);
+        fillPath.lineTo(firstX, plotH);
+        fillPath.close();
+        if (shaderHeight != plotH) {
+            fillPaint.setShader(new LinearGradient(0, 0, 0, plotH,
+                    (speedColor & 0x00FFFFFF) | 0x59000000,
+                    speedColor & 0x00FFFFFF,
+                    Shader.TileMode.CLAMP));
+            shaderHeight = plotH;
+        }
+        canvas.drawPath(fillPath, fillPaint);
+        canvas.drawPath(speedPath, speedPaint);
 
-        path.reset();
+        powerPath.rewind();
         for (int i = 0; i < count; i++) {
             float x = firstX + i * stepX;
-            float y = plotH * (1f - valueAt(power, i) / maxPower);
+            float y = plotH * (1f - valueAt(power, i) / shownMaxPower);
             if (i == 0) {
-                path.moveTo(x, y);
+                powerPath.moveTo(x, y);
             } else {
-                path.lineTo(x, y);
+                powerPath.lineTo(x, y);
             }
         }
-        canvas.drawPath(path, powerPaint);
+        canvas.drawPath(powerPath, powerPaint);
+        canvas.restore();
 
-        canvas.drawText(String.format(java.util.Locale.US, "%.1f m/s peak", maxSpeed),
+        canvas.drawText(String.format(java.util.Locale.US, "%.1f m/s peak", shownMaxSpeed),
                 dp(4f), h - dp(3f), labelPaint);
-        String powerLabel = (int) maxPower + "W peak";
+        String powerLabel = Math.round(shownMaxPower) + "W peak";
         canvas.drawText(powerLabel, w - labelPaint.measureText(powerLabel) - dp(4f),
                 h - dp(3f), labelPaint);
+
+        // Keep scrolling between samples. Only drawn while on screen, so this costs nothing when
+        // the gauges are not showing.
+        postInvalidateOnAnimation();
     }
 
     private float dp(float value) {

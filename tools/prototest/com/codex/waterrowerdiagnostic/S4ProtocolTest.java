@@ -21,6 +21,7 @@ public class S4ProtocolTest {
         clampsNonsensePace();
         reportsStrokeRateUnmultiplied();
         trimsAnIsolatedRateDip();
+        rateHoldsBetweenStrokesAndFallsWhenLate();
         countsStrokesFromPulsesAlone();
         pulseEffortDecaysWhenPulsesStop();
 
@@ -182,6 +183,34 @@ public class S4ProtocolTest {
         Thread.sleep(1300);
         double quiet = getDouble(snapshot(p), "pulseEffort");
         check("effort is zero once the pulses stop", quiet, 0.0);
+    }
+
+    /**
+     * The displayed rate is timed from strokes, holds until the next is due, and falls when late.
+     *
+     * <p>Strokes 1.25 s apart (48 spm, fast enough to keep the test short but inside the plausible
+     * band). Real sleeps, because the model runs on wall-clock time.
+     */
+    private static void rateHoldsBetweenStrokesAndFallsWhenLate() throws Exception {
+        Object p = newProtocol();
+        feed(p, "IDD1400001\r\n");             // baseline count; no interval from a first read
+        for (int n = 2; n <= 6; n++) {
+            Thread.sleep(1250);
+            feed(p, String.format("IDD140%04X\r\n", n));
+        }
+        int steady = getInt(snapshot(p), "strokeRateAverage");
+        check("rate timed from strokes is ~48 spm (got " + steady + ")", steady >= 46 && steady <= 50, true);
+
+        Thread.sleep(600);                       // next stroke not yet due
+        check("holds steady before the next stroke is due", getInt(snapshot(p), "strokeRateAverage"), steady);
+
+        Thread.sleep(1900);                      // 2.5 s since the last: clearly late
+        int late = getInt(snapshot(p), "strokeRateAverage");
+        check("falls once a stroke is late (" + steady + " -> " + late + ")", late < steady, true);
+
+        feed(p, "IDD1400000\r\n");             // counter reset on a reopen
+        check("a counter reset clears the timing, not invents a rate",
+                getInt(snapshot(p), "strokeRateAverage"), 0);
     }
 
     /* ---------- harness ---------- */
