@@ -218,7 +218,8 @@ public class MainActivity extends Activity
     private UsbDeviceConnection openConnection;
     /** Write-path probe: rate-limited, because it holds the I/O lock while it runs. */
     private static final long PROBE_EVERY_MS = 10000;
-    private static final int MAX_PROBES_PER_SESSION = 12;
+    // 18 reports gave one identical verdict; three a session is enough to see if it changes.
+    private static final int MAX_PROBES_PER_SESSION = 3;
     private static final int PROBE_TIMEOUT_MS = 250;
     private long lastProbeMs;
     private int probesThisSession;
@@ -2767,7 +2768,6 @@ public class MainActivity extends Activity
         int direct;
         int clear = Integer.MIN_VALUE;
         int afterClear = Integer.MIN_VALUE;
-        boolean claimed = false;
         synchronized (ioLock) {
             direct = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
             if (direct < 0) {
@@ -2777,9 +2777,12 @@ public class MainActivity extends Activity
                         null, 0, PROBE_TIMEOUT_MS);
                 afterClear = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
             }
-            if (report && dataInterface != null) {
-                claimed = connection.claimInterface(dataInterface, true);
-            }
+            // No claimInterface(force=true) here any more. It answered "claimed" all 18 times it
+            // ran, so it had nothing left to tell us, and a forced claim can disrupt transfers
+            // already in flight on the interface. Every one of the five mid-row pulse dropouts
+            // seen on 3.9.1 contained a probe - suggestive rather than proven, since no rowing
+            // happened after the probes ran out - so the invasive part goes, and a controlled
+            // 15-stroke row on 3.9.2 settles whether it was the cause.
         }
         boolean recovered = direct >= 0 || afterClear >= 0;
         if (direct < 0 && afterClear >= 0) {
@@ -2798,7 +2801,7 @@ public class MainActivity extends Activity
                 payload.put("rawBulkTransferRc", direct);
                 payload.put("clearHaltRc", clear == Integer.MIN_VALUE ? JSONObject.NULL : clear);
                 payload.put("afterClearHaltRc", afterClear == Integer.MIN_VALUE ? JSONObject.NULL : afterClear);
-                payload.put("interfaceClaimed", claimed);
+                payload.put("interfaceClaimed", "not probed since 3.9.2");
                 payload.put("recovered", recovered);
                 payload.put("verdict", direct >= 0
                         ? "driver-state: raw transfer works, driver write does not"

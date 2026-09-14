@@ -346,6 +346,36 @@ longer than any blackout measured, with no cooldown, and the port is reopened on
 connection's file descriptor is actually invalid. If the gauges still die, the blackout has grown
 past a second - check `s4-write-probe` timings before changing anything else.
 
+### The 15-stroke control (3.9.1) - the rower is not the problem
+
+The user rowed exactly 15 strokes and paused. Scored with `control.py` (scratchpad), which counts
+two things separately: what the monitor counted, and what the app saw live.
+
+```
+18:05:07     0 -> 61   startup read
+18:05:32    61 -> 72   +11 in ONE update, after 25.5 s with no counter update
+18:05:44    72 -> 75   +3
+18:06:17    75 -> 76   +1
+```
+
+**61 -> 76 is exactly 15: the S4 counted every stroke.** The app received the stroke counter three
+times across the whole control, one update carrying 11 strokes after 25 seconds of silence - the
+"captures a couple, then stops for a bit" the user described, measured.
+
+**Memory reads are almost entirely starved.** Counting a reply only when a genuinely new one lands,
+3.9.1 got about 20 successful reads across all seven addresses in 279s; the stroke counter got 2.
+A first version of that count reported stroke rate answered 125 times - it was one stale
+`IDS1A900` held across 166 samples. **Count replies on change, never per sample.**
+
+**The pulse detector caught 5 of the 15.** Effort tracks rowing clearly (0.8-0.99 while pulling,
+0 between), but the pulse stream itself dropped out for 7.0-7.5s at a time, about every 11s.
+
+**All five of those dropouts contained a probe** - and the probe force-claimed the interface, which
+can disrupt in-flight transfers. That is suggestive, not proven: it was checked by looking for
+dropouts after the 12-probe cap ran out, and found none, but **no rowing happened after the cap
+either**, so the test could not tell. 3.9.2 removes the force-claim (it answered true all 18 times
+anyway) and caps the probe at 3. A second 15-stroke control on 3.9.2 is the clean A/B.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
