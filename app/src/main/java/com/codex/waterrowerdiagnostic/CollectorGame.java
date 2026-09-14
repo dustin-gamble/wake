@@ -16,8 +16,10 @@ final class CollectorGame extends GameView {
     // Measured speed while rowing: p10 3.0, median 3.85, p90 4.06 m/s. The old bands topped
     // out at 3.4, so the boat sat in the fast lane permanently and changing lane meant nearly
     // stopping - which is what read as lag. These three straddle the real working range.
-    private static final float[] BAND_LO = {2.5f, 3.4f, 4.0f};
-    private static final float[] BAND_HI = {3.4f, 4.0f, 9.0f};
+    // 3.15.0: set from the rower's profile in onStart - the same three bands for a rower at
+    // 3.0 / 3.85 / 4.06 m/s (low / typical / high), and the right ones for anyone else.
+    private final float[] bandLo = {2.5f, 3.4f, 4.0f};
+    private final float[] bandHi = {3.4f, 4.0f, 9.0f};
     /** Lane boundaries are sticky, so a speed sitting on a band edge cannot flicker. */
     private static final float BAND_STICK = 0.08f;
     private static final int[] POINTS = {1, 2, 4};
@@ -34,6 +36,9 @@ final class CollectorGame extends GameView {
     private int missed;
     private double gameSeconds;
     private boolean started;
+    /** Speed the lane follows: averaged over ~1.2 s, so a single stroke does not change lanes. */
+    private float laneSpeed;
+    private int lane = -1;
     private static final double GAME_LENGTH = 180;
 
     CollectorGame(Context context, PersonalBests bests) {
@@ -48,6 +53,17 @@ final class CollectorGame extends GameView {
         missed = 0;
         gameSeconds = 0;
         started = false;
+        float low = (float) profile.lowSpeed();
+        float typical = (float) profile.typicalSpeed();
+        float high = (float) profile.highSpeed();
+        bandLo[0] = low - 0.5f;
+        bandHi[0] = (low + typical) / 2f;
+        bandLo[1] = bandHi[0];
+        bandHi[1] = (typical + high) / 2f + 0.05f;
+        bandLo[2] = bandHi[1];
+        bandHi[2] = 9f;
+        laneSpeed = 0f;
+        lane = -1;
         for (int i = 0; i < LANES; i++) {
             respawn(i, 1.2f + i * 0.35f);
         }
@@ -99,12 +115,19 @@ final class CollectorGame extends GameView {
 
         float boatX = w * 0.22f;
         float laneH = (waterBottom - waterTop) / LANES;
-        int inLane = -1;
-        for (int i = 0; i < LANES; i++) {
-            if (speed >= BAND_LO[i] && speed < BAND_HI[i]) {
-                inLane = i;
+        // Lanes follow an averaged speed with sticky edges ("smoothly move between zones, leveraging
+        // some averaging"): the boat glides as the average moves, and only changes lane once the
+        // average is clearly past a band edge.
+        laneSpeed += (speed - laneSpeed) * Math.min(1f, dt / 1.2f);
+        if (lane < 0 || laneSpeed < bandLo[lane] - BAND_STICK || laneSpeed >= bandHi[lane] + BAND_STICK) {
+            lane = -1;
+            for (int i = 0; i < LANES; i++) {
+                if (laneSpeed >= bandLo[i] && laneSpeed < bandHi[i]) {
+                    lane = i;
+                }
             }
         }
+        int inLane = lane;
 
         for (int i = 0; i < LANES; i++) {
             float ly = waterTop + laneH * (i + 0.5f);
@@ -112,7 +135,7 @@ final class CollectorGame extends GameView {
             paint.setColor(i == inLane ? 0x2235D0BA : 0x00000000);
             c.drawRect(0, waterTop + laneH * i, w, waterTop + laneH * (i + 1), paint);
             label(c, NAMES[i] + "  " + String.format(java.util.Locale.US, "%.1f-%s m/s",
-                    BAND_LO[i], i == LANES - 1 ? "" : String.format(java.util.Locale.US, "%.1f", BAND_HI[i])),
+                    bandLo[i], i == LANES - 1 ? "" : String.format(java.util.Locale.US, "%.1f", bandHi[i])),
                     w - dp(12f), waterTop + laneH * i + dp(14f), 8.5f, i == inLane ? ACCENT : FAINT,
                     Paint.Align.RIGHT);
 
@@ -142,9 +165,18 @@ final class CollectorGame extends GameView {
             }
         }
 
-        // Your boat sits in the lane your speed puts you in; eased between lanes.
-        float targetLaneY = waterTop + laneH * ((inLane < 0 ? 0 : inLane) + 0.5f);
-        boatY += (targetLaneY - boatY) * Math.min(1f, 5f * dt);
+        // The boat's height is continuous in the averaged speed - part-way through a band it sits
+        // part-way across the lane - so it drifts rather than jumping lane to lane.
+        float laneCoord = 0.5f;
+        for (int i = 0; i < LANES; i++) {
+            float hi = i == LANES - 1 ? bandLo[i] + 0.6f : bandHi[i];
+            if (laneSpeed >= bandLo[i]) {
+                laneCoord = i + Math.min(1f, (laneSpeed - bandLo[i]) / (hi - bandLo[i]));
+            }
+        }
+        laneCoord = Math.max(0.5f, Math.min(LANES - 0.5f, laneCoord));
+        float targetLaneY = waterTop + laneH * laneCoord;
+        boatY += (targetLaneY - boatY) * Math.min(1f, 3f * dt);
         if (boatY == 0f) {
             boatY = targetLaneY;
         }

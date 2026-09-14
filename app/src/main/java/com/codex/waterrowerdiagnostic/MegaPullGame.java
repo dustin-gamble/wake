@@ -29,6 +29,9 @@ final class MegaPullGame extends GameView {
     private int bell;            // watts to ring it
     private boolean rang;
     private double resultAt;
+    /** The record when this go started; beating it mid-pull fires the NEW BEST burst once. */
+    private float recordAtStart;
+    private double newBestUntil;
 
     MegaPullGame(Context context, PersonalBests bests) {
         super(context);
@@ -44,7 +47,10 @@ final class MegaPullGame extends GameView {
         puckTarget = 0f;
         rang = false;
         float best = bests.get("megapull.peak", 0f);
-        bell = best > 0 ? Math.round(best * 1.03f) : 180;
+        recordAtStart = best;
+        newBestUntil = 0;
+        // No record yet: set the bell a fifth above the rower's high power, not a fixed 180 W.
+        bell = best > 0 ? Math.round(best * 1.03f) : (int) Math.round(profile.highWatts() * 1.2);
     }
 
     /**
@@ -65,7 +71,13 @@ final class MegaPullGame extends GameView {
             peak = s.watts;
             puckTarget = Math.min(1f, peak / (bell * 1.15f));
             fx.burst(getWidth() * 0.5f, getHeight() * 0.85f, 16, dp(150f), 0.5f, dp(3f), 0xFFF5C518, true);
-            shake.kick(dp(4f) + s.watts / 300f * dp(6f));
+            // Shake scaled to the rower's own power: a typical pull is a solid thump for anyone.
+            shake.kick(dp(4f) + (float) (s.watts / Math.max(1.0, profile.typicalWatts())) * dp(5f));
+            if (recordAtStart > 0 && peak > recordAtStart && newBestUntil == 0) {
+                newBestUntil = sessionSeconds + 2.5;
+                fx.burst(getWidth() * 0.5f, getHeight() * 0.5f, 80, dp(320f), 1.4f, dp(4.5f), 0xFF35D0BA, true);
+                shake.kick(dp(18f));
+            }
         }
         if (peak >= bell && !rang) {
             rang = true;
@@ -140,6 +152,16 @@ final class MegaPullGame extends GameView {
         paint.setColor(rang ? 0xFFF5C518 : 0xFFF0B132);
         c.drawRect(cx - dp(40f), bellY - dp(2f), cx + dp(40f), bellY + dp(2f), paint);
         label(c, "BELL  " + bell + " W", cx - dp(44f), bellY + dp(4f), 9f, TEXT, Paint.Align.RIGHT);
+        // Record line: the best ever pull, so every go is measured against it.
+        if (recordAtStart > 0) {
+            float recY = base - (base - top) * Math.min(1f, recordAtStart / (bell * 1.15f));
+            paint.setColor(0xFF35D0BA);
+            for (float dx = cx - dp(70f); dx < cx + dp(70f); dx += dp(12f)) {
+                c.drawRect(dx, recY - dp(1.5f), dx + dp(7f), recY + dp(1.5f), paint);
+            }
+            label(c, "RECORD  " + Math.round(recordAtStart) + " W", cx + dp(74f), recY + dp(4f), 9f,
+                    0xFF35D0BA, Paint.Align.LEFT);
+        }
         // Bell itself.
         Fx.glow(c, cx, top - dp(6f), dp(40f), rang ? 0x99F5C518 : 0x33F5C518);
         paint.setColor(rang ? 0xFFFFE28A : 0xFFB8890B);
@@ -173,6 +195,9 @@ final class MegaPullGame extends GameView {
         bold(c, cap, w * 0.22f, h * 0.30f + dp(22f), 10.5f, FAINT, Paint.Align.CENTER);
         label(c, bests.has("megapull.peak") ? "record " + Math.round(bests.get("megapull.peak", 0)) + " W" : "",
                 w * 0.22f, h * 0.30f + dp(40f), 9f, FAINT, Paint.Align.CENTER);
+        if (sessionSeconds < newBestUntil && ((int) (sessionSeconds * 6) % 2 == 0)) {
+            bold(c, "NEW BEST!", w * 0.5f, h * 0.52f, 40f, 0xFF35D0BA, Paint.Align.CENTER);
+        }
         bold(c, (status == null ? 0 : status.watts) + " W", w * 0.78f, h * 0.30f, 26f, ACCENT, Paint.Align.CENTER);
         label(c, "NOW", w * 0.78f, h * 0.30f + dp(16f), 9f, FAINT, Paint.Align.CENTER);
     }

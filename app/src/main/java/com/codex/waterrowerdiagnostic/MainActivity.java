@@ -198,6 +198,7 @@ public class MainActivity extends Activity
     private TextView connectionBanner;
     private TextView strokesValue;
     private TextView kcalValue;
+    private StrokeShapeView strokeShapeView;
     private TextView workValue;
     private Button diagnosticsToggle;
     private LinearLayout diagnosticsPanel;
@@ -1691,6 +1692,20 @@ public class MainActivity extends Activity
         paddleParams.rightMargin = dp(3);
         traceRow.addView(paddleWrap, paddleParams);
 
+        // Stroke shape between the wheel and the trace: the last four drives from the pulse meter.
+        strokeShapeView = new StrokeShapeView(this);
+        LinearLayout shapeWrap = new LinearLayout(this);
+        shapeWrap.setOrientation(LinearLayout.VERTICAL);
+        shapeWrap.setPadding(dp(10), dp(8), dp(10), dp(8));
+        shapeWrap.setBackgroundColor(getColorCompat(R.color.surface));
+        shapeWrap.addView(cardLabel("STROKE SHAPE"));
+        shapeWrap.addView(strokeShapeView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout.LayoutParams shapeParams =
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.3f);
+        shapeParams.rightMargin = dp(3);
+        traceRow.addView(shapeWrap, shapeParams);
+
         sparkline = new SparklineView(this);
         LinearLayout sparkWrap = new LinearLayout(this);
         sparkWrap.setOrientation(LinearLayout.VERTICAL);
@@ -1700,7 +1715,7 @@ public class MainActivity extends Activity
         sparkWrap.addView(sparkline, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         traceRow.addView(sparkWrap,
-                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 2.4f));
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 2.0f));
 
         LinearLayout.LayoutParams traceParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.7f);
@@ -3145,6 +3160,7 @@ public class MainActivity extends Activity
             rateBar.setValue(status.strokeRateAverage, status.strokeRateAverage + " spm");
 
             paddleView.setSpeed(onPulses ? shownSpeed : status.waterSpeedMps, driving);
+            strokeShapeView.update(status.meter);
 
             connectionBanner.setText(connectionSummary(status));
             connectionBanner.setTextColor(getColorCompat(status.monitorConnected

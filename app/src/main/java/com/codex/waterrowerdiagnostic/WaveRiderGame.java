@@ -86,13 +86,17 @@ final class WaveRiderGame extends GameView {
         return super.onTouchEvent(e);
     }
 
-    /** The wave's own pace: a base that drifts, plus sets that push it along. */
+    /**
+     * The wave's own pace: a base that drifts, plus sets that push it along. Scaled to the rower's
+     * typical speed (the old fixed 2.5 m/s base was 65% of the original rower's 3.85).
+     */
     private float waveSpeed() {
         double t = sessionSeconds;
-        float base = 2.5f;
-        float drift = (float) Math.sin(t / 11.0) * 0.45f;
-        float set = (float) Math.sin(t / 37.0) * 0.55f;
-        return base + drift + set + (inBarrel() ? 0.35f : 0f);
+        float typical = (float) profile.typicalSpeed();
+        float base = typical * 0.65f;
+        float drift = (float) Math.sin(t / 11.0) * typical * 0.12f;
+        float set = (float) Math.sin(t / 37.0) * typical * 0.14f;
+        return base + drift + set + (inBarrel() ? typical * 0.09f : 0f);
     }
 
     private boolean inBarrel() {
@@ -251,6 +255,35 @@ final class WaveRiderGame extends GameView {
         label(c, "LIP", bx, by + dp(28f), 8.5f, BAD, Paint.Align.LEFT);
         label(c, "POCKET", w * 0.5f, by + dp(28f), 8.5f, ACCENT, Paint.Align.CENTER);
         label(c, "SHOULDER", bx + bandW, by + dp(28f), 8.5f, WARN, Paint.Align.RIGHT);
+
+        // Sweet-spot bar up the right edge: where you are on the face, the pocket in green, and an
+        // arrow for which way you are drifting - up when you are faster than the wave, down when
+        // slower. Readable at a glance, mid-stroke, without looking for the surfer.
+        float sx = w - dp(30f);
+        float sTop = h * 0.16f;
+        float sBottom = h * 0.70f;
+        float sMid = (sTop + sBottom) / 2f;
+        float half = (sBottom - sTop) / 2f;
+        paint.setColor(0x66000000);
+        c.drawRoundRect(sx - dp(10f), sTop, sx + dp(10f), sBottom, dp(10f), dp(10f), paint);
+        paint.setColor(0x6635D0BA);
+        c.drawRect(sx - dp(10f), sMid - half * 0.35f, sx + dp(10f), sMid + half * 0.35f, paint);
+        float marker = sMid - half * Math.max(-1f, Math.min(1f, position));
+        paint.setColor(inPocket() ? ACCENT : position < 0 ? BAD : WARN);
+        c.drawRoundRect(sx - dp(16f), marker - dp(5f), sx + dp(16f), marker + dp(5f), dp(4f), dp(4f), paint);
+        if (phase == Phase.RIDING && Math.abs(speed - wave) > 0.08f) {
+            boolean up = speed > wave;
+            float ay = marker + (up ? -dp(14f) : dp(14f));
+            path.reset();
+            path.moveTo(sx - dp(8f), ay + (up ? dp(6f) : -dp(6f)));
+            path.lineTo(sx + dp(8f), ay + (up ? dp(6f) : -dp(6f)));
+            path.lineTo(sx, ay - (up ? dp(6f) : -dp(6f)));
+            path.close();
+            c.drawPath(path, paint);
+        }
+        label(c, "SHOULDER", sx, sTop - dp(8f), 8f, WARN, Paint.Align.CENTER);
+        label(c, "LIP", sx, sBottom + dp(16f), 8f, BAD, Paint.Align.CENTER);
+        label(c, "POCKET", sx - dp(18f), sMid + dp(3f), 8f, ACCENT, Paint.Align.RIGHT);
 
         String big;
         String cap;

@@ -9,6 +9,11 @@ import android.view.MotionEvent;
  * Head Race: you against three boats with different race plans, all calibrated to your own best
  * time over the distance. The Flyer goes out hard and fades, the Metronome holds even splits,
  * the Closer negative-splits. Teaches race craft: where you lose the race is as telling as whether.
+ *
+ * <p>3.15.0 fills the empty space with instruments that move ("head race is good, but I need more
+ * gauges to help show my efforts"): a gap graph to each crew over the last two minutes, one power
+ * bar per stroke against your own average, a distance-to-go ribbon with every crew on it, and the
+ * shape of your last drive from the pulse meter.
  */
 final class HeadRaceGame extends GameView {
 
@@ -54,6 +59,22 @@ final class HeadRaceGame extends GameView {
     };
     private final float[] rivalX = new float[3];
 
+    /** Gap to each rival, one sample a second, the last two minutes. */
+    private static final int GAP_SAMPLES = 120;
+    private final float[][] gaps = new float[3][GAP_SAMPLES];
+    private int gapCount;
+    private int gapHead;
+    private int lastGapSecond = -1;
+
+    /** Measured average power of each recent stroke. */
+    private static final int STROKE_BARS = 28;
+    private final float[] strokePower = new float[STROKE_BARS];
+    private int strokeCount;
+    private int strokeHead;
+    private PulseMeter.Stroke lastSeenStroke;
+    private final Paint panel = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.Path trace = new android.graphics.Path();
+
     private int raceMeters = 2000;
     private Phase phase = Phase.READY;
     private double raceStartSeconds;
@@ -80,6 +101,11 @@ final class HeadRaceGame extends GameView {
     protected void onStart() {
         phase = Phase.READY;
         placing = 0;
+        gapCount = 0;
+        gapHead = 0;
+        lastGapSecond = -1;
+        strokeCount = 0;
+        strokeHead = 0;
         // The field is set from your best; without one, a 2:15 pace boat's time.
         float reference = bests.has("time." + raceMeters)
                 ? bests.get("time." + raceMeters, 0f)
@@ -96,6 +122,16 @@ final class HeadRaceGame extends GameView {
             raceStartSeconds = sessionSeconds;
             raceStartMeters = sessionMeters;
         }
+        // A stroke's power is read when the pulse meter closes it - never from onStroke, which
+        // lands a second late when instantaneous power has already collapsed.
+        PulseMeter.Stroke stroke = s.meter.lastStroke;
+        if (phase == Phase.RACING && stroke != null && stroke != lastSeenStroke) {
+            float power = !Double.isNaN(stroke.averagePowerW) ? (float) stroke.averagePowerW : s.watts;
+            strokePower[strokeHead] = power;
+            strokeHead = (strokeHead + 1) % STROKE_BARS;
+            strokeCount = Math.min(STROKE_BARS, strokeCount + 1);
+        }
+        lastSeenStroke = stroke;
     }
 
     @Override
@@ -137,7 +173,18 @@ final class HeadRaceGame extends GameView {
         }
 
         float waterTop = h * 0.26f;
-        float waterBottom = h * 0.80f;
+        float waterBottom = h * 0.74f;
+        if (phase == Phase.RACING) {
+            int second = (int) t;
+            if (second != lastGapSecond) {
+                lastGapSecond = second;
+                for (int i = 0; i < 3; i++) {
+                    gaps[i][gapHead] = (float) (you - rivals[i].distanceAt(t, raceMeters));
+                }
+                gapHead = (gapHead + 1) % GAP_SAMPLES;
+                gapCount = Math.min(GAP_SAMPLES, gapCount + 1);
+            }
+        }
         float ppm = w / 80f;
         float speed = boat.value();
         river.advance(phase == Phase.RACING ? speed : 0f, dt, ppm);
@@ -194,14 +241,138 @@ final class HeadRaceGame extends GameView {
         label(c, status == null ? "" : status.watts + " W", w - dp(16f), h * 0.15f + dp(16f), 9f,
                 FAINT, Paint.Align.RIGHT);
 
-        float pct = Math.min(1f, (float) (you / raceMeters));
-        accentPaint.setColor(ACCENT);
-        accentPaint.setStrokeWidth(dp(3f));
-        c.drawLine(0, waterTop, w * pct, waterTop, accentPaint);
+        drawRibbon(c, w, waterTop - dp(14f), t, you);
+        drawStrokeShape(c, w * 0.62f, dp(6f), w * 0.80f, h * 0.15f - dp(28f));
+        float panelTop = waterBottom + dp(10f);
+        float panelBottom = h - dp(8f);
+        drawGapGraph(c, dp(10f), panelTop, w * 0.5f - dp(6f), panelBottom);
+        drawStrokeBars(c, w * 0.5f + dp(6f), panelTop, w - dp(10f), panelBottom);
+    }
 
-        float fy = h - dp(12f);
-        label(c, "FLYER fades  ·  METRONOME even  ·  CLOSER comes home fast", w / 2f, fy, 9f,
-                FAINT, Paint.Align.CENTER);
+    /** Every crew's progress on one strip above the water, with metres to go. */
+    private void drawRibbon(Canvas c, float w, float y, double t, double you) {
+        float left = dp(16f);
+        float right = w - dp(16f);
+        panel.setStyle(Paint.Style.FILL);
+        panel.setColor(0x33FFFFFF);
+        c.drawRoundRect(left, y - dp(3f), right, y + dp(3f), dp(3f), dp(3f), panel);
+        for (int i = 0; i < 3; i++) {
+            float f = (float) Math.min(1.0, rivals[i].distanceAt(t, raceMeters) / raceMeters);
+            panel.setColor(rivals[i].color);
+            c.drawCircle(left + (right - left) * f, y, dp(5f), panel);
+        }
+        float mine = (float) Math.min(1.0, you / raceMeters);
+        panel.setColor(ACCENT);
+        c.drawRoundRect(left, y - dp(3f), left + (right - left) * mine, y + dp(3f), dp(3f), dp(3f), panel);
+        c.drawCircle(left + (right - left) * mine, y, dp(7f), panel);
+        label(c, Math.max(0, Math.round(raceMeters - you)) + " m to go", right, y - dp(8f), 9f, TEXT, Paint.Align.RIGHT);
+    }
+
+    /** Your gap to each crew over the last two minutes: above the line you lead. */
+    private void drawGapGraph(Canvas c, float l, float t, float r, float b) {
+        panel.setStyle(Paint.Style.FILL);
+        panel.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(10f), dp(10f), panel);
+        label(c, "GAP TO EACH CREW  ·  LAST 2 MIN", l + dp(10f), t + dp(16f), 8.5f, FAINT, Paint.Align.LEFT);
+        float top = t + dp(24f);
+        float bottom = b - dp(8f);
+        float mid = (top + bottom) / 2f;
+        float max = 10f;
+        for (int i = 0; i < 3; i++) {
+            for (int k = 0; k < gapCount; k++) {
+                max = Math.max(max, Math.abs(gaps[i][k]));
+            }
+        }
+        panel.setColor(0x33FFFFFF);
+        c.drawRect(l + dp(8f), mid - dp(0.5f), r - dp(8f), mid + dp(0.5f), panel);
+        label(c, "+" + Math.round(max) + " m", r - dp(10f), top + dp(8f), 8f, FAINT, Paint.Align.RIGHT);
+        label(c, "-" + Math.round(max) + " m", r - dp(10f), bottom - dp(2f), 8f, FAINT, Paint.Align.RIGHT);
+        if (gapCount < 2) {
+            return;
+        }
+        panel.setStyle(Paint.Style.STROKE);
+        panel.setStrokeWidth(dp(2.2f));
+        float step = (r - l - dp(16f)) / (GAP_SAMPLES - 1f);
+        for (int i = 0; i < 3; i++) {
+            trace.rewind();
+            for (int k = 0; k < gapCount; k++) {
+                int idx = (gapHead - gapCount + k + GAP_SAMPLES) % GAP_SAMPLES;
+                float x = r - dp(8f) - (gapCount - 1 - k) * step;
+                float y = mid - (bottom - top) / 2f * gaps[i][idx] / max;
+                if (k == 0) {
+                    trace.moveTo(x, y);
+                } else {
+                    trace.lineTo(x, y);
+                }
+            }
+            panel.setColor(rivals[i].color);
+            c.drawPath(trace, panel);
+        }
+        panel.setStyle(Paint.Style.FILL);
+    }
+
+    /** One bar per stroke, measured power, coloured against your own recent average. */
+    private void drawStrokeBars(Canvas c, float l, float t, float r, float b) {
+        panel.setStyle(Paint.Style.FILL);
+        panel.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(10f), dp(10f), panel);
+        float sum = 0f;
+        float max = 50f;
+        for (int k = 0; k < strokeCount; k++) {
+            sum += strokePower[k];
+            max = Math.max(max, strokePower[k]);
+        }
+        float avg = strokeCount > 0 ? sum / strokeCount : 0f;
+        label(c, strokeCount > 0 ? "POWER PER STROKE  ·  AVERAGE " + Math.round(avg) + " W" : "POWER PER STROKE",
+                l + dp(10f), t + dp(16f), 8.5f, FAINT, Paint.Align.LEFT);
+        float top = t + dp(24f);
+        float bottom = b - dp(8f);
+        float slot = (r - l - dp(16f)) / STROKE_BARS;
+        for (int k = 0; k < strokeCount; k++) {
+            int idx = (strokeHead - strokeCount + k + STROKE_BARS) % STROKE_BARS;
+            float v = strokePower[idx];
+            float x = r - dp(8f) - (strokeCount - k) * slot;
+            float barTop = bottom - (bottom - top) * v / (max * 1.1f);
+            panel.setColor(v >= avg * 1.03f ? ACCENT : v <= avg * 0.93f ? WARN : BLUE);
+            c.drawRoundRect(x + slot * 0.15f, barTop, x + slot * 0.85f, bottom, dp(2f), dp(2f), panel);
+        }
+        if (strokeCount > 0) {
+            float ay = bottom - (bottom - top) * avg / (max * 1.1f);
+            panel.setColor(0x88FFFFFF);
+            c.drawRect(l + dp(8f), ay - dp(0.75f), r - dp(8f), ay + dp(0.75f), panel);
+        }
+    }
+
+    /** The shape of your last drive: paddle speed through the stroke, from the pulse meter. */
+    private void drawStrokeShape(Canvas c, float l, float t, float r, float b) {
+        if (status == null || status.meter.lastStroke == null || b - t < dp(30f)) {
+            return;
+        }
+        float[] rates = status.meter.lastStroke.driveRates;
+        if (rates.length < 2) {
+            return;
+        }
+        float max = 1f;
+        for (float v : rates) {
+            max = Math.max(max, v);
+        }
+        panel.setStyle(Paint.Style.FILL);
+        panel.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(8f), dp(8f), panel);
+        trace.rewind();
+        float left = l + dp(8f);
+        float width = r - l - dp(16f);
+        float top = t + dp(16f);
+        float bottom = b - dp(6f);
+        trace.moveTo(left, bottom);
+        for (int i = 0; i < rates.length; i++) {
+            trace.lineTo(left + width * i / (rates.length - 1f), bottom - (bottom - top) * rates[i] / max);
+        }
+        trace.lineTo(left + width, bottom);
+        trace.close();
+        panel.setColor(0x6635D0BA);
+        c.drawPath(trace, panel);
+        label(c, "LAST DRIVE", l + dp(8f), t + dp(12f), 7.5f, FAINT, Paint.Align.LEFT);
     }
 
     private static String ordinal(int n) {

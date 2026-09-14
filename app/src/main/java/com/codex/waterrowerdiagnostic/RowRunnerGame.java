@@ -14,15 +14,22 @@ import android.view.MotionEvent;
  * bounce. Coins are just coins. Five hearts; lose them all and it is over, with the distance kept.
  *
  * <p>Levels are generated from a fixed seed so a run is repeatable and a best is meaningful.
+ *
+ * <p>3.15.0, after "needs to be more fun": <b>every stroke is a jump</b>. The start of each drive,
+ * as the pulse meter sees it, launches the runner, so rhythm matters - time the pull and you sail
+ * over a pit for a bonus, or clear a crab walking at you, or scoop an arc of coins in the air. A
+ * stroke-jump that would land in a pit stretches to clear it rather than punish a near miss; the
+ * old jump at the edge still fires if no stroke comes. Walls and the high-coin speed come from the
+ * rower's own profile.
  */
 final class RowRunnerGame extends GameView {
 
-    private enum Kind { PIT, WALL, COIN, HIGH_COIN }
+    private enum Kind { PIT, WALL, COIN, HIGH_COIN, ARC_COIN, CRAB }
 
     private static final class Thing {
         final Kind kind;
-        final float at;       // metres
-        final float size;     // pit width, or wall watts
+        float at;             // metres; crabs walk, so not final
+        final float size;     // pit width, wall watts, or an arc coin's height (0..1 of a jump)
         boolean done;
 
         Thing(Kind kind, float at, float size) {
@@ -56,6 +63,11 @@ final class RowRunnerGame extends GameView {
     private final Fx.Shake shake = new Fx.Shake();
     private final Fx.Particles fx = new Fx.Particles();
     private boolean wasAirborne;
+    private PulseMeter.Stroke lastStrokeSeen;
+    private double lastJumpAt = -10;
+    /** The current jump came from a stroke, so clearing a pit with it earns the bonus. */
+    private boolean strokeJump;
+    private int strokeJumps;
 
     RowRunnerGame(Context context, PersonalBests bests) {
         super(context);
@@ -71,6 +83,9 @@ final class RowRunnerGame extends GameView {
         x = 0;
         jumpFrom = -1;
         peakWatts = 0;
+        strokeJump = false;
+        strokeJumps = 0;
+        lastJumpAt = -10;
         things.clear();
         buildLevel();
     }
@@ -78,18 +93,28 @@ final class RowRunnerGame extends GameView {
     /** Deterministic course: gets harder with distance. */
     private void buildLevel() {
         java.util.Random r = new java.util.Random(seed);
+        float typicalWatts = (float) profile.typicalWatts();
         float at = 40f;
         while (at < 6000f) {
             float difficulty = Math.min(1f, at / 3000f);
             int roll = r.nextInt(100);
-            if (roll < 34) {
+            if (roll < 28) {
                 float width = 2.5f + r.nextFloat() * (2.5f + difficulty * 4f);   // 2.5..9 m
                 things.add(new Thing(Kind.PIT, at, width));
                 at += width;
-            } else if (roll < 58) {
-                float watts = 90f + r.nextFloat() * (60f + difficulty * 110f);   // 90..260 W
+            } else if (roll < 46) {
+                // 70% of typical power rising to ~160% with distance: was a fixed 90..260 W.
+                float watts = typicalWatts * (0.7f + r.nextFloat() * (0.35f + difficulty * 0.55f));
                 things.add(new Thing(Kind.WALL, at, watts));
-            } else if (roll < 85) {
+            } else if (roll < 58) {
+                things.add(new Thing(Kind.CRAB, at + 20f, 0));
+            } else if (roll < 72) {
+                float[] arc = {0.25f, 0.6f, 0.85f, 0.6f, 0.25f};
+                for (int i = 0; i < arc.length; i++) {
+                    things.add(new Thing(Kind.ARC_COIN, at + i * 1.4f, arc[i]));
+                }
+                at += 6;
+            } else if (roll < 86) {
                 things.add(new Thing(Kind.COIN, at, 0));
                 things.add(new Thing(Kind.COIN, at + 3, 0));
                 things.add(new Thing(Kind.COIN, at + 6, 0));
@@ -111,6 +136,42 @@ final class RowRunnerGame extends GameView {
             peakWatts = s.watts;
             peakWattsAt = sessionSeconds;
         }
+        // A new stroke from the pulse meter is the start of a drive: jump.
+        PulseMeter.Stroke stroke = s.meter.lastStroke;
+        if (stroke != null && stroke != lastStrokeSeen) {
+            lastStrokeSeen = stroke;
+            jumpOnStroke();
+        }
+    }
+
+    /** Fallback when the pulse meter is not counting strokes: the monitor's counter still jumps. */
+    @Override
+    protected void onStroke(int watts) {
+        if (status != null && status.meter.strokes == 0) {
+            jumpOnStroke();
+        }
+    }
+
+    private void jumpOnStroke() {
+        if (!started || over || airborne() || sessionSeconds - lastJumpAt < 0.8) {
+            return;
+        }
+        float len = Math.max(2.5f, boat.value() * JUMP_FACTOR);
+        // Forgiving: a jump that would land inside a pit stretches to clear it, up to half again.
+        for (Thing t : things) {
+            if (t.kind == Kind.PIT && !t.done && t.at > x && t.at < x + len && t.at + t.size > x + len) {
+                float need = t.at + t.size + 0.3f - (float) x;
+                if (need <= len * 1.5f) {
+                    len = need;
+                }
+                break;
+            }
+        }
+        jumpFrom = (float) x;
+        jumpLen = len;
+        lastJumpAt = sessionSeconds;
+        strokeJump = true;
+        strokeJumps++;
     }
 
     @Override
@@ -120,6 +181,11 @@ final class RowRunnerGame extends GameView {
             return true;
         }
         return super.onTouchEvent(e);
+    }
+
+    /** The high coin needs a little under your typical speed: was a fixed 3.4 m/s. */
+    private float highCoinSpeed() {
+        return (float) profile.typicalSpeed() * 0.9f;
     }
 
     private boolean airborne() {
@@ -162,10 +228,15 @@ final class RowRunnerGame extends GameView {
                             if (jumpFrom < 0) {
                                 jumpFrom = (float) x;
                                 jumpLen = Math.max(1f, speed * JUMP_FACTOR);
+                                strokeJump = false;
                             }
                         }
                         if (x >= t.at + t.size) {
                             t.done = true;
+                            if (strokeJump && jumpFrom >= 0 && jumpFrom < t.at) {
+                                coins += 2;   // cleared on a stroke
+                                fx.burst(w * 0.30f, h * 0.72f - dp(60f), 16, dp(120f), 0.5f, dp(3f), 0xFF35D0BA, true);
+                            }
                         } else if (airborne() && x >= jumpFrom + jumpLen - 0.01f && x < t.at + t.size) {
                             // Landed short: in the pit.
                             fall(t);
@@ -190,10 +261,33 @@ final class RowRunnerGame extends GameView {
                             fx.burst(w * 0.30f, h * 0.72f - dp(24f), 10, dp(90f), 0.5f, dp(3f), 0xFFF5C518, true);
                         }
                         break;
+                    case ARC_COIN:
+                        if (x >= t.at) {
+                            t.done = true;
+                            if (Math.abs(jumpHeight() - t.size) < 0.3f) {
+                                coins += 2;
+                                fx.burst(w * 0.30f, h * 0.72f - dp(24f) - t.size * dp(60f), 10, dp(90f), 0.5f, dp(3f), 0xFFF5C518, true);
+                            }
+                        }
+                        break;
+                    case CRAB:
+                        if (x >= t.at - 0.3f) {
+                            t.done = true;
+                            if (jumpHeight() > 0.35f) {
+                                coins += 2;
+                                fx.burst(w * 0.30f, h * 0.72f - dp(30f), 14, dp(110f), 0.5f, dp(3f), 0xFFFF7A3D, true);
+                            } else if (sessionSeconds > hurtUntil) {
+                                hearts--;
+                                shake.kick(dp(10f));
+                                hurtUntil = sessionSeconds + 1.5;
+                                checkOver();
+                            }
+                        }
+                        break;
                     case HIGH_COIN:
                         if (x >= t.at) {
                             t.done = true;
-                            if (speed >= 3.4f) {
+                            if (speed >= highCoinSpeed()) {
                                 coins += 5;
                                 fx.burst(w * 0.30f, h * 0.72f - dp(70f), 24, dp(140f), 0.7f, dp(3.5f), 0xFFF5C518, true);
                             }
@@ -204,6 +298,13 @@ final class RowRunnerGame extends GameView {
             }
             if (jumpFrom >= 0 && !airborne()) {
                 jumpFrom = -1;
+                strokeJump = false;
+            }
+            // Crabs scuttle toward you once they are in view.
+            for (Thing t : things) {
+                if (t.kind == Kind.CRAB && !t.done && t.at > x && t.at < x + 40f) {
+                    t.at -= 1.2f * dt;
+                }
             }
         }
 
@@ -277,7 +378,7 @@ final class RowRunnerGame extends GameView {
                     if (t.done) {
                         break;
                     }
-                    float wh = dp(40f) + (t.size - 90f) / 170f * dp(50f);
+                    float wh = dp(40f) + Math.max(0f, t.size / (float) profile.typicalWatts() - 0.7f) * dp(55f);
                     paint.setColor(0xFFB33A3A);
                     c.drawRect(sx - dp(8f), groundY - wh, sx + dp(8f), groundY, paint);
                     paint.setColor(0xFF7A2020);
@@ -300,8 +401,38 @@ final class RowRunnerGame extends GameView {
                     paint.setColor(0xFFB8890B);
                     c.drawCircle(sx, cy, dp(3f), paint);
                     if (t.kind == Kind.HIGH_COIN) {
-                        label(c, "3.4 m/s", sx, cy - dp(12f), 7.5f, FAINT, Paint.Align.CENTER);
+                        label(c, String.format(java.util.Locale.US, "%.1f m/s", highCoinSpeed()), sx, cy - dp(12f), 7.5f, FAINT, Paint.Align.CENTER);
                     }
+                    break;
+                }
+                case ARC_COIN: {
+                    if (t.done) {
+                        break;
+                    }
+                    float cy = groundY - dp(24f) - t.size * dp(60f);
+                    Fx.glow(c, sx, cy, dp(14f), 0x55FFE28A);
+                    paint.setColor(0xFFF5C518);
+                    c.drawCircle(sx, cy, dp(6f), paint);
+                    break;
+                }
+                case CRAB: {
+                    if (t.done) {
+                        break;
+                    }
+                    float scuttle = (float) Math.sin(sessionSeconds * 14 + t.at) * dp(2f);
+                    paint.setColor(0xFFE0582E);
+                    c.drawOval(sx - dp(14f), groundY - dp(16f), sx + dp(14f), groundY - dp(2f), paint);
+                    paint.setStrokeWidth(dp(2f));
+                    for (int leg = -1; leg <= 1; leg += 2) {
+                        c.drawLine(sx + leg * dp(10f), groundY - dp(6f), sx + leg * dp(18f), groundY + scuttle, paint);
+                        c.drawLine(sx + leg * dp(6f), groundY - dp(6f), sx + leg * dp(12f), groundY - scuttle, paint);
+                    }
+                    paint.setColor(0xFFFFFFFF);
+                    c.drawCircle(sx - dp(5f), groundY - dp(19f), dp(3f), paint);
+                    c.drawCircle(sx + dp(5f), groundY - dp(19f), dp(3f), paint);
+                    paint.setColor(0xFF10171F);
+                    c.drawCircle(sx - dp(5f), groundY - dp(19f), dp(1.4f), paint);
+                    c.drawCircle(sx + dp(5f), groundY - dp(19f), dp(1.4f), paint);
                     break;
                 }
                 default:
@@ -354,8 +485,8 @@ final class RowRunnerGame extends GameView {
             cap = "JUMP!";
             col = ACCENT;
         } else {
-            cap = String.format(java.util.Locale.US, "%.1f m/s   ·   jump %.1f m   ·   peak %d W",
-                    speed, speed * JUMP_FACTOR, peakWatts);
+            cap = String.format(java.util.Locale.US, "PULL = JUMP   ·   %.1f m/s   ·   jump %.1f m   ·   peak %d W   ·   %d stroke jumps",
+                    speed, Math.max(2.5f, speed * JUMP_FACTOR), peakWatts, strokeJumps);
         }
         bold(c, cap, w / 2f, h - dp(16f), 11f, col, Paint.Align.CENTER);
     }

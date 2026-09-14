@@ -18,6 +18,11 @@ import android.graphics.Shader;
  * <p>No fail state on purpose - this is the one to row to when a chase would be exhausting. The
  * city is persistent: every block you have ever placed is still standing.
  *
+ * <p>3.15.0, the block factory: each drive fills the crane's hopper, and a strong stroke - 10% or
+ * 30% above the rower's typical power - drops a two- or three-floor block at a discount, so pulling
+ * hard visibly builds faster. At night the city's windows light up in proportion to the energy put
+ * in this session, and a "today" tower on the right grows with this session's floors.
+ *
  * <p>Towers are drawn as single extruded prisms rather than stacks of cubes: 25 plots of up to 14
  * blocks would be 350 sorted quads a frame, where 25 prisms is nothing.
  */
@@ -34,6 +39,7 @@ final class SkylineGame extends GameView {
         float z;          // current height in block units
         float target;
         int color;
+        int units = 1;    // floors in this block
     }
 
     private final PersonalBests bests;
@@ -52,6 +58,12 @@ final class SkylineGame extends GameView {
     private int placedThisSession;
     private int lifetime;
     private int tallest;
+    /** Floors the next block will have, from the last stroke's power. */
+    private int nextUnits = 1;
+    private PulseMeter.Stroke lastStrokeSeen;
+    private double workAtStart = -1;
+    /** Share of windows lit tonight: the energy put in this session. */
+    private float litShare;
 
     private static final int[] PALETTE = {
             0xFF4C6EA8, 0xFF3E8C7E, 0xFF8A6BB0, 0xFF9A6B4F, 0xFF5E7A90, 0xFF7A8A4F,
@@ -70,6 +82,9 @@ final class SkylineGame extends GameView {
     protected void onStart() {
         concrete = 0f;
         placedThisSession = 0;
+        nextUnits = 1;
+        workAtStart = -1;
+        litShare = 0f;
         falling.clear();
         angle = 0.6f;
         lifetime = Math.round(bests.get("city.blocks", 0f));
@@ -117,10 +132,32 @@ final class SkylineGame extends GameView {
         int n = 0;
         for (Falling f : falling) {
             if (f.gx == gx && f.gy == gy) {
-                n++;
+                n += f.units;
             }
         }
         return n;
+    }
+
+    /** Watt-seconds for a block of this many floors: bigger blocks are cheaper per floor. */
+    private static float cost(int units) {
+        return BLOCK_COST * (1f + 0.75f * (units - 1));
+    }
+
+    @Override
+    protected void onStatusChanged(S4Protocol.Status s) {
+        if (workAtStart < 0) {
+            workAtStart = s.meter.workJoules;
+        }
+        PulseMeter.Stroke stroke = s.meter.lastStroke;
+        if (stroke != null && stroke != lastStrokeSeen) {
+            lastStrokeSeen = stroke;
+            double power = !Double.isNaN(stroke.averagePowerW) ? stroke.averagePowerW : s.watts;
+            double ratio = power / Math.max(1.0, profile.typicalWatts());
+            nextUnits = ratio >= 1.3 ? 3 : ratio >= 1.1 ? 2 : 1;
+        }
+        // Ten minutes of typical work lights every window.
+        double work = Math.max(0, s.meter.workJoules - Math.max(0, workAtStart));
+        litShare = (float) Math.min(1.0, work / Math.max(1.0, profile.typicalWatts() * 600.0));
     }
 
     private void recomputeTallest() {
@@ -149,16 +186,19 @@ final class SkylineGame extends GameView {
 
         if (driving && watts > 0) {
             concrete += watts * dt;
-            while (concrete >= BLOCK_COST) {
-                concrete -= BLOCK_COST;
+            while (concrete >= cost(nextUnits)) {
                 int[] plot = lowestPlot();
-                if (height[plot[0]][plot[1]] + pendingFor(plot[0], plot[1]) < MAX_HEIGHT) {
+                int room = MAX_HEIGHT - height[plot[0]][plot[1]] - pendingFor(plot[0], plot[1]);
+                int units = Math.min(nextUnits, room);
+                concrete -= cost(Math.max(1, units));
+                if (units > 0) {
                     Falling f = new Falling();
                     f.gx = plot[0];
                     f.gy = plot[1];
                     f.target = height[plot[0]][plot[1]] + pendingFor(plot[0], plot[1]);
                     f.z = f.target + 9f;
                     f.color = tint[plot[0]][plot[1]];
+                    f.units = units;
                     falling.add(f);
                 }
             }
@@ -246,9 +286,9 @@ final class SkylineGame extends GameView {
             float fall = 4.5f + speed * 2.6f;       // rowing harder brings them down faster
             f.z -= fall * dt;
             if (f.z <= f.target) {
-                height[f.gx][f.gy]++;
-                lifetime++;
-                placedThisSession++;
+                height[f.gx][f.gy] = Math.min(MAX_HEIGHT, height[f.gx][f.gy] + f.units);
+                lifetime += f.units;
+                placedThisSession += f.units;
                 recomputeTallest();
                 falling.remove(i);
                 float[] p = project(f.gx, f.gy, f.target + 1, cx, cy, tw, th, bh, cos, sin, mid);
@@ -256,7 +296,9 @@ final class SkylineGame extends GameView {
                 shake.kick(dp(2.5f));
                 continue;
             }
-            drawBlock(c, f.gx, f.gy, f.z, f.color, cx, cy, tw, th, bh, cos, sin, mid, true);
+            for (int u = f.units - 1; u >= 0; u--) {
+                drawBlock(c, f.gx, f.gy, f.z + u, f.color, cx, cy, tw, th, bh, cos, sin, mid, true);
+            }
             // Guide line down to the plot so you can see where it is going.
             float[] from = project(f.gx, f.gy, f.z, cx, cy, tw, th, bh, cos, sin, mid);
             float[] to = project(f.gx, f.gy, f.target, cx, cy, tw, th, bh, cos, sin, mid);
@@ -271,22 +313,69 @@ final class SkylineGame extends GameView {
         bold(c, String.valueOf(lifetime), w * 0.5f, dp(34f), 34f, ACCENT, Paint.Align.CENTER);
         label(c, "BLOCKS IN THE CITY", w * 0.5f, dp(48f), 9f, FAINT, Paint.Align.CENTER);
 
-        // Concrete meter: the next block.
-        float meterW = w * 0.34f;
-        float mx = w * 0.5f - meterW / 2f;
-        float my = h - dp(40f);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(mx, my, mx + meterW, my + dp(10f), dp(5f), dp(5f), paint);
-        paint.setColor(WARN);
-        c.drawRoundRect(mx, my, mx + meterW * (concrete / BLOCK_COST), my + dp(10f), dp(5f), dp(5f), paint);
-        label(c, driving ? "NEXT BLOCK" : "CRANES IDLE - ROW TO BUILD", w * 0.5f, my - dp(6f), 9f,
-                driving ? FAINT : WARN, Paint.Align.CENTER);
+        drawCrane(c, w, h);
+        drawTodayTower(c, w, h);
 
         float fy = h - dp(12f);
         float col = w / 3f;
         stat(c, col * 0.5f, fy, String.valueOf(placedThisSession), "THIS SESSION");
         stat(c, col * 1.5f, fy, tallest + " floors", "TALLEST");
         stat(c, col * 2.5f, fy, falling.isEmpty() ? "--" : String.valueOf(falling.size()), "IN THE AIR");
+    }
+
+    /** The crane and its hopper, top left: every drive pours concrete in. */
+    private void drawCrane(Canvas c, float w, float h) {
+        float baseX = dp(40f);
+        float baseY = h * 0.62f;
+        float topY = h * 0.14f;
+        paint.setColor(0xFFF0B132);
+        c.drawRect(baseX - dp(4f), topY, baseX + dp(4f), baseY, paint);
+        for (float y = topY + dp(12f); y < baseY; y += dp(18f)) {
+            paint.setStrokeWidth(dp(1.5f));
+            c.drawLine(baseX - dp(4f), y, baseX + dp(4f), y + dp(12f), paint);
+        }
+        c.drawRect(baseX - dp(10f), topY - dp(4f), baseX + dp(150f), topY + dp(4f), paint);
+        float hookX = baseX + dp(120f);
+        paint.setColor(0xFF9AA5B1);
+        paint.setStrokeWidth(dp(1.5f));
+        c.drawLine(hookX, topY + dp(4f), hookX, topY + dp(46f), paint);
+        // Hopper: fills with concrete toward the next block.
+        float hopW = dp(64f);
+        float hopH = dp(54f);
+        float hx = hookX - hopW / 2f;
+        float hy = topY + dp(46f);
+        paint.setColor(0x55FFFFFF);
+        c.drawRect(hx, hy, hx + hopW, hy + hopH, paint);
+        float full = Math.min(1f, concrete / cost(nextUnits));
+        paint.setColor(nextUnits >= 3 ? ACCENT : nextUnits == 2 ? BLUE : WARN);
+        c.drawRect(hx, hy + hopH * (1f - full), hx + hopW, hy + hopH, paint);
+        bold(c, nextUnits + (nextUnits == 1 ? " FLOOR" : " FLOORS"), hookX, hy + hopH + dp(16f), 11f,
+                nextUnits > 1 ? ACCENT : TEXT, Paint.Align.CENTER);
+        label(c, driving ? "pull harder for bigger blocks" : "CRANES IDLE - ROW TO BUILD", hookX,
+                hy + hopH + dp(30f), 8.5f, driving ? FAINT : WARN, Paint.Align.CENTER);
+    }
+
+    /** This session's floors as their own tower on the right, windows lit by today's energy. */
+    private void drawTodayTower(Canvas c, float w, float h) {
+        float floorH = dp(9f);
+        float bw = dp(48f);
+        float right = w - dp(22f);
+        float bottom = h - dp(56f);
+        int floors = Math.min(placedThisSession, (int) ((bottom - h * 0.12f) / floorH));
+        paint.setColor(0xFF2A3648);
+        c.drawRect(right - bw - dp(6f), bottom, right + dp(6f), bottom + dp(4f), paint);
+        for (int f = 0; f < floors; f++) {
+            float y = bottom - (f + 1) * floorH;
+            paint.setColor(0xFF3E5A7E);
+            c.drawRect(right - bw, y, right, y + floorH - dp(1f), paint);
+            boolean lit = ((f * 7919) % 100) / 100f < 0.2f + 0.8f * litShare;
+            paint.setColor(lit ? 0xFFFFE8A8 : 0xFF22324A);
+            c.drawRect(right - bw + dp(8f), y + dp(2f), right - bw + dp(18f), y + floorH - dp(3f), paint);
+            c.drawRect(right - dp(18f), y + dp(2f), right - dp(8f), y + floorH - dp(3f), paint);
+        }
+        bold(c, "+" + placedThisSession, right - bw / 2f, bottom - floors * floorH - dp(8f), 13f, ACCENT,
+                Paint.Align.CENTER);
+        label(c, "TODAY", right - bw / 2f, bottom + dp(16f), 8.5f, FAINT, Paint.Align.CENTER);
     }
 
     private float depth(int gx, int gy, float cos, float sin, float mid) {
@@ -349,7 +438,9 @@ final class SkylineGame extends GameView {
         for (int f = 0; f < floors; f++) {
             float wy = sy + bodyH - f * bh - bh * 0.55f;
             for (int k = 0; k < 2; k++) {
-                boolean lit = ((seed >>> ((f * 2 + k) % 60)) & 1L) == 1L;
+                // More of the city lights up the more energy has gone in this session.
+                long bits = seed >>> ((f * 3 + k * 5) % 56);
+                boolean lit = ((bits & 0xFFL) / 255f) < 0.2f + 0.8f * litShare;
                 int wcol = lit && night > 0.25f
                         ? blend(0xFF3A3A2A, 0xFFFFE8A8, Math.min(1f, night * 1.4f))
                         : blend(color, 0xFF000000, 0.55f);
