@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import android.bluetooth.BluetoothAdapter;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.drawable.GradientDrawable;
 import android.graphics.Typeface;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
@@ -122,6 +123,8 @@ public class MainActivity extends Activity
     private CoastFlightGame coastFlight;
     private TextView gameClock;
     private GaugeStripView gameStrip;
+    /** Local builds only: the camera button over every screen. Null in the published build. */
+    private View shotButton;
     private PersonalBests personalBests;
     private final java.util.List<TextView> pbLabels = new java.util.ArrayList<>();
 
@@ -424,12 +427,45 @@ public class MainActivity extends Activity
         screenHost = new FrameLayout(this);
         frame.addView(screenHost, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            addShotButton(frame);
+        }
         addDiagnosticsDrawer(frame);
 
         instrumentsScreen = buildInstruments();
         homeScreen = buildHome();
         showScreen(homeScreen);
         return frame;
+    }
+
+    /**
+     * A camera button on the right edge of every screen, for getting screenshots off a
+     * kiosk-locked tablet: tap it and the screen goes to the laptop. The long-presses were
+     * invisible and had to be remembered; this is what the rower asked for.
+     *
+     * <p>Local builds only - the call is inside {@code BuildConfig.SCREENSHOT_UPLOAD}, so the
+     * published APK never creates it. Added before the drawer, so an open drawer covers it.
+     */
+    private void addShotButton(FrameLayout frame) {
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            TextView shot = new TextView(this);
+            shot.setText("\uD83D\uDCF7");
+            shot.setTextSize(20);
+            shot.setGravity(Gravity.CENTER);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            ring.setColor(0xCC10203A);
+            ring.setStroke(dp(2), getColorCompat(R.color.primary));
+            shot.setBackground(ring);
+            shot.setAlpha(0.8f);
+            shot.setContentDescription("Send a screenshot to the laptop");
+            shot.setOnClickListener(v -> captureScreenshot(screenLabel()));
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(54), dp(54),
+                    Gravity.END | Gravity.CENTER_VERTICAL);
+            params.rightMargin = dp(10);
+            frame.addView(shot, params);
+            shotButton = shot;
+        }
     }
 
     private void showScreen(View screen) {
@@ -1146,7 +1182,15 @@ public class MainActivity extends Activity
                 toast("Not enough memory for a screenshot");
                 return;
             }
+            // Never photograph the camera button itself. An INVISIBLE child is skipped by the draw
+            // pass immediately, with no layout, so hiding it just for this call is enough.
+            if (shotButton != null) {
+                shotButton.setVisibility(View.INVISIBLE);
+            }
             root.draw(new Canvas(shot));
+            if (shotButton != null) {
+                shotButton.setVisibility(View.VISIBLE);
+            }
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             shot.compress(Bitmap.CompressFormat.PNG, 100, out);
             shot.recycle();

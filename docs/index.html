@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WAKE — rowing instruments and games for a WaterRower S4</title>
-    <meta name="description" content="An open-source Android app that reads the WaterRower S4 monitor over USB and turns it into analog instruments, 17 games and a Cesium flight down the California coast.">
+    <meta name="description" content="An open-source Android app that reads the WaterRower S4 monitor over USB and turns it into analog instruments, 18 games and a Cesium flight down the California coast.">
     <style>
       :root {
         --bg: #060B12; --panel: #0D1420; --line: #1C2736;
@@ -65,6 +65,10 @@
 
       footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line);
         color: var(--faint); font-size: 13px; }
+      .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+      .shots figure { margin: 0; }
+      .shots img { width: 100%; display: block; border-radius: 10px; border: 1px solid var(--line); }
+      .shots figcaption { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-top: 6px; }
       .tag { display: inline-block; font-size: 11px; font-family: var(--mono); color: var(--warn);
         border: 1px solid rgba(240,177,50,0.35); border-radius: 999px; padding: 2px 9px; }
     </style>
@@ -88,24 +92,26 @@
 
       <p class="lede">Your rowing machine already measures everything. WAKE reads the
         <strong>WaterRower S4 monitor over USB</strong> and turns it into analog instruments that
-        behave like water, <strong>17 games</strong>, and a flight down the California coast on a
+        behave like water, <strong>18 games</strong>, and a flight down the California coast on a
         real 3D globe. It runs on the tablet you already have.</p>
 
       <div class="actions">
-        <a class="btn primary" href="downloads/wake-3.12.0-debug.apk" download>⬇ Download APK · 3.12.0</a>
+        <a class="btn primary" href="downloads/wake-3.12.1-debug.apk" download>⬇ Download APK · 3.12.1</a>
         <a class="btn" id="openApp" href="ergattarowdiag://connect">Open WAKE</a>
         <a class="btn ghost" href="https://github.com/dustin-gamble/wake">Source on GitHub</a>
         <a class="btn ghost" href="https://github.com/sponsors/dustin-gamble">♥ Sponsor</a>
       </div>
-      <p class="note">1.2 MB · Android 5.0+ · debug-signed, so Android will ask you to allow
+      <p class="note">1 MB · Android 6.0+ · debug-signed, so Android will ask you to allow
         installs from your browser. <strong>Open WAKE</strong> only does something on a tablet that
         already has it installed — handy on a kiosk-locked rower with no app switcher.</p>
+
+      <!-- screenshots:start --><!-- screenshots:end -->
 
       <div class="panel">
         <h2>What it does</h2>
         <div class="grid">
           <div class="cell"><div class="k">3</div><div class="v">Analog gauges whose needles carry momentum</div></div>
-          <div class="cell"><div class="k">17</div><div class="v">Games driven by your actual power and cadence</div></div>
+          <div class="cell"><div class="k">18</div><div class="v">Games driven by your actual power and cadence</div></div>
           <div class="cell"><div class="k">900 km</div><div class="v">Cesium flight, Golden Gate to San Diego</div></div>
           <div class="cell"><div class="k">7</div><div class="v">S4 memory addresses decoded live</div></div>
         </div>
@@ -113,12 +119,14 @@
         <p>Speed, power and stroke rate on real dials, a water paddle that spins at the measured
           speed, and a live trace of boat speed over power. The thing that matters is the
           <strong>decay between strokes</strong> — rowers call it the run of the boat, and it is
-          the whole reason to take the next stroke. Most apps hold the last reading flat. This one
-          models the paddle slowing down: quadratic drag, <code>ω(t) = ω₀/(1 + (k/I)ω₀t)</code>.</p>
+          the whole reason to take the next stroke. Most apps hold the last reading flat. Here the needle holds
+          its run, eases off, and lands on zero - and the moment the paddle's own pulses stop, it
+          finishes, so nothing hovers above zero on a still machine.</p>
         <h3>The games</h3>
         <p>Pace boats, ghost races against your own best, a zombie that gains on you when you ease
-          off, a side-scrolling runner, boss fights, a canyon chase, an isometric city that builds
-          itself one block per stroke. Every one shows the same vitals strip so you can read your
+          off, a side-scrolling runner, a canyon chase, an isometric city that builds itself one
+          block per stroke. <strong>Zone Row</strong> turns a timed piece into one big instrument:
+          your split across four effort zones and your stroke rate against a target band. Every one shows the same vitals strip so you can read your
           numbers while you play.</p>
         <h3>Coast Flight</h3>
         <p>A CesiumJS globe with satellite imagery and real terrain. Power above 60 W is lift,

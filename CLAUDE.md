@@ -728,8 +728,14 @@ hand and that line goes stale, which is the whole reason the script exists.
 The tablet is kiosk-locked: no file manager, no app switcher, and Android's own screenshot lands
 in a gallery that cannot be opened. So the app photographs itself:
 
-- **Long-press the vitals strip** in any game, or **long-press WAKE on the home screen**, or use
-  **Screenshot** in the diagnostics drawer (it closes the drawer first, then waits 450ms).
+- **Tap the camera button** on the right edge of every screen (3.12.1, the rower's request - the
+  long-presses were invisible). It is hidden for the instant the picture is drawn, so it never
+  appears in a shot. The older triggers still work: long-press the vitals strip in a game (or
+  ZONE ROW itself), long-press WAKE on the home screen, or **Screenshot** in the drawer.
+- **Publishing to GitHub is a separate, deliberate step:** `tools/publish-screenshots.py
+  <png>::"Caption"` copies one into `docs/screenshots/`, scales it to 1600 px and rebuilds the
+  gallery in `docs/index.html` and `README.md` (hidden while empty). Look at every image first -
+  the gauges banner and the drawer can show a LAN address. The server now rejects non-PNG bodies.
 - The PNG is POSTed to `/api/screenshot` and lands in `server/data/screenshots/<screen>-<time>.png`.
 - It draws the *view hierarchy*, so every canvas screen comes out exactly as seen. **Coast Flight
   will come out blank** - it is WebGL on a GPU surface, outside the view draw pass. Use the

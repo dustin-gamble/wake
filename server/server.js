@@ -217,13 +217,21 @@ function handleApi(req, res, pathname) {
       chunks.push(chunk);
     });
     req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      // A PNG always starts with these 8 bytes. Refuse anything else, so a stray or empty POST
+      // cannot leave a broken image among the real screenshots.
+      const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      if (body.length < PNG.length || !body.subarray(0, PNG.length).equals(PNG)) {
+        sendJson(res, 400, { ok: false, error: 'body is not a PNG' });
+        return;
+      }
       const dir = path.join(DATA_DIR, 'screenshots');
       fs.mkdirSync(dir, { recursive: true });
       const label = String(req.headers['x-shot-name'] || 'screen')
         .replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'screen';
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const file = path.join(dir, `${label}-${stamp}.png`);
-      fs.writeFile(file, Buffer.concat(chunks), (error) => {
+      fs.writeFile(file, body, (error) => {
         if (error) {
           sendJson(res, 500, { ok: false, error: String(error.message) });
           return;

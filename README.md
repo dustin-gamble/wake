@@ -1,8 +1,10 @@
 # WAKE
 
-**Rowing instruments, 17 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
+**Rowing instruments, 18 games and a coastal flight, driven by a WaterRower S4 monitor over USB.**
 
 📥 **[Download the APK and read the guide →](https://dustin-gamble.github.io/wake/)**
+
+<!-- screenshots:start --><!-- screenshots:end -->
 
 Your rowing machine already measures everything. WAKE reads the WaterRower S4 monitor over USB
 from the Android tablet on the machine, and turns it into analog instruments that behave like
@@ -18,9 +20,11 @@ no root, no system changes, and Ergatta itself is untouched and still the fallba
 
 - **Three analog gauges** — speed, power, rate — with needles that carry momentum.
 - **A water paddle** spinning at the measured speed, coasting down on its own when you stop.
-- **17 games**: pace boats, ghost races against your own best, a zombie that closes when you ease
-  off, a side-scrolling runner, boss fights, a canyon chase, an isometric city that builds one
+- **18 games**: pace boats, ghost races against your own best, a zombie that closes when you ease
+  off, a side-scrolling runner, a canyon chase, an isometric city that builds one
   block per stroke. Each shows the same vitals strip, so the numbers are never hidden by the game.
+- **Zone Row** — a timed piece as one full-screen instrument: split across four effort zones,
+  stroke rate against a target band, time in zone.
 - **Coast Flight** — a CesiumJS globe with satellite imagery and terrain. Power above 60 W is
   lift, boat speed is airspeed, the route flies itself, and your progress down the ~900 km coast
   persists across sessions.
@@ -33,12 +37,11 @@ A real boat decelerates between strokes. Rowers call it the **run** of the boat,
 how you judge your own stroke — a strong drive shows a high peak and a slow decay.
 
 The S4 does not decay its readings: it holds the last value until the next one. Showing that value
-flat is the single mistake that cost this project the most rework. Instead the paddle is modelled
-directly, with drag torque quadratic in speed:
+flat is the single mistake that cost this project the most rework. Instead every needle coasts.
 
-```
-I dω/dt = T − kω²        →  free coast:  ω(t) = ω₀ / (1 + (k/I)ω₀t)
-```
+Pure quadratic drag, `ω(t) = ω₀ / (1 + (k/I)ω₀t)`, was the first model, and on the machine it read
+wrong: steepest the instant you stop, then hovering just above zero for minutes — 11 rpm on a paddle
+at rest. The coast now holds its run, eases off through the middle, and lands on exactly zero.
 
 Knowing *when* to coast turned out to be the hard part. Three candidate triggers were tested
 against thousands of captured samples before one survived:
@@ -49,6 +52,9 @@ against thousands of captured samples before one survived:
 | Speed value unchanged | **Rejected** — it is an average and holds its last figure for ~10 s |
 | Flywheel pulses stopped | **Rejected** — the paddle turns for many seconds after you let go |
 | **Stroke counter gone quiet** | **Used** — exact, one tick per stroke, allowance scaled to your rating |
+
+Pulses stopping is no good for *starting* a coast, but it is the one true signal the paddle has
+stopped — so once they stop, whatever is left of the coast finishes within 1.5 s.
 
 ## Other things the capture settled
 
