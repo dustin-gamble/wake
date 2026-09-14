@@ -219,7 +219,7 @@ public class MainActivity extends Activity
     /** Write-path probe: rate-limited, because it holds the I/O lock while it runs. */
     private static final long PROBE_EVERY_MS = 10000;
     // 18 reports gave one identical verdict; three a session is enough to see if it changes.
-    private static final int MAX_PROBES_PER_SESSION = 3;
+    private static final int MAX_PROBES_PER_SESSION = 4;
     private static final int PROBE_TIMEOUT_MS = 250;
     private long lastProbeMs;
     private int probesThisSession;
@@ -2768,6 +2768,8 @@ public class MainActivity extends Activity
         int direct;
         int clear = Integer.MIN_VALUE;
         int afterClear = Integer.MIN_VALUE;
+        boolean ownershipChecked = false;
+        boolean stillOurs = false;
         synchronized (ioLock) {
             direct = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
             if (direct < 0) {
@@ -2776,6 +2778,15 @@ public class MainActivity extends Activity
                 clear = connection.controlTransfer(0x02, 0x01, 0x00, endpoint.getAddress(),
                         null, 0, PROBE_TIMEOUT_MS);
                 afterClear = connection.bulkTransfer(endpoint, bytes, bytes.length, PROBE_TIMEOUT_MS);
+            }
+            if (report && dataInterface != null) {
+                // Non-forcing, and that is the whole point. claimInterface(iface, false) succeeds
+                // when this process still owns the interface and fails when another process has
+                // taken it - so it answers "is something else holding the rower?" without taking
+                // it back. The forcing variant this replaces answered true every time precisely
+                // because it steals, which told us nothing. Changes nothing for any other app.
+                ownershipChecked = true;
+                stillOurs = connection.claimInterface(dataInterface, false);
             }
             // No claimInterface(force=true) here any more. It answered "claimed" all 18 times it
             // ran, so it had nothing left to tell us, and a forced claim can disrupt transfers
@@ -2801,9 +2812,14 @@ public class MainActivity extends Activity
                 payload.put("rawBulkTransferRc", direct);
                 payload.put("clearHaltRc", clear == Integer.MIN_VALUE ? JSONObject.NULL : clear);
                 payload.put("afterClearHaltRc", afterClear == Integer.MIN_VALUE ? JSONObject.NULL : afterClear);
-                payload.put("interfaceClaimed", "not probed since 3.9.2");
+                payload.put("interfaceStillOurs", ownershipChecked ? stillOurs : JSONObject.NULL);
+                // Both directions died together on 3.9.2 - reads 2.9s after open, writes at 2.68s
+                // median - so record how long the reader has been silent at this moment too.
+                payload.put("msSinceLastPacket", s4Protocol.snapshot().lastPacketAgeMs);
                 payload.put("recovered", recovered);
-                payload.put("verdict", direct >= 0
+                payload.put("verdict", ownershipChecked && !stillOurs
+                        ? "interface-taken: another process owns the rower's interface"
+                        : direct >= 0
                         ? "driver-state: raw transfer works, driver write does not"
                         : afterClear >= 0
                                 ? "endpoint-halt: clearing the halt recovers it"

@@ -376,6 +376,36 @@ dropouts after the 12-probe cap ran out, and found none, but **no rowing happene
 either**, so the test could not tell. 3.9.2 removes the force-claim (it answered true all 18 times
 anyway) and caps the probe at 3. A second 15-stroke control on 3.9.2 is the clean A/B.
 
+### Both directions die about 2.7 s after the port opens (3.9.2)
+
+Measured with `packetsSeen`, a true counter of every packet the reader framed - immune to the stale
+`lastPacket` trap above:
+
+| build | packets framed | last packet | then silent for |
+|---|---|---|---|
+| 3.7.3 (healthy morning) | 22,642 -> 44,803 | at session end | 0 s |
+| 3.9.1 | 1 -> 1,379 | 125 s after open | 311 s |
+| 3.9.2 | 1 -> 6 | **2.9 s after open** | 328 s, reader still running |
+
+Reads die at the same moment writes do - first write failure lands a median **2.68 s** after open
+across 48 opens. So this was never "writes blocked while reads carry on". The whole link goes dead.
+
+**Refuted on the way here, each by its own data:**
+- *The monitor only streams pulses while it hears the host.* Pulse flow started within 1.5 s of a
+  successful write 0 of 6 times; 0 of 11 successful writes were followed by pulses.
+- *The probe's forced claim was restoring the link.* Flow started within 1.5 s of a claim 3 of 6
+  times - no fingerprint. Library `open()` force-claims anyway (`CdcAcmSerialPort.openInterface`,
+  `claimInterface(iface, true)`), so every open was already a steal.
+- *`PING` means the monitor went idle for lack of a host.* The healthy morning session sent 30.
+
+**WAKE registers no USB device filter** in its manifest; it requests the rower at runtime. A kiosk
+rowing app almost certainly registers one, which gives it first claim at boot and on attach.
+
+**3.9.3 asks the ownership question directly.** The probe calls `claimInterface(iface, false)` -
+non-forcing - which succeeds if this process still owns the interface and fails if another has
+taken it. It takes nothing back. `verdict: interface-taken` would confirm another claimant; a
+`true` refutes that theory too. No rowing needed: the failure arrives ~3 s after opening WAKE.
+
 **If you are picking this up:** do not start by changing code. The link either works or it does
 not, and the capture tells you which within 45 seconds - count `s4-write-failed` since the last
 `app-started` and look at median `lastPacketAgeMs`. Healthy is 0 faults and under ~400ms.
