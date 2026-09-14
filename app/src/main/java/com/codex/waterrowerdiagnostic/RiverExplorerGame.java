@@ -223,12 +223,6 @@ final class RiverExplorerGame extends GameView {
         return s;
     }
 
-    private float curvatureAt(double s) {
-        int index = segIndex(s);
-        Seg seg = geom(prefixFor(index), index);
-        return seg.curvature((float) (s - index * SEG_LEN));
-    }
-
     /** Default for the next fork: a branch not yet explored, else keep left. */
     private char choiceForNextFork() {
         if (pendingChoice != 0) {
@@ -362,10 +356,20 @@ final class RiverExplorerGame extends GameView {
         float speed = boat.value();
 
         // Curvature ahead, integrated to a centre-line offset relative to where the boat points.
+        // The view spans at most two stretches (LOOK < SEG_LEN), so look each up once per frame. The
+        // first version called curvatureAt() for every metre - 300 string keys and map lookups a
+        // frame, thousands of short-lived objects a second on a tablet that stutters on garbage.
         angles[0] = 0f;
         offsets[0] = 0f;
+        int firstIdx = segIndex(along);
+        Seg near = geom(prefixFor(firstIdx), firstIdx);
+        Seg far = geom(prefixFor(firstIdx + 1), firstIdx + 1);
+        double nearEnd = (firstIdx + 1) * SEG_LEN;
         for (int i = 0; i <= LOOK; i++) {
-            angles[i + 1] = angles[i] + curvatureAt(along + i);
+            double s = along + i;
+            float k = s < nearEnd ? near.curvature((float) (s - firstIdx * SEG_LEN))
+                    : far.curvature((float) (s - nearEnd));
+            angles[i + 1] = angles[i] + k;
             offsets[i + 1] = offsets[i] + (float) Math.sin(angles[i]);
         }
         if (hasSteering()) {

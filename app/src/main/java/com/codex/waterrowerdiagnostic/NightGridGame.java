@@ -29,6 +29,9 @@ final class NightGridGame extends GameView {
     private final float[] houseY = new float[MAX_HOUSES];
     private final float[] houseS = new float[MAX_HOUSES];
     private final int[] order = new int[MAX_HOUSES];
+    /** rank[i]: where house i comes in the lighting order. Built once. */
+    private final int[] rank = new int[MAX_HOUSES];
+    private final boolean[] on = new boolean[MAX_HOUSES];
 
     private double lifetimeJoules;
     private double lastWork = -1;
@@ -58,6 +61,7 @@ final class NightGridGame extends GameView {
         java.util.Arrays.sort(idx, (a, b) -> Float.compare(dist(a), dist(b)));
         for (int i = 0; i < MAX_HOUSES; i++) {
             order[i] = idx[i];
+            rank[idx[i]] = i;
         }
     }
 
@@ -189,20 +193,14 @@ final class NightGridGame extends GameView {
 
         // Houses, far rows first.
         int litCount = Math.round(lit);
-        boolean[] on = new boolean[MAX_HOUSES];
-        for (int i = 0; i < Math.min(litCount, houses); i++) {
-            on[order[i]] = true;
+        // Far rows first; a house exists once the town has grown to its place in the lighting order.
+        // (Was a search of the whole order for every house, every frame.)
+        for (int i = 0; i < MAX_HOUSES; i++) {
+            on[i] = rank[i] < Math.min(litCount, houses);
         }
         for (int pass = 0; pass < MAX_HOUSES; pass++) {
             int i = order[MAX_HOUSES - 1 - pass];
-            boolean visible = false;
-            for (int k = 0; k < houses; k++) {
-                if (order[k] == i) {
-                    visible = true;
-                    break;
-                }
-            }
-            if (!visible) {
+            if (rank[i] >= houses) {
                 continue;
             }
             float hx = houseX[i] * w;

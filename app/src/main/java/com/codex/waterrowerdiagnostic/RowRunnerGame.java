@@ -68,6 +68,9 @@ final class RowRunnerGame extends GameView {
     /** The current jump came from a stroke, so clearing a pit with it earns the bonus. */
     private boolean strokeJump;
     private int strokeJumps;
+    /** When the last stroke landed and the rhythm between strokes, to predict the next jump. */
+    private double lastStrokeAt = -1;
+    private double strokeInterval = 2.4;
 
     RowRunnerGame(Context context, PersonalBests bests) {
         super(context);
@@ -86,6 +89,8 @@ final class RowRunnerGame extends GameView {
         strokeJump = false;
         strokeJumps = 0;
         lastJumpAt = -10;
+        lastStrokeAt = -1;
+        strokeInterval = 60.0 / Math.max(14, profile.typicalRate());
         things.clear();
         buildLevel();
     }
@@ -153,6 +158,13 @@ final class RowRunnerGame extends GameView {
     }
 
     private void jumpOnStroke() {
+        if (lastStrokeAt >= 0) {
+            double gap = sessionSeconds - lastStrokeAt;
+            if (gap > 0.9 && gap < 6) {
+                strokeInterval += (gap - strokeInterval) * 0.3;
+            }
+        }
+        lastStrokeAt = sessionSeconds;
         if (!started || over || airborne() || sessionSeconds - lastJumpAt < 0.8) {
             return;
         }
@@ -436,6 +448,25 @@ final class RowRunnerGame extends GameView {
                     break;
                 }
                 default:
+            }
+        }
+
+        // Where the next stroke will launch you, and where that jump lands: a dotted arc ahead, from
+        // your rhythm and speed. Pull when the arc spans the pit or the crab, and you clear it.
+        if (started && !over && lastStrokeAt >= 0 && speed > 0.8f) {
+            double untilNext = Math.max(0, strokeInterval - (sessionSeconds - lastStrokeAt));
+            float takeoff = youX + (float) (speed * untilNext) * ppm;
+            float span = Math.max(2.5f, speed * JUMP_FACTOR) * ppm;
+            if (takeoff < w - dp(20f)) {
+                paint.setColor(0x88FFFFFF);
+                for (int k = 0; k <= 10; k++) {
+                    float f = k / 10f;
+                    float ax = takeoff + span * f;
+                    float ay = groundY - 4f * f * (1f - f) * dp(60f) - dp(24f);
+                    c.drawCircle(ax, ay, dp(2.2f), paint);
+                }
+                paint.setColor(0xCC35D0BA);
+                c.drawRect(takeoff - dp(1.5f), groundY - dp(10f), takeoff + dp(1.5f), groundY, paint);
             }
         }
 
