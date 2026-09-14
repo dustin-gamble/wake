@@ -136,12 +136,21 @@
 
       <div class="panel">
         <h2>Install</h2>
+        <h3>On an Ergatta rower</h3>
         <ol class="steps">
-          <li>Open this page <strong>in the browser on your rowing tablet</strong> and tap Download APK.</li>
-          <li>Allow the install when Android asks. Nothing is replaced and nothing needs root.</li>
-          <li>Plug the S4 monitor into the tablet's USB port and open WAKE. Grant USB access.</li>
-          <li>It connects on its own and the gauges come alive. Take a stroke.</li>
+          <li><strong>Restart the rower's screen.</strong></li>
+          <li>On the log-in screen, <strong>tap the top-left corner of the screen 8 times</strong>.</li>
+          <li>Open the <strong>browser</strong> and go to <code>dustin-gamble.github.io/wake</code>.</li>
+          <li>Tap <strong>Download APK</strong>, and allow the install when Android asks. Nothing is
+            replaced and nothing needs root.</li>
+          <li>Open WAKE. The monitor is already connected, so it finds the rower by itself - tap OK
+            if Android asks to allow access to it. Take a stroke and the gauges come alive.</li>
         </ol>
+        <p class="note" style="margin:0 0 14px">Ergatta itself is left exactly as it was. To go back,
+          exit WAKE; if Ergatta does not read your strokes afterwards, restart the screen.</p>
+        <h3>On another Android tablet</h3>
+        <p>Open this page in the tablet's browser, download and install, plug in the S4 monitor's USB
+          cable, and open WAKE.</p>
         <p class="note" style="margin-bottom:0">The laptop dashboard is optional — clone the repo
           and run <code>node server/server.js</code> for live capture, an event stream and protocol
           decoding. The app finds it on your Wi-Fi by itself.</p>

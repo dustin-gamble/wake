@@ -11,6 +11,16 @@ from the Android tablet on the machine, and turns it into analog instruments tha
 water, a shelf of games driven by your real power and cadence, and a flight down the California
 coast on a 3D globe.
 
+### Install on an Ergatta rower
+
+1. Restart the rower's screen.
+2. On the log-in screen, tap the top-left corner of the screen **8 times**.
+3. Open the browser and go to **dustin-gamble.github.io/wake**.
+4. Tap **Download APK** and allow the install.
+5. Open WAKE. The monitor is already connected, so it finds the rower by itself.
+
+If Ergatta does not read your strokes after you exit WAKE, restart the screen.
+
 Built against a WaterRower in an **Ergatta** fit-out, but it talks to the S4, not to Ergatta:
 no root, no system changes, and Ergatta itself is untouched and still the fallback.
 
