@@ -981,8 +981,10 @@ and rate bands come from the profile. CANYON is one card with FLY/DRIVE. Journey
 lifetime total still counts. `IntervalGame`, `SprintLadderGame`, `TheRunGame`, `JourneyGame` deleted.
 
 **Improvements (3.15.0 - 3.16.0).** Head Race panels (gap graph, power per stroke, ribbon, last
-drive); Row Runner jumps on every stroke (from `status.meter.lastStroke` changing - the drive start),
-with crabs and coin arcs; Wave Rider sweet-spot bar and handle-lean carving; Collector lanes from a
+drive); Row Runner (rebuilt 3.19.1 on the rower's direction) auto-runs and auto-jumps before gaps, crate
+stacks and enemies; rowing only sets speed, and jump length and height follow speed, so easing off
+lands you in a gap or on a crab; crabs, slimes and spiky balls walk at you, stomp them at speed;
+coin arcs over every jump; Wave Rider sweet-spot bar and handle-lean carving; Collector lanes from a
 1.2 s averaged speed with hysteresis; Mega Pull record line and NEW BEST; Skyline block factory
 (strong strokes drop 2-3 floor blocks, windows lit by session energy, TODAY tower); gauges gained a
 STROKE SHAPE panel. Coast Flight (fly.js): hovers until 3 strokes, continuous flapping, weave with

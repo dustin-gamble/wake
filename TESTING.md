@@ -1,4 +1,4 @@
-# Testing WAKE 3.19.0 on the rower
+# Testing WAKE 3.19.1 on the rower
 
 The tablet is still on 3.11.1. Everything below was built and checked on the laptop but hasn't run
 on the tablet yet, so screen layouts are the most likely thing to be off.
@@ -8,7 +8,7 @@ lands on the laptop, where I can see it.
 
 ## 1. Install and launch (2 min)
 
-- [ ] Install from the dashboard: **Install APK**, then **3.19.0**.
+- [ ] Install from the dashboard: **Install APK**, then **3.19.1**.
 - [ ] A **Help tour** appears on first launch. Page through it.
 - [ ] **Home:**
   - [ ] 20 cards and a progress row (week ring, level, streak, CONTINUE, SESSION ART, HELP).
@@ -62,8 +62,9 @@ Tap **CALIBRATE** and follow the steps; see [CALIBRATION.md](CALIBRATION.md).
 - [ ] **Daily Row:** does today's challenge complete and tick the calendar?
 - [ ] **Night Grid:** do lights come on as you hold power?
 - [ ] **Row Runner:**
-  - [ ] Does every stroke jump?
-  - [ ] Does the dotted arc help with timing?
+  - [ ] Does the runner jump over gaps, crates and enemies by itself?
+  - [ ] Does rowing faster make it run faster and jump further?
+  - [ ] Are there enough enemies and coins?
 - [ ] **Canyon:** in FLY mode, are the rings reachable now? Tap MODE to try DRIVE.
 - [ ] **Head Race:** are the four panels filled and moving?
 - [ ] **Skyline:** do strong strokes drop 2–3 floor blocks?
