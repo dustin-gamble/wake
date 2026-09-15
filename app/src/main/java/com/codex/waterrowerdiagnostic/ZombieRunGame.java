@@ -70,6 +70,18 @@ final class ZombieRunGame extends GameView {
     private boolean wasSafe;
     private boolean wasGrabbed;
 
+    /* Scenery that moves on its own, so the night is never still. */
+    private final float[] batX = new float[5];
+    private final float[] batY = new float[5];
+    private final float[] batSpeed = new float[5];
+    private double lightningAt = -10;
+    private double nextLightning;
+    private int bestMilestone;
+    private String popup = "";
+    private double popupUntil;
+    private final Fx.Particles smoke = new Fx.Particles();
+    private float smokeAccum;
+
     ZombieRunGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
@@ -99,6 +111,13 @@ final class ZombieRunGame extends GameView {
         wasSurging = false;
         wasSafe = false;
         wasGrabbed = false;
+        bestMilestone = 0;
+        java.util.Random r = new java.util.Random();
+        for (int i = 0; i < batX.length; i++) {
+            batX[i] = r.nextFloat();
+            batY[i] = 0.12f + r.nextFloat() * 0.3f;
+            batSpeed[i] = 0.03f + r.nextFloat() * 0.05f;
+        }
     }
 
     /** Picks a line for the moment and who says it. Surges, safe houses and grabs speak at once. */
@@ -251,7 +270,21 @@ final class ZombieRunGame extends GameView {
                 grabbedSeconds = 0;
             }
         }
+        boolean surgeStarting = surging() && phase == Phase.RUNNING && !wasSurging;
         chatter();
+        if (surgeStarting || (surging() && sessionSeconds > nextLightning)) {
+            lightningAt = sessionSeconds;
+            nextLightning = sessionSeconds + 2.5 + Math.random() * 3;
+            shake.kick(dp(6f));
+        }
+        if (phase == Phase.RUNNING) {
+            int milestone = (int) (gap / 50) * 50;
+            if (milestone >= 50 && milestone > bestMilestone) {
+                bestMilestone = milestone;
+                popup = "+" + milestone + " m CLEAR!";
+                popupUntil = sessionSeconds + 2.0;
+            }
+        }
         float danger = (float) Math.max(0, 1 - gap / 30.0);
         if (danger > 0.3f) {
             shake.kick(danger * dp(5f));
@@ -279,6 +312,23 @@ final class ZombieRunGame extends GameView {
         float ppm = w / 90f;   // 90 m across the screen
         double scroll = sessionMeters;
 
+        // Bats flapping across the sky.
+        for (int i = 0; i < batX.length; i++) {
+            batX[i] -= batSpeed[i] * dt;
+            if (batX[i] < -0.05f) {
+                batX[i] = 1.05f;
+                batY[i] = 0.10f + (float) Math.random() * 0.3f;
+            }
+            float bx = batX[i] * w;
+            float by = batY[i] * h + (float) Math.sin(sessionSeconds * 2 + i) * dp(10f);
+            float flap = (float) Math.sin(sessionSeconds * 14 + i * 2) * dp(7f);
+            paint.setColor(0xFF05070C);
+            paint.setStrokeWidth(dp(2.5f));
+            c.drawLine(bx, by, bx - dp(11f), by - flap, paint);
+            c.drawLine(bx, by, bx + dp(11f), by - flap, paint);
+            c.drawCircle(bx, by, dp(3f), paint);
+        }
+
         // Far hills, slow parallax.
         paint.setColor(0xFF141C2B);
         path.reset();
@@ -290,6 +340,35 @@ final class ZombieRunGame extends GameView {
         path.lineTo(w, groundY);
         path.close();
         c.drawPath(path, paint);
+
+        // Glowing eyes blinking in the dark between the hills.
+        for (int i = 0; i < 6; i++) {
+            float ex = (float) (((i * 311 + 90) - scroll * ppm * 0.25) % (w + dp(200f)));
+            if (ex < 0) {
+                ex += w + dp(200f);
+            }
+            boolean open = ((int) (sessionSeconds * 1.3 + i * 0.7)) % 4 != 0;
+            if (open) {
+                float ey = groundY - dp(28f) - (i % 3) * dp(12f);
+                paint.setColor(i % 2 == 0 ? 0xFFFFD23A : 0xFFFF4D4D);
+                c.drawCircle(ex, ey, dp(2.2f), paint);
+                c.drawCircle(ex + dp(8f), ey, dp(2.2f), paint);
+            }
+        }
+
+        // Tombstones in a graveyard strip, mid parallax.
+        float stoneGap = dp(110f);
+        float soff = (float) ((scroll * ppm * 0.3) % stoneGap);
+        for (float x = -soff; x < w + stoneGap; x += stoneGap) {
+            int k = (int) Math.floor((x + scroll * ppm * 0.3) / stoneGap);
+            float sh = dp(16f) + ((k * 7) % 3) * dp(6f);
+            float sx = x + ((k * 13) % 5) * dp(8f);
+            paint.setColor(0xFF2A3342);
+            c.drawRoundRect(sx - dp(7f), groundY - sh, sx + dp(7f), groundY, dp(6f), dp(6f), paint);
+            paint.setColor(0xFF394356);
+            c.drawRect(sx - dp(1.2f), groundY - sh + dp(4f), sx + dp(1.2f), groundY - sh + dp(11f), paint);
+            c.drawRect(sx - dp(4f), groundY - sh + dp(6f), sx + dp(4f), groundY - sh + dp(8.5f), paint);
+        }
 
         // Dead trees, mid parallax.
         paint.setColor(0xFF0E1420);
@@ -312,6 +391,16 @@ final class ZombieRunGame extends GameView {
             c.drawRect(x, groundY - dp(18f), x + dp(4f), groundY, paint);
         }
 
+        // Fog rolling low over the ground.
+        for (int i = 0; i < 5; i++) {
+            float fx = (float) (((i * 420) - scroll * ppm * 0.6 - sessionSeconds * dp(12f)) % (w + dp(500f)));
+            if (fx < -dp(250f)) {
+                fx += w + dp(500f);
+            }
+            paint.setColor(0x1ECBD5E6);
+            c.drawOval(fx - dp(220f), groundY - dp(26f), fx + dp(220f), groundY + dp(18f), paint);
+        }
+
         // Safe house ahead, if one is in view.
         float houseX = w * 0.62f + (float) (nextSafeHouse - runMeters()) * ppm;
         if (phase == Phase.RUNNING && houseX < w + dp(60f)) {
@@ -321,7 +410,22 @@ final class ZombieRunGame extends GameView {
             c.drawRect(houseX - dp(6f), groundY - dp(24f), houseX + dp(6f), groundY, paint);
             label(c, "SAFE HOUSE", houseX, groundY - dp(54f), 8f, safe() ? ACCENT : FAINT,
                     Paint.Align.CENTER);
+            // Warm windows and chimney smoke: somewhere worth reaching.
+            Fx.glow(c, houseX, groundY - dp(30f), dp(60f), safe() ? 0x6635D0BA : 0x44FFB45A);
+            paint.setColor(0xFFFFD27A);
+            c.drawRect(houseX - dp(16f), groundY - dp(40f), houseX - dp(9f), groundY - dp(33f), paint);
+            c.drawRect(houseX + dp(9f), groundY - dp(40f), houseX + dp(16f), groundY - dp(33f), paint);
+            paint.setColor(0xFF3B4A5E);
+            c.drawRect(houseX + dp(10f), groundY - dp(60f), houseX + dp(16f), groundY - dp(46f), paint);
+            smokeAccum += dt * 4f;
+            while (smokeAccum >= 1f) {
+                smokeAccum -= 1f;
+                smoke.spawn(houseX + dp(13f), groundY - dp(62f), dp(6f), -dp(20f) - (float) Math.random() * dp(10f),
+                        1.6f, dp(5f), 0x557A8494, false);
+            }
         }
+        smoke.step(dt, -dp(4f));
+        smoke.draw(c);
 
         // You, running, with a glow and dust off your heels.
         float youX = w * 0.62f;
@@ -359,6 +463,28 @@ final class ZombieRunGame extends GameView {
         c.restore();
         Fx.speedLines(c, paint, w, h, speed, sessionSeconds, dp(1f));
         Fx.vignette(c, w, h, 0.35f + danger * 0.65f, danger > 0.2f ? 0x7A0A0A : 0x000000);
+        double sinceFlash = sessionSeconds - lightningAt;
+        if (sinceFlash >= 0 && sinceFlash < 0.35) {
+            paint.setColor(0xFFFFFFFF);
+            paint.setAlpha((int) (150 * (1 - sinceFlash / 0.35)));
+            c.drawRect(0, 0, w, h, paint);
+            paint.setAlpha(255);
+            paint.setColor(0xFFEAF2FF);
+            paint.setStrokeWidth(dp(3f));
+            float lx = w * (0.3f + (float) ((lightningAt * 37) % 1.0) * 0.5f);
+            float ly = 0;
+            for (int k = 0; k < 6; k++) {
+                float nx = lx + (float) Math.sin(lightningAt * 50 + k * 3) * dp(26f);
+                float ny = ly + h * 0.1f;
+                c.drawLine(lx, ly, nx, ny, paint);
+                lx = nx;
+                ly = ny;
+            }
+        }
+        if (sessionSeconds < popupUntil) {
+            float rise = (float) (2.0 - (popupUntil - sessionSeconds)) * dp(30f);
+            bold(c, popup, w * 0.62f, h * 0.45f - rise, 26f, ACCENT, Paint.Align.CENTER);
+        }
 
         // HUD.
         String big;

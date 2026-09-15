@@ -40,6 +40,13 @@ final class WaveRiderGame extends GameView {
     private double nextBarrelAt;
     private double endedAt;
     private float sprayAccum;
+    /* Life around the wave. */
+    private final float[] gullX = {0.2f, 0.55f, 0.8f};
+    private double dolphinAt = 8;
+    private boolean wasPocket;
+    private String popup = "";
+    private double popupUntil;
+    private int lastScoreMark;
 
     WaveRiderGame(Context context, PersonalBests bests) {
         super(context);
@@ -57,6 +64,8 @@ final class WaveRiderGame extends GameView {
         barrels = 0;
         barrelUntil = 0;
         nextBarrelAt = 18;
+        lastScoreMark = 0;
+        wasPocket = false;
     }
 
     @Override
@@ -173,11 +182,47 @@ final class WaveRiderGame extends GameView {
         paint.setColor(0xFFFFE0A8);
         c.drawCircle(w * 0.22f, horizon - dp(6f), dp(24f), paint);
 
+        // Seagulls gliding over, wings flexing.
+        paint.setColor(0xFF2A2F3A);
+        paint.setStrokeWidth(dp(2.2f));
+        for (int i = 0; i < gullX.length; i++) {
+            gullX[i] += dt * (0.018f + i * 0.006f);
+            if (gullX[i] > 1.08f) {
+                gullX[i] = -0.08f;
+            }
+            float gx = gullX[i] * w;
+            float gy = horizon * (0.35f + i * 0.17f) + (float) Math.sin(sessionSeconds + i) * dp(8f);
+            float flex = (float) Math.sin(sessionSeconds * 5 + i) * dp(4f);
+            c.drawLine(gx - dp(12f), gy - flex, gx, gy, paint);
+            c.drawLine(gx, gy, gx + dp(12f), gy - flex, paint);
+        }
+
         // Open ocean beyond the wave.
         paint.setShader(new LinearGradient(0, horizon, 0, h, 0xFF1E5C86, 0xFF0A2A44,
                 Shader.TileMode.CLAMP));
         c.drawRect(0, horizon, w, h, paint);
         paint.setShader(null);
+        // Sailboats on the horizon, and the sun glinting on the water.
+        for (int i = 0; i < 2; i++) {
+            float sx = (float) ((w * (0.35f + i * 0.3f) + sessionSeconds * dp(4f) * (i + 1)) % w);
+            paint.setColor(0xFFF2EAD8);
+            path.reset();
+            path.moveTo(sx, horizon - dp(18f));
+            path.lineTo(sx + dp(10f), horizon - dp(2f));
+            path.lineTo(sx, horizon - dp(2f));
+            path.close();
+            c.drawPath(path, paint);
+            paint.setColor(0xFF3A3F4A);
+            c.drawRect(sx - dp(8f), horizon - dp(2f), sx + dp(12f), horizon + dp(1f), paint);
+        }
+        paint.setColor(0xFFFFF1C8);
+        for (int i = 0; i < 26; i++) {
+            float gx = w * 0.22f + (float) Math.sin(i * 12.9898) * w * 0.18f;
+            float gy = horizon + dp(8f) + (i % 7) * dp(9f);
+            if (Math.sin(sessionSeconds * 3 + i * 1.7) > 0.4) {
+                c.drawRect(gx - dp(5f), gy, gx + dp(5f), gy + dp(1.6f), paint);
+            }
+        }
 
         // The wave face: a curve from the lip down-left into the trough.
         path.reset();
@@ -229,6 +274,38 @@ final class WaveRiderGame extends GameView {
         if (phase != Phase.WIPEOUT) {
             drawSurfer(c, surfX, surfY, inPocket());
         }
+        // A dolphin leaps in the foreground now and then.
+        double sinceDolphin = sessionSeconds - dolphinAt;
+        if (sinceDolphin > 0 && sinceDolphin < 1.4) {
+            float f = (float) (sinceDolphin / 1.4);
+            float dx = w * (0.15f + 0.3f * f);
+            float dy = h * 0.92f - (float) Math.sin(Math.PI * f) * h * 0.16f;
+            c.save();
+            c.rotate(-60 + 120 * f, dx, dy);
+            paint.setColor(0xFF6E8FA8);
+            c.drawOval(dx - dp(26f), dy - dp(8f), dx + dp(26f), dy + dp(8f), paint);
+            path.reset();
+            path.moveTo(dx - dp(2f), dy - dp(7f));
+            path.lineTo(dx + dp(8f), dy - dp(18f));
+            path.lineTo(dx + dp(10f), dy - dp(6f));
+            path.close();
+            c.drawPath(path, paint);
+            c.restore();
+            if (f < 0.08f || f > 0.92f) {
+                spray.burst(dx, h * 0.92f, 6, dp(90f), 0.5f, dp(2.5f), 0xCCEAF6FF, true);
+            }
+        } else if (sinceDolphin >= 1.4) {
+            dolphinAt = sessionSeconds + 12 + Math.random() * 14;
+        }
+        // Barrel light: rays through the curl.
+        if (inBarrel() && phase == Phase.RIDING) {
+            paint.setStrokeWidth(dp(14f));
+            for (int k = 0; k < 5; k++) {
+                paint.setColor(0x14FFFFFF);
+                float ox = lipX - w * 0.05f * k;
+                c.drawLine(ox, crestY, ox - w * 0.25f, h, paint);
+            }
+        }
         c.restore();
 
         // Barrel framing: the lip arcs right over the top of the view.
@@ -242,6 +319,25 @@ final class WaveRiderGame extends GameView {
             path.close();
             c.drawPath(path, paint);
             Fx.vignette(c, w, h, 0.55f, 0x08243A);
+        }
+        // Pops: entering the pocket, and every 25 points.
+        if (phase == Phase.RIDING) {
+            if (inPocket() && !wasPocket) {
+                popup = inBarrel() ? "3x IN THE BARREL!" : "2x POCKET!";
+                popupUntil = sessionSeconds + 1.4;
+                spray.burst(surfX, surfY, 26, dp(160f), 0.7f, dp(3f), 0xDDEAF6FF, true);
+            }
+            int mark = (int) (score / 25);
+            if (mark > lastScoreMark) {
+                lastScoreMark = mark;
+                popup = "+" + (mark * 25) + " POINTS";
+                popupUntil = sessionSeconds + 1.4;
+            }
+        }
+        wasPocket = inPocket();
+        if (sessionSeconds < popupUntil) {
+            float rise = (float) (1.4 - (popupUntil - sessionSeconds)) * dp(40f);
+            bold(c, popup, w * 0.45f, h * 0.42f - rise, 26f, 0xFFF5C518, Paint.Align.CENTER);
         }
         if (!inPocket() && phase == Phase.RIDING) {
             Fx.vignette(c, w, h, 0.25f + Math.abs(position) * 0.5f,

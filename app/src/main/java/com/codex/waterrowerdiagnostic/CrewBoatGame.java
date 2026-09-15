@@ -27,6 +27,7 @@ final class CrewBoatGame extends GameView {
     private final PersonalBests bests;
     private final RiverRenderer river;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.Path path = new android.graphics.Path();
     private final Fx.Particles fx = new Fx.Particles();
     private final float[] seatLag = new float[SEATS];
 
@@ -43,6 +44,13 @@ final class CrewBoatGame extends GameView {
     private double crewInterval;
     private double lastStrokeAt = -1;
     private PulseMeter.Stroke lastSeen;
+    private double scenery;
+    private String coxCall = "";
+    private double coxUntil;
+    private int strokesSinceCall;
+    private static final String[] CALLS_GOOD = {"IN TIME!", "SWING IT!", "BEAUTIFUL!", "HOLD THAT RHYTHM!", "SHE'S FLYING!"};
+    private static final String[] CALLS_BAD = {"TOGETHER!", "WATCH STROKE!", "FIND THE RHYTHM!", "CATCH TOGETHER!"};
+    private static final String[] CALLS_PUSH = {"LEGS, LEGS, LEGS!", "PUSH NOW!", "TEN BIG ONES!", "SQUEEZE!"};
 
     CrewBoatGame(Context context, PersonalBests bests) {
         super(context);
@@ -105,6 +113,14 @@ final class CrewBoatGame extends GameView {
             }
         }
         lastStrokeAt = now;
+        if (phase == Phase.RACING && ++strokesSinceCall >= 4) {
+            strokesSinceCall = 0;
+            String[] calls = sync > 0.8f ? CALLS_GOOD : sync < 0.5f ? CALLS_BAD : CALLS_PUSH;
+            coxCall = calls[(int) (Math.random() * calls.length)];
+            coxUntil = sessionSeconds + 2.2;
+        }
+        // Every catch throws water, more of it when the crew is ragged.
+        fx.burst(getWidth() * 0.5f, getHeight() * 0.70f, sync > 0.8f ? 10 : 22, dp(120f), 0.5f, dp(2.5f), 0xCCBFE3FF, true);
     }
 
     @Override
@@ -149,8 +165,12 @@ final class CrewBoatGame extends GameView {
         float waterTop = h * 0.30f;
         float waterBottom = h * 0.88f;
         float ppm = w / 70f;
-        river.advance(phase == Phase.RACING ? speed * factor : 0f, dt, ppm);
+        float moving = phase == Phase.RACING ? speed * factor : 0f;
+        scenery += moving * dt;
+        drawBank(c, w, h, waterTop, ppm);
+        river.advance(moving, dt, ppm);
         river.drawWater(c, waterTop, waterBottom, w);
+        drawBuoys(c, w, waterTop, waterBottom, ppm);
 
         // The rival crew in the far lane, placed by the gap.
         double gap = yourMeters - rivalMeters;
@@ -158,10 +178,40 @@ final class CrewBoatGame extends GameView {
         river.drawBoat(c, rivalX, waterTop + (waterBottom - waterTop) * 0.2f, dp(180f), BLUE,
                 phase == Phase.RACING ? (float) profile.typicalSpeed() : 0f, true);
 
-        drawEight(c, w, waterTop + (waterBottom - waterTop) * 0.62f, sinceStroke);
+        float eightY = waterTop + (waterBottom - waterTop) * 0.62f;
+        if (swing >= 6) {
+            // Swing: a glowing wake and streaks - the boat running away underneath the crew.
+            paint.setStrokeWidth(dp(3f));
+            for (int k = 0; k < 7; k++) {
+                float sx = (float) ((w * 0.8f - (sessionSeconds * dp(420f) + k * dp(160f)) % (w * 1.2f)));
+                paint.setColor(0x6635D0BA);
+                c.drawLine(sx, eightY + dp(24f) + k * dp(6f), sx - dp(90f), eightY + dp(24f) + k * dp(6f), paint);
+            }
+            Fx.glow(c, w * 0.5f, eightY, w * 0.35f, 0x2235D0BA);
+        }
+        drawEight(c, w, eightY, sinceStroke);
         fx.draw(c);
         if (swing >= 6) {
             Fx.vignette(c, w, h, 0.25f, 0x1A6A5A);
+            if (((int) (sessionSeconds * 3)) % 2 == 0) {
+                bold(c, "SWING!", w * 0.5f, eightY - dp(90f), 30f, ACCENT, Paint.Align.CENTER);
+            }
+        }
+        if (sessionSeconds < coxUntil) {
+            drawCoxCall(c, w * 0.5f + w * 0.62f * 0.46f, eightY - dp(24f), w);
+        }
+        double toGo = RACE_METERS - yourMeters;
+        if (phase == Phase.RACING && toGo < 150) {
+            float fx0 = w * 0.5f + (float) toGo * ppm;
+            if (fx0 < w + dp(40f)) {
+                paint.setColor(0xFFF2F2F2);
+                c.drawRect(fx0 - dp(3f), waterTop - dp(80f), fx0 + dp(3f), waterBottom, paint);
+                for (int k = 0; k < 8; k++) {
+                    paint.setColor(k % 2 == 0 ? 0xFFF0655D : 0xFFFFFFFF);
+                    c.drawRect(fx0 + dp(3f), waterTop - dp(80f) + k * dp(8f), fx0 + dp(60f), waterTop - dp(72f) + k * dp(8f), paint);
+                }
+                bold(c, "FINISH", fx0 + dp(32f), waterTop - dp(88f), 12f, TEXT, Paint.Align.CENTER);
+            }
         }
 
         // HUD: sync meter, swing, gap.
@@ -184,6 +234,92 @@ final class CrewBoatGame extends GameView {
         }
         bold(c, status, cx, h - dp(14f), 12f, phase == Phase.DONE && won ? ACCENT : TEXT, Paint.Align.CENTER);
         label(c, "EVEN STROKES = SYNC  ·  RATE " + Math.round(60 / crewInterval), dp(16f), dp(30f), 10f, FAINT, Paint.Align.LEFT);
+    }
+
+    /** Sky, a far bank of trees and a crowd along it with flags, scrolling with the boat. */
+    private void drawBank(Canvas c, float w, float h, float waterTop, float ppm) {
+        paint.setShader(new android.graphics.LinearGradient(0, 0, 0, waterTop, 0xFF3D78B8, 0xFFBFDDF2,
+                android.graphics.Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, waterTop, paint);
+        paint.setShader(null);
+        // Clouds.
+        paint.setColor(0xCCFFFFFF);
+        for (int i = 0; i < 4; i++) {
+            float cx = (float) (((i * 520 + 100) - scenery * ppm * 0.08) % (w + dp(260f)));
+            if (cx < -dp(130f)) {
+                cx += w + dp(260f);
+            }
+            float cy = waterTop * (0.25f + (i % 2) * 0.18f);
+            c.drawOval(cx - dp(60f), cy - dp(14f), cx + dp(60f), cy + dp(14f), paint);
+            c.drawOval(cx - dp(30f), cy - dp(26f), cx + dp(34f), cy + dp(6f), paint);
+        }
+        // Trees on the far bank.
+        float bankY = waterTop - dp(4f);
+        paint.setColor(0xFF3F7A45);
+        c.drawRect(0, bankY - dp(10f), w, waterTop, paint);
+        float treeGap = dp(70f);
+        float off = (float) ((scenery * ppm * 0.4) % treeGap);
+        for (float x = -off; x < w + treeGap; x += treeGap) {
+            int k = (int) Math.floor((x + scenery * ppm * 0.4) / treeGap);
+            float r = dp(22f) + ((k * 7) % 3) * dp(6f);
+            paint.setColor(((k & 1) == 0) ? 0xFF2F6B3A : 0xFF3A7D44);
+            c.drawCircle(x, bankY - dp(18f) - r * 0.4f, r, paint);
+        }
+        // The crowd along the bank: heads bobbing, flags waving.
+        float fanGap = dp(18f);
+        float foff = (float) ((scenery * ppm * 0.9) % fanGap);
+        int[] shirts = {0xFFF0655D, 0xFFF0B132, 0xFF6F8CFF, 0xFFFFFFFF, 0xFF35D0BA};
+        for (float x = -foff; x < w + fanGap; x += fanGap) {
+            int k = (int) Math.floor((x + scenery * ppm * 0.9) / fanGap);
+            float cheer = sync > 0.8f ? (float) Math.abs(Math.sin(sessionSeconds * 8 + k)) * dp(6f) : 0f;
+            paint.setColor(shirts[Math.abs(k) % shirts.length]);
+            c.drawRect(x - dp(5f), bankY - dp(20f) - cheer, x + dp(5f), bankY - dp(6f), paint);
+            paint.setColor(0xFFF1C27D);
+            c.drawCircle(x, bankY - dp(25f) - cheer, dp(4f), paint);
+            if (k % 5 == 0) {
+                paint.setColor(0xFF9AA5B1);
+                c.drawRect(x + dp(4f), bankY - dp(44f) - cheer, x + dp(5.5f), bankY - dp(20f) - cheer, paint);
+                float wave = (float) Math.sin(sessionSeconds * 6 + k) * dp(4f);
+                paint.setColor(shirts[(Math.abs(k) + 2) % shirts.length]);
+                path.reset();
+                path.moveTo(x + dp(5.5f), bankY - dp(44f) - cheer);
+                path.lineTo(x + dp(22f), bankY - dp(40f) - cheer + wave);
+                path.lineTo(x + dp(5.5f), bankY - dp(34f) - cheer);
+                path.close();
+                c.drawPath(path, paint);
+            }
+        }
+    }
+
+    /** Lane buoys every 25 m, red and white, bobbing past. */
+    private void drawBuoys(Canvas c, float w, float waterTop, float waterBottom, float ppm) {
+        float gapPx = 25f * ppm;
+        float off = (float) ((yourMeters * ppm) % gapPx);
+        for (int lane = 0; lane < 2; lane++) {
+            float y = waterTop + (waterBottom - waterTop) * (lane == 0 ? 0.40f : 0.88f);
+            for (float x = -off; x < w + gapPx; x += gapPx) {
+                int k = (int) Math.floor((x + yourMeters * ppm) / gapPx);
+                float bob = (float) Math.sin(sessionSeconds * 3 + k) * dp(2f);
+                paint.setColor((k & 1) == 0 ? 0xFFF0655D : 0xFFFFFFFF);
+                c.drawCircle(x, y + bob, dp(5f), paint);
+            }
+        }
+    }
+
+    private void drawCoxCall(Canvas c, float x, float y, float w) {
+        textPaint.setTextSize(dp(16f));
+        float tw = textPaint.measureText(coxCall);
+        float bx = Math.min(w - tw - dp(40f), x - tw / 2f - dp(12f));
+        float by = y - dp(36f);
+        paint.setColor(0xF2FFFFFF);
+        c.drawRoundRect(bx, by, bx + tw + dp(24f), by + dp(32f), dp(12f), dp(12f), paint);
+        path.reset();
+        path.moveTo(bx + tw * 0.7f, by + dp(31f));
+        path.lineTo(bx + tw * 0.7f + dp(14f), by + dp(31f));
+        path.lineTo(x, y);
+        path.close();
+        c.drawPath(path, paint);
+        bold(c, coxCall, bx + dp(12f) + tw / 2f, by + dp(22f), 16f, 0xFF3A2A06, Paint.Align.CENTER);
     }
 
     /** The eight, side on: rowers lean and slide, oars sweep and dip - in time or not. */
