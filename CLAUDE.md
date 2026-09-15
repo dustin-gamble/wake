@@ -222,6 +222,13 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
 - **Screenshot:** `adb exec-out screencap -p > shot.png` after ~30-50 s of demo rowing (the surge
   runs 40-52 s). This captures everything, Coast Flight's WebGL included.
 - The emulator shows Android's navigation bar and has no kiosk; the tablet does not.
+- **Frame timing on the emulator is only good for ranking.** `adb shell dumpsys gfxinfo
+  com.codex.waterrowerdiagnostic.debug reset`, row 20 s, then `dumpsys gfxinfo` for percentiles. The
+  emulator draws in software (swiftshader), so nearly every full-screen game reads ~97% "janky" at a
+  p50 of 15-19 ms - including GAUGES, which was untouched. Compare a game against GAUGES, not against
+  16 ms. 3.19.5 measured: every game held 60 fps (1,200 frames in 20 s); the scenery-heavy ones
+  (Mega Pull, Row Runner, Skyline 15 ms, Rocket 16 ms) were among the cheapest. Real smoothness can
+  only be judged on the tablet.
 - **Reading live state inside Coast Flight's WebView.** Screenshots cannot show timing (a 2.2 Hz
   wingbeat aliases against a ~0.7 s screencap). The debug build's WebView exposes Chrome DevTools:
   `adb shell pidof com.codex.waterrowerdiagnostic.debug`, find `webview_devtools_remote_<pid>` in
