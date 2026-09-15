@@ -268,6 +268,7 @@ public class MainActivity extends Activity
     private final java.util.concurrent.atomic.AtomicInteger reopenCount =
             new java.util.concurrent.atomic.AtomicInteger();
     private final S4Protocol s4Protocol = new S4Protocol(this::handleS4Packet);
+    private DemoRower demoRower;
     /** The rower's learned range, shared by every game. See RowerProfile. */
     private final RowerProfile profile = new RowerProfile();
     /** Levels, the weekly goal and the streak. */
@@ -374,6 +375,7 @@ public class MainActivity extends Activity
                 pendingIntentFlags());
 
         setContentView(buildUi());
+        applyAutomation(getIntent());
         if (personalBests.getString("tour.done") == null) {
             personalBests.putString("tour.done", "1");
             screenHost.post(() -> showHelpPage(0));
@@ -399,6 +401,7 @@ public class MainActivity extends Activity
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        applyAutomation(intent);
         String incomingServerUrl = normalizedServerUrl(serverUrlFromIntent(intent));
         if (!TextUtils.isEmpty(incomingServerUrl)) {
             serverUrl = incomingServerUrl;
@@ -454,6 +457,9 @@ public class MainActivity extends Activity
     @Override
     protected void onDestroy() {
         uiTicker.removeCallbacksAndMessages(null);
+        if (demoRower != null) {
+            demoRower.stop();
+        }
         closeCurrentConnection();
         stopUploader();
         unregisterReceiver(usbReceiver);
@@ -535,6 +541,42 @@ public class MainActivity extends Activity
             }
             if (lastSessionCard != null) {
                 lastSessionCard.setText(lastSessionText());
+            }
+        }
+    }
+
+    /* ---------- automated testing (local builds only) ---------- */
+
+    /**
+     * Lets an emulator row a game with nobody on the machine, for screenshots:
+     * {@code adb shell am start -S -n <pkg>/com.codex.waterrowerdiagnostic.MainActivity
+     * --ez demo true --es game "ZOMBIE RUN"}. {@code demo} starts {@link DemoRower} feeding the
+     * protocol the bytes a monitor would send; {@code game} taps the home card with that title.
+     * Inside {@code BuildConfig.SCREENSHOT_UPLOAD}, so the public build has neither.
+     */
+    private void applyAutomation(Intent intent) {
+        if (BuildConfig.SCREENSHOT_UPLOAD && intent != null) {
+            if (intent.getBooleanExtra("demo", false) && demoRower == null) {
+                personalBests.putString("tour.done", "1");
+                demoRower = new DemoRower(intent.getIntExtra("demoWatts", 130));
+                // After onCreate's refreshDevices, which closes the connection and its heartbeat.
+                screenHost.postDelayed(() -> {
+                    log("Demo rower started - simulated monitor, no USB");
+                    demoRower.start(s4Protocol::accept);
+                    startStatusHeartbeat();
+                }, 1500);
+            }
+            String game = intent.getStringExtra("game");
+            if (game != null) {
+                screenHost.postDelayed(() -> {
+                    View.OnClickListener action = cardActions.get(game);
+                    if (action != null) {
+                        showHome();
+                        action.onClick(screenHost);
+                    } else {
+                        log("Automation: no card titled " + game);
+                    }
+                }, 2000);
             }
         }
     }

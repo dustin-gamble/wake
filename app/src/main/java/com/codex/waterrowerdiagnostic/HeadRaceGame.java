@@ -14,6 +14,10 @@ import android.view.MotionEvent;
  * gauges to help show my efforts"): a gap graph to each crew over the last two minutes, one power
  * bar per stroke against your own average, a distance-to-go ribbon with every crew on it, and the
  * shape of your last drive from the pulse meter.
+ *
+ * <p>3.19.4 makes the course a place: a bank with a crowd that roars when you take the lead, lane
+ * buoys, 250 m boards, a finish line that sails in over the last 80 m, a splash on every catch,
+ * "PASSED" callouts as the order changes, and confetti when you win.
  */
 final class HeadRaceGame extends GameView {
 
@@ -73,6 +77,15 @@ final class HeadRaceGame extends GameView {
     private int strokeHead;
     private PulseMeter.Stroke lastSeenStroke;
     private final Paint panel = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint boardText = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RiverScenery scenery;
+    private final Fx.Particles fx = new Fx.Particles();
+    private int lastAhead = -1;
+    private String callout = "";
+    private int calloutColor = ACCENT;
+    private double calloutUntil;
+    private double confettiUntil;
+    private float cheer;
     private final android.graphics.Path trace = new android.graphics.Path();
 
     private int raceMeters = 2000;
@@ -86,6 +99,9 @@ final class HeadRaceGame extends GameView {
         super(context);
         this.bests = bests;
         this.river = new RiverRenderer(getResources().getDisplayMetrics().density);
+        this.scenery = new RiverScenery(getResources().getDisplayMetrics().density);
+        boardText.setTextSize(dp(11f));
+        boardText.setFakeBoldText(true);
     }
 
     void setRaceMeters(int m) {
@@ -106,6 +122,9 @@ final class HeadRaceGame extends GameView {
         lastGapSecond = -1;
         strokeCount = 0;
         strokeHead = 0;
+        lastAhead = -1;
+        calloutUntil = 0;
+        confettiUntil = 0;
         // The field is set from your best; without one, a 2:15 pace boat's time.
         float reference = bests.has("time." + raceMeters)
                 ? bests.get("time." + raceMeters, 0f)
@@ -130,6 +149,16 @@ final class HeadRaceGame extends GameView {
             strokePower[strokeHead] = power;
             strokeHead = (strokeHead + 1) % STROKE_BARS;
             strokeCount = Math.min(STROKE_BARS, strokeCount + 1);
+            // The catch: a splash off each blade at your boat.
+            float bx = getWidth() * 0.40f;
+            float by = getHeight() * (0.26f + 0.48f * 0.875f);
+            for (int side = -1; side <= 1; side += 2) {
+                for (int k = 0; k < 7; k++) {
+                    fx.spawn(bx - dp(10f) + (float) Math.random() * dp(20f), by + side * dp(20f),
+                            (float) (Math.random() - 0.7) * dp(60f), -dp(40f) - (float) Math.random() * dp(70f),
+                            0.6f, dp(2.4f), 0xDDDDF2FF, true);
+                }
+            }
         }
         lastSeenStroke = stroke;
     }
@@ -170,6 +199,10 @@ final class HeadRaceGame extends GameView {
                 }
             }
             bests.recordLowest("time." + raceMeters, (float) finishTime);
+            confettiUntil = sessionSeconds + (placing == 1 ? 4.0 : 1.5);
+            callout = placing == 1 ? "YOU WIN!" : ordinal(placing) + " PLACE";
+            calloutColor = placing == 1 ? 0xFFF5C518 : WARN;
+            calloutUntil = sessionSeconds + 3.0;
         }
 
         float waterTop = h * 0.26f;
@@ -189,9 +222,25 @@ final class HeadRaceGame extends GameView {
         float speed = boat.value();
         river.advance(phase == Phase.RACING ? speed : 0f, dt, ppm);
         river.drawWater(c, waterTop, waterBottom, w);
+        fx.step(dt, dp(260f));
 
         float laneH = (waterBottom - waterTop) / 4f;
         float yourX = w * 0.40f;
+        // The course, all of it scrolling with your metres.
+        scenery.drawBank(c, w, waterTop - dp(46f), waterTop, you, ppm, sessionSeconds, cheer);
+        for (int lane = 1; lane < 4; lane++) {
+            scenery.drawBuoys(c, w, waterTop + laneH * lane, you, ppm, sessionSeconds, 10f);
+        }
+        for (int mark = 250; mark < raceMeters; mark += 250) {
+            float mx = yourX + (float) (mark - you) * ppm;
+            if (mx > -dp(40f) && mx < w + dp(40f)) {
+                scenery.drawBoard(c, mx, waterTop, (raceMeters - mark) + " m", boardText);
+            }
+        }
+        float finishX = yourX + dp(62f) + (float) (raceMeters - you) * ppm;
+        if (finishX < w + dp(40f)) {
+            scenery.drawFinishLine(c, finishX, waterTop, waterBottom, sessionSeconds);
+        }
         // Live placing: count rivals ahead of you.
         int ahead = 0;
         for (int i = 0; i < 3; i++) {
@@ -211,11 +260,43 @@ final class HeadRaceGame extends GameView {
             label(c, r.name + String.format(java.util.Locale.US, "  %+.0f m", d - you), rivalX[i],
                     ly - dp(18f), 8.5f, d > you ? r.color : FAINT, Paint.Align.CENTER);
         }
+        if (phase == Phase.RACING) {
+            if (lastAhead >= 0 && ahead != lastAhead) {
+                boolean gained = ahead < lastAhead;
+                callout = gained ? (ahead == 0 ? "YOU TAKE THE LEAD!" : "PASSED ONE!")
+                        : "YOU'VE BEEN PASSED";
+                calloutColor = gained ? ACCENT : BAD;
+                calloutUntil = sessionSeconds + 1.8;
+                if (gained) {
+                    fx.burst(yourX, waterTop + laneH * 3.5f, 26, dp(160f), 0.9f, dp(3f), 0xFFF5C518, true);
+                }
+            }
+            lastAhead = ahead;
+        }
+        // The crowd follows the race: loud when you lead, quiet when you trail.
+        float cheerTarget = phase == Phase.DONE ? (placing == 1 ? 1f : 0.3f)
+                : phase == Phase.RACING ? (ahead == 0 ? 1f : ahead == 1 ? 0.5f : 0.15f) : 0f;
+        cheer += (cheerTarget - cheer) * Math.min(1f, 2f * dt);
         float yourY = waterTop + laneH * 3.5f;
+        if (phase != Phase.READY && ahead == 0) {
+            Fx.glow(c, yourX, yourY, dp(90f), 0x44F5C518);
+        }
         river.bowSpray(yourX + dp(42f), yourY, speed, dt);
         river.drawBoat(c, yourX, yourY, dp(124f), ACCENT, speed, false);
         river.drawSpray(c);
         label(c, "YOU", yourX, yourY + dp(28f), 9f, FAINT, Paint.Align.CENTER);
+        if (sessionSeconds < confettiUntil && Math.random() < 0.7) {
+            int[] colors = {0xFFF5C518, 0xFFF0655D, 0xFF35D0BA, 0xFF6F8CFF, 0xFFFFFFFF};
+            fx.spawn((float) Math.random() * w, waterTop - dp(40f), (float) (Math.random() - 0.5) * dp(80f),
+                    dp(20f), 2.2f, dp(3f), colors[(int) (Math.random() * colors.length)], true);
+        }
+        fx.draw(c);
+        if (sessionSeconds < calloutUntil) {
+            double left = calloutUntil - sessionSeconds;
+            float pop = (float) Math.min(1.0, (1.8 - Math.min(1.8, left)) * 8 + 0.6);
+            bold(c, callout, w / 2f, waterTop + (waterBottom - waterTop) * 0.5f, 30f * Math.min(1f, pop),
+                    calloutColor, Paint.Align.CENTER);
+        }
 
         String big;
         int col;
@@ -241,7 +322,7 @@ final class HeadRaceGame extends GameView {
         label(c, status == null ? "" : status.watts + " W", w - dp(16f), h * 0.15f + dp(16f), 9f,
                 FAINT, Paint.Align.RIGHT);
 
-        drawRibbon(c, w, waterTop - dp(14f), t, you);
+        drawRibbon(c, w, waterTop - dp(56f), t, you);
         drawStrokeShape(c, w * 0.62f, dp(6f), w * 0.80f, h * 0.15f - dp(28f));
         float panelTop = waterBottom + dp(10f);
         float panelBottom = h - dp(8f);
