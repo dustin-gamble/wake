@@ -223,6 +223,75 @@ final class StrokeCoachGame extends GameView {
         return Math.max(0f, Math.min(100f, v));
     }
 
+    // 3.19.5: a little rower in the empty corner, moving with your real drive and recovery.
+    private float slide;          // 0 = at the catch, 1 = at the finish
+    private double coachSlowRate;
+    private float coachDrive;
+
+    /**
+     * Seat, body, arms, handle and chain, animated from the pulse meter: the paddle accelerating is
+     * the drive (legs push, seat slides back fast), otherwise the recovery (hands away, seat creeps
+     * forward). Same drive test as Coast Flight's wings.
+     */
+    private void drawRower(Canvas c, float l, float t, float r, float b, float dt) {
+        double rate = status != null ? status.meter.paddleRate : 0;
+        coachSlowRate += (rate - coachSlowRate) * Math.min(1.0, dt / 0.6);
+        float target = rate > 40 && rate > coachSlowRate * 1.03 ? 1f : 0f;
+        coachDrive += (target - coachDrive) * Math.min(1f, dt * (target > coachDrive ? 14f : 5f));
+        if (coachDrive > 0.5f) {
+            slide = Math.min(1f, slide + dt / 0.8f);
+        } else {
+            slide = Math.max(0f, slide - dt / 1.6f);
+        }
+        float e = slide * slide * (3 - 2 * slide);
+        float u = dp(1f) * Math.min((r - l) / 260f, (b - t) / 90f) * 1f;
+        float railY = b - 14 * u;
+        float footX = l + 40 * u;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF0D1420);
+        c.drawRoundRect(l - dp(4f), t - dp(4f), r, b + dp(2f), dp(10f), dp(10f), paint);
+        // Rail and flywheel housing.
+        paint.setColor(0xFF2A3648);
+        c.drawRect(footX, railY, r - 16 * u, railY + 4 * u, paint);
+        c.drawRoundRect(l + 6 * u, railY - 26 * u, l + 30 * u, railY + 4 * u, 6 * u, 6 * u, paint);
+        paint.setColor(0xFF1B6F6A);
+        c.drawCircle(l + 18 * u, railY - 11 * u, 9 * u, paint);
+        // Seat slides from near the feet (catch) to far back (finish).
+        float seatX = footX + (50 + 110 * e) * u;
+        float seatY = railY - 6 * u;
+        paint.setColor(0xFF9AA5B1);
+        c.drawRoundRect(seatX - 12 * u, seatY - 4 * u, seatX + 12 * u, seatY + 2 * u, 2 * u, 2 * u, paint);
+        // Body leans forward at the catch, back at the finish.
+        double lean = Math.toRadians(-30 + 55 * e);
+        float shX = seatX + (float) Math.sin(lean) * 34 * u;
+        float shY = seatY - (float) Math.cos(lean) * 34 * u;
+        // Knees: high at the catch, flat at the finish.
+        float kneeX = (seatX + footX) / 2f;
+        float kneeY = seatY - (1 - e) * 26 * u - 4 * u;
+        float handleX = footX + (20 + 150 * e) * u - (1 - e) * 4 * u;
+        float handleY = shY + 16 * u;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(2 * u);
+        paint.setColor(0x88BFE3FF);
+        c.drawLine(l + 18 * u, railY - 11 * u, handleX, handleY, paint);          // chain
+        paint.setStrokeWidth(6 * u);
+        paint.setColor(0xFF2A2F3A);
+        c.drawLine(seatX, seatY - 2 * u, kneeX, kneeY, paint);                     // thigh
+        c.drawLine(kneeX, kneeY, footX + 4 * u, railY - 4 * u, paint);             // shin
+        paint.setColor(coachDrive > 0.5f ? ACCENT : 0xFF6F8CFF);
+        paint.setStrokeWidth(8 * u);
+        c.drawLine(seatX, seatY - 4 * u, shX, shY, paint);                          // torso
+        paint.setStrokeWidth(4 * u);
+        paint.setColor(0xFFF1C27D);
+        c.drawLine(shX, shY + 2 * u, handleX, handleY, paint);                      // arms
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        c.drawCircle(shX + (float) Math.sin(lean) * 10 * u, shY - 9 * u, 7 * u, paint);  // head
+        label(c, coachDrive > 0.5f ? "DRIVE" : "RECOVERY", r - dp(10f), t + dp(12f), 9f,
+                coachDrive > 0.5f ? ACCENT : BLUE, Paint.Align.RIGHT);
+    }
+
     @Override
     protected void render(Canvas c, float dt) {
         float w = getWidth();
@@ -286,6 +355,7 @@ final class StrokeCoachGame extends GameView {
                 lastScore >= 80 ? ACCENT : lastScore >= 60 ? WARN : BAD, Paint.Align.LEFT);
         label(c, "STROKE SCORE", rx, dp(110f), 10f, FAINT, Paint.Align.LEFT);
         wrap(c, tip, rx, dp(146f), w - rx - dp(20f), 15f, tipColor);
+        drawRower(c, dp(24f), h * 0.83f, w * 0.36f, h - dp(8f), dt);
 
         PulseMeter.Stroke s = status == null ? null : status.meter.lastStroke;
         float gy = h * 0.38f;

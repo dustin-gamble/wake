@@ -213,6 +213,8 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
   Verified compiled out of the public APK (`demoWatts` absent from its dex).
 - **Launch extras:** `adb shell am start -S -n com.codex.waterrowerdiagnostic.debug/com.codex.waterrowerdiagnostic.MainActivity --ez demo true --es game "'HEAD RACE'"`.
   `game` is a home card title; `demoWatts` sets the base power. The help tour is skipped.
+  Screens that are not home cards open with `--es screen RECORDS|HELP|CALIBRATE|CANYON_DRIVE|SESSION_ART`
+  (Session Art shows nothing until a 60+ stroke session has been saved by returning home).
 - **Emulator** lives outside `~/Documents` on purpose: SDK at `~/wake-android-sdk` (emulator,
   platform-tools, `system-images/android-30/google_apis/arm64-v8a`), AVD `wake` at 1920x1080,
   density 160, like the tablet. Boot headless:

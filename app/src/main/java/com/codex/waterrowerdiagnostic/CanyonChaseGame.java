@@ -34,6 +34,8 @@ final class CanyonChaseGame extends GameView {
     private final Path path = new Path();
     private final Fx.Particles fx = new Fx.Particles();
     private final Fx.Shake shake = new Fx.Shake();
+    // 3.19.5 scenery: mesas on the horizon, vultures, wall strata, boulders, dust behind the craft.
+    private double dustClock;
 
     private boolean started;
     private boolean over;
@@ -169,6 +171,7 @@ final class CanyonChaseGame extends GameView {
         c.drawRect(-w, -h, w * 2, horizon, paint);
         paint.setShader(null);
         Fx.glow(c, w * 0.5f, horizon, w * 0.38f, 0x55FFD9A0);
+        drawHorizonLife(c, w, horizon);
 
         // Canyon: walk segments from far to near so nearer geometry paints over farther.
         float camLat = lateral;
@@ -236,10 +239,42 @@ final class CanyonChaseGame extends GameView {
                 paint.setStrokeWidth(Math.max(1f, sNear * dp(7f)));
                 c.drawLine(mNear, yNear, mFar, yFar, paint);
             }
+            // Strata: a darker band part-way up each wall, so the walls read as rock.
+            paint.setColor(0x33000000);
+            float band = 0.45f;
+            path.reset();
+            path.moveTo(lNear, yNear - wallHNear * band);
+            path.lineTo(lFar, yFar - wallHFar * band);
+            path.lineTo(lFar, yFar - wallHFar * (band + 0.08f));
+            path.lineTo(lNear, yNear - wallHNear * (band + 0.08f));
+            path.close();
+            c.drawPath(path, paint);
+            path.reset();
+            path.moveTo(rNear, yNear - wallHNear * band);
+            path.lineTo(rFar, yFar - wallHFar * band);
+            path.lineTo(rFar, yFar - wallHFar * (band + 0.08f));
+            path.lineTo(rNear, yNear - wallHNear * (band + 0.08f));
+            path.close();
+            c.drawPath(path, paint);
+            // Boulders near the walls, placed by segment so they stay put as you pass.
+            int seg = (int) Math.floor((x + zNear) / SEG_LEN);
+            if ((seg * 2654435761L & 7) < 3 && zNear > 2f) {
+                boolean leftSide = ((seg * 40503) & 1) == 0;
+                float along = leftSide ? -CANYON_HALF + 3f : CANYON_HALF - 3f;
+                float bx = w / 2f + (cNear + along) * sNear * w * 0.05f;
+                float br = Math.max(dp(2f), sNear * dp(20f));
+                paint.setColor(blend(0xFF4A3322, 0xFF9A7050, depth));
+                c.drawOval(bx - br * 1.4f, yNear - br * 1.3f, bx + br * 1.4f, yNear + br * 0.2f, paint);
+                paint.setColor(0x33FFFFFF);
+                c.drawOval(bx - br * 0.9f, yNear - br * 1.15f, bx - br * 0.1f, yNear - br * 0.6f, paint);
+            }
         }
 
         // Your craft near the bottom, banking.
-        float shipX = w / 2f + offLine * (FOCAL / 6f) * w * 0.05f * 0.35f;
+        // Clamped: pinned against a wall the craft used to be drawn far off-screen (seen on the
+        // emulator at surge speed), so you could not see what was scraping.
+        float shipX = Math.max(w * 0.12f, Math.min(w * 0.88f,
+                w / 2f + offLine * (FOCAL / 6f) * w * 0.05f * 0.35f));
         float shipY = h * 0.80f;
         c.save();
         c.rotate(bank, shipX, shipY);
@@ -261,6 +296,16 @@ final class CanyonChaseGame extends GameView {
         paint.setColor(0xFFFF7A3D);
         c.drawRect(shipX - dp(3f), shipY + dp(14f), shipX + dp(3f), shipY + dp(14f) + thrust * 0.6f, paint);
         c.restore();
+        // Dust thrown up behind the craft, more with speed.
+        dustClock += dt;
+        if (started && !over && speed > 1.5f && dustClock > 0.05) {
+            dustClock = 0;
+            for (int k = 0; k < 2; k++) {
+                fx.spawn(shipX + (float) (Math.random() - 0.5) * dp(40f), shipY + dp(20f),
+                        (float) (Math.random() - 0.5) * dp(80f), dp(40f) + speed * dp(20f),
+                        0.7f, dp(4f) + (float) Math.random() * dp(4f), 0x88C89A6A, false);
+            }
+        }
         fx.draw(c);
         c.restore();
 
@@ -330,6 +375,36 @@ final class CanyonChaseGame extends GameView {
         stat(c, col3 * 1.5f, fy, String.valueOf(scrapes), "SCRAPES");
         stat(c, col3 * 2.5f, fy, bests.has("chase.distance")
                 ? Math.round(bests.get("chase.distance", 0)) + " m" : "--", "BEST");
+    }
+
+    /** Flat-topped mesas along the horizon and a pair of vultures circling above the canyon. */
+    private void drawHorizonLife(Canvas c, float w, float horizon) {
+        float shift = (float) ((x * 0.4) % (w * 1.2));
+        paint.setColor(0xFF6A4638);
+        for (int k = -1; k < 5; k++) {
+            float mx = k * w * 0.3f - shift * 0.3f;
+            float mh = dp(28f) + ((k * 7 + 21) % 3) * dp(14f);
+            float mw = dp(70f) + ((k * 5 + 15) % 3) * dp(30f);
+            path.reset();
+            path.moveTo(mx - mw, horizon + dp(2f));
+            path.lineTo(mx - mw * 0.7f, horizon - mh);
+            path.lineTo(mx + mw * 0.7f, horizon - mh);
+            path.lineTo(mx + mw, horizon + dp(2f));
+            path.close();
+            c.drawPath(path, paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2.5f));
+        paint.setColor(0xCC1A1010);
+        for (int v = 0; v < 2; v++) {
+            double a = sessionSeconds * (0.6 + v * 0.25) + v * 2;
+            float vx = w * (0.35f + v * 0.3f) + (float) Math.cos(a) * dp(60f);
+            float vy = horizon * (0.45f + v * 0.12f) + (float) Math.sin(a) * dp(18f);
+            float flap = (float) Math.sin(sessionSeconds * 3 + v) * dp(4f);
+            c.drawLine(vx - dp(14f), vy - flap, vx, vy, paint);
+            c.drawLine(vx, vy, vx + dp(14f), vy - flap, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private static int blend(int a, int b, float t) {

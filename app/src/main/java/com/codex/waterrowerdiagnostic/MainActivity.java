@@ -578,6 +578,32 @@ public class MainActivity extends Activity
                     }
                 }, 2000);
             }
+            // Screens that are not home cards: --es screen RECORDS | HELP | CALIBRATE | CANYON_DRIVE | SESSION_ART
+            String screen = intent.getStringExtra("screen");
+            if (screen != null) {
+                screenHost.postDelayed(() -> {
+                    showHome();
+                    switch (screen) {
+                        case "RECORDS":
+                            showRecords();
+                            break;
+                        case "HELP":
+                            showHelpPage(0);
+                            break;
+                        case "CALIBRATE":
+                            openCalibrate();
+                            break;
+                        case "CANYON_DRIVE":
+                            openCanyon(false);
+                            break;
+                        case "SESSION_ART":
+                            showSessionArt();
+                            break;
+                        default:
+                            log("Automation: no screen " + screen);
+                    }
+                }, 2000);
+            }
         }
     }
 
@@ -1516,19 +1542,22 @@ public class MainActivity extends Activity
                 continue;
             }
             float v = (Float) raw;
+            // crew.time.* and the 500 m daily trial are times too (Crew Boat showed "285" on the emulator).
             String shown = key.startsWith("time.") || key.startsWith("run.streak")
                     || key.startsWith("storm.") || key.startsWith("tug.")
+                    || key.startsWith("crew.time.") || key.equals("daily.best.trial_500")
                     ? PersonalBests.formatTime(v)
                     : key.startsWith("intervals.") ? Math.round(v) + "%"
                     : key.equals("journey.total") ? String.format(Locale.US, "%.1f km", v / 1000f)
                     : key.equals("dive.joules") ? String.format(Locale.US, "%.1f m deep", v / 1000f)
-                    : key.equals("rocket.altitude") ? String.format(Locale.US, "%.1f km", v / 1000f)
+                    : key.equals("rocket.altitude") || key.equals("rocket.test60") ? String.format(Locale.US, "%.1f km", v / 1000f)
                     : key.equals("city.tallest") ? Math.round(v) + " floors"
                     : key.equals("surf.ride") ? PersonalBests.formatTime(v)
                     : String.valueOf(Math.round(v));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setPadding(dp(12), dp(10), dp(12), dp(10));
+            // Local builds float a camera button over the right edge; keep the values clear of it.
+            row.setPadding(dp(12), dp(10), BuildConfig.SCREENSHOT_UPLOAD ? dp(64) : dp(12), dp(10));
             row.setBackgroundColor(getColorCompat(R.color.surface));
             TextView k = new TextView(this);
             k.setText(recordName(key));

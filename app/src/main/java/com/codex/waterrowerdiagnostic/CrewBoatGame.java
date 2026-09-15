@@ -216,6 +216,11 @@ final class CrewBoatGame extends GameView {
 
         // HUD: sync meter, swing, gap.
         float cx = w / 2f;
+        // 3.19.5: the HUD sits on the light sky, so it gets dark pills (seen unreadable on the emulator).
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x990A1420);
+        c.drawRoundRect(cx - dp(120f), dp(6f), cx + dp(120f), dp(72f), dp(14f), dp(14f), paint);
+        c.drawRoundRect(dp(8f), dp(16f), dp(300f), dp(38f), dp(10f), dp(10f), paint);
         bold(c, Math.round(sync * 100) + "%", cx, dp(44f), 38f, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD, Paint.Align.CENTER);
         label(c, swing >= 6 ? "SWING  ·  " + swing + " STROKES IN TIME" : "CREW SYNC", cx, dp(62f), 10f,
                 swing >= 6 ? ACCENT : FAINT, Paint.Align.CENTER);
@@ -233,7 +238,7 @@ final class CrewBoatGame extends GameView {
                     Math.abs(gap), Math.round(yourMeters), RACE_METERS, clock(sessionSeconds - raceStart));
         }
         bold(c, status, cx, h - dp(14f), 12f, phase == Phase.DONE && won ? ACCENT : TEXT, Paint.Align.CENTER);
-        label(c, "EVEN STROKES = SYNC  ·  RATE " + Math.round(60 / crewInterval), dp(16f), dp(30f), 10f, FAINT, Paint.Align.LEFT);
+        label(c, "EVEN STROKES = SYNC  ·  RATE " + Math.round(60 / crewInterval), dp(16f), dp(30f), 10f, DIM, Paint.Align.LEFT);
     }
 
     /** Sky, a far bank of trees and a crowd along it with flags, scrolling with the boat. */
