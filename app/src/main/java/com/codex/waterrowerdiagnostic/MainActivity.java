@@ -279,6 +279,16 @@ public class MainActivity extends Activity
     private final java.util.ArrayList<float[]> sessionStrokes = new java.util.ArrayList<>();
     private PulseMeter.Stroke lastArtStroke;
     private boolean sessionArtShown;
+
+    /* SHUFFLE: random games back to back, one rowing clock across them all. */
+    private static final int[] SHUFFLE_MINUTES = {1, 2, 3, 5};
+    private int shuffleMinutesIndex = 1;
+    private boolean shuffleActive;
+    /** True while SHUFFLE itself is changing screens, so showScreen does not end it. */
+    private boolean shuffleSwitching;
+    private double shuffleAccumSeconds;
+    private ShuffleBag shuffleBag;
+    private TextView shuffleNextChip;
     /** Latest status on the UI thread, for once-a-second sampling. */
     private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
@@ -503,6 +513,9 @@ public class MainActivity extends Activity
     }
 
     private void showScreen(View screen) {
+        if (!shuffleSwitching) {
+            shuffleActive = false;   // leaving to anything else ends the shuffle
+        }
         if (currentGame != null) {
             currentGame.stop();
             currentGame = null;
@@ -638,6 +651,7 @@ public class MainActivity extends Activity
         int warn = getColorCompat(R.color.warn);
         int bad = getColorCompat(R.color.bad);
         cards.add(gridCard("GAUGES", GameIconView.Kind.GAUGES, accent, null, null, v -> showInstruments()));
+        cards.add(gridCard("SHUFFLE", GameIconView.Kind.SHUFFLE, 0xFFB48CFF, "shuffle.minutes", "min", v -> startShuffle()));
         cards.add(gridCard("ZONE ROW", GameIconView.Kind.ZONEROW, warn, "zonerow.10", "m", v -> openZoneRow()));
         cards.add(gridCard("RIVER", GameIconView.Kind.RIVER, 0xFF5AA7D6, "river.km", "km", v -> openGame(new RiverExplorerGame(this, personalBests), "RIVER EXPLORER")));
         cards.add(gridCard("COACH", GameIconView.Kind.COACH, accent, "coach.score", "score", v -> openGame(new StrokeCoachGame(this, personalBests), "STROKE COACH")));
@@ -965,6 +979,103 @@ public class MainActivity extends Activity
     private void openCollector() {
         CollectorGame game = new CollectorGame(this, personalBests);
         showGame(game, gameScreen("COLLECTOR", game, null));
+    }
+
+    /* ---------- shuffle ---------- */
+
+    private interface GameMaker {
+        GameView make();
+    }
+
+    private static final String[] SHUFFLE_TITLES = {
+            "ZOMBIE RUN", "ROW RUNNER", "SKYLINE", "WAVE RIDER", "CANYON", "ROCKET LAUNCH", "MEGA PULL",
+            "RACE", "CREW BOAT", "NIGHT GRID", "HEAD RACE", "TUG OF WAR", "COLLECTOR", "RIVER EXPLORER",
+            "STROKE COACH"};
+
+    /**
+     * The games SHUFFLE deals from. Left out on purpose: Coast Flight (its map takes a while to load
+     * and needs internet), Zone Row (its own timed piece, without the vitals strip), and Regatta and
+     * Daily Row (once a day - a random visit would spend the ranked race or the day's challenge).
+     */
+    private GameView shuffleGame(int i) {
+        GameMaker[] makers = {
+                () -> new ZombieRunGame(this, personalBests),
+                () -> new RowRunnerGame(this, personalBests),
+                () -> new SkylineGame(this, personalBests),
+                () -> new WaveRiderGame(this, personalBests),
+                () -> new CanyonFlightGame(this, personalBests),
+                () -> new RocketLaunchGame(this, personalBests),
+                () -> new MegaPullGame(this, personalBests),
+                () -> new GhostRaceGame(this, personalBests),
+                () -> new CrewBoatGame(this, personalBests),
+                () -> new NightGridGame(this, personalBests),
+                () -> new HeadRaceGame(this, personalBests),
+                () -> new TugOfWarGame(this, personalBests),
+                () -> new CollectorGame(this, personalBests),
+                () -> new RiverExplorerGame(this, personalBests),
+                () -> new StrokeCoachGame(this, personalBests)};
+        return makers[i].make();
+    }
+
+    private void startShuffle() {
+        shuffleAccumSeconds = 0;
+        shuffleBag = new ShuffleBag(SHUFFLE_TITLES.length, new java.util.Random());
+        shuffleActive = true;
+        dealShuffle(0f);
+    }
+
+    /** Next game from the bag, with the speed needle carried over from the last one. */
+    private void dealShuffle(float carrySpeed) {
+        int pick = shuffleBag.next();
+        GameView game = shuffleGame(pick);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        shuffleNextChip = chip("NEXT IN " + SHUFFLE_MINUTES[shuffleMinutesIndex] + ":00");
+        row.addView(shuffleNextChip);
+        TextView skip = chip("SKIP  \u25B6");
+        skip.setOnClickListener(v -> skipShuffle());
+        row.addView(skip);
+        TextView length = chip(SHUFFLE_MINUTES[shuffleMinutesIndex] + " MIN EACH");
+        length.setOnClickListener(v -> {
+            shuffleMinutesIndex = (shuffleMinutesIndex + 1) % SHUFFLE_MINUTES.length;
+            length.setText(SHUFFLE_MINUTES[shuffleMinutesIndex] + " MIN EACH");
+        });
+        row.addView(length);
+        shuffleSwitching = true;
+        try {
+            showGame(game, gameScreen("SHUFFLE  \u00b7  " + SHUFFLE_TITLES[pick], game, row));
+        } finally {
+            shuffleSwitching = false;
+        }
+        shuffleActive = true;
+        game.seedSpeed(carrySpeed);
+    }
+
+    private void skipShuffle() {
+        if (!shuffleActive || currentGame == null) {
+            return;
+        }
+        shuffleAccumSeconds += currentGame.activeSeconds();
+        dealShuffle(currentGame.boatSpeed());
+    }
+
+    /** Once a second: the countdown, the switch, and the record for the longest shuffle. */
+    private void shuffleTick() {
+        if (!shuffleActive || currentGame == null || shuffleNextChip == null) {
+            return;
+        }
+        double left = SHUFFLE_MINUTES[shuffleMinutesIndex] * 60.0 - currentGame.activeSeconds();
+        String upcoming = shuffleBag.peek() >= 0 ? SHUFFLE_TITLES[shuffleBag.peek()] : "A SURPRISE";
+        shuffleNextChip.setText(left <= 6
+                ? "NEXT: " + upcoming + "  " + Math.max(0, (int) Math.ceil(left))
+                : "NEXT IN " + PersonalBests.formatTime((float) Math.max(0, left)));
+        double total = shuffleAccumSeconds + currentGame.activeSeconds();
+        if (total >= 60) {
+            personalBests.recordHighest("shuffle.minutes", (float) (total / 60.0));
+        }
+        if (left <= 0) {
+            skipShuffle();
+        }
     }
 
     /* ---------- progress, session art, help, sharing ---------- */
@@ -1398,6 +1509,7 @@ public class MainActivity extends Activity
         if (key.equals("zonerow.streak")) return "Zone Row - longest streak";
         if (key.startsWith("zonerow.")) return "Zone Row - most metres in " + key.substring(8) + " min";
         if (key.equals("rocket.test60")) return "Rocket - 60 s power test";
+        if (key.equals("shuffle.minutes")) return "Shuffle - longest session (minutes)";
         if (key.equals("river.km")) return "River Explorer - km explored";
         if (key.equals("river.landmarks")) return "River Explorer - landmarks found";
         if (key.equals("river.along")) return "River Explorer - metres up the river";
@@ -3629,6 +3741,7 @@ public class MainActivity extends Activity
                 }
                 if (tickCount % 30 == 0) {
                     logProgressSecond();
+                    shuffleTick();
                 }
                 if (tickCount % 1800 == 0 && tickCount > 0) {
                     commitJourney();
@@ -3637,8 +3750,10 @@ public class MainActivity extends Activity
                     saveProgress();
                 }
                 if (gameStrip != null && currentGame != null) {
-                    gameStrip.setClock(currentGame.activeSeconds(), currentGame.isClockRunning(),
-                            currentGame.hasClockStarted());
+                    // In SHUFFLE the strip's clock is the whole session, not just this game.
+                    double carried = shuffleActive ? shuffleAccumSeconds : 0;
+                    gameStrip.setClock(carried + currentGame.activeSeconds(), currentGame.isClockRunning(),
+                            currentGame.hasClockStarted() || carried > 0);
                 }
                 if (sparkline != null && ++tickCount % 6 == 0) {
                     sparkline.addSample(speedGauge.shownValue(), Math.round(shownWatts));

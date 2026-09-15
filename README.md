@@ -41,6 +41,8 @@ no root, no system changes, and Ergatta itself is untouched and still the fallba
     and heart-rate plans.
   - **Zombie Run, Row Runner** (every stroke is a jump), **Canyon**, **Rocket Launch**, **Mega Pull**,
     **Wave Rider**, **Skyline**, **Night Grid**, **Tug of War**, **Collector**, **Coast Flight**.
+- **Shuffle** — random games back to back, a couple of minutes each, with one clock and the same
+  gauges running across all of them.
 - **Levels, a weekly goal and a streak** (with a free rest day), **Session Art** posters, and a
   Bluetooth **heart-rate strap**.
 - **Measured energy** — work and calories from the paddle's own 40-per-second pulses, with a
@@ -151,8 +153,8 @@ Protocol and physics run without Android, so they are tested with plain `javac`:
 ```sh
 S=app/src/main/java/com/codex/waterrowerdiagnostic T=tools/prototest/com/codex/waterrowerdiagnostic
 javac -d /tmp/t $S/S4Protocol.java $S/PulseMeter.java $S/Coast.java $S/BoatSpeedModel.java \
-  $S/RowerProfile.java $S/Progress.java $T/*.java
-for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest; do
+  $S/RowerProfile.java $S/Progress.java $S/ShuffleBag.java $T/*.java
+for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest ShuffleBagTest; do
   java -cp /tmp/t com.codex.waterrowerdiagnostic.$t
 done
 ```

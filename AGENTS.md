@@ -139,8 +139,8 @@ Everything is in `app/src/main/java/com/codex/waterrowerdiagnostic/`.
 ```sh
 S=app/src/main/java/com/codex/waterrowerdiagnostic T=tools/prototest/com/codex/waterrowerdiagnostic
 javac -d /tmp/wake-tests $S/S4Protocol.java $S/PulseMeter.java $S/Coast.java $S/BoatSpeedModel.java \
-  $S/RowerProfile.java $S/Progress.java $T/*.java
-for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest; do
+  $S/RowerProfile.java $S/Progress.java $S/ShuffleBag.java $T/*.java
+for t in S4ProtocolTest PulseMeterTest BoatSpeedModelTest RowerProfileTest ProgressTest ShuffleBagTest; do
   java -cp /tmp/wake-tests com.codex.waterrowerdiagnostic.$t
 done
 ```

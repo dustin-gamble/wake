@@ -13,7 +13,7 @@ final class GameIconView extends View {
     enum Kind {
         GAUGES, ZOMBIE, RUNNER, BOSS, PACE, GHOST, RUN, INTERVALS, JOURNEY, STORM, ZONES,
         LADDER, TUG, COLLECTOR, DIVE, HEADRACE, CANYON, MEGAPULL, CHASE, ROCKET, CITY, SURF,
-        FLY, ZONEROW, RIVER, COACH, CREW, GRID, REGATTA, DAILY
+        FLY, ZONEROW, RIVER, COACH, CREW, GRID, REGATTA, DAILY, SHUFFLE
     }
 
     private final Kind kind;
@@ -174,6 +174,36 @@ final class GameIconView extends View {
                 path.lineTo(u(14), u(9));
                 path.lineTo(u(11), u(12));
                 path.lineTo(u(14), u(15));
+                path.close();
+                c.drawPath(path, p);
+                break;
+            case SHUFFLE:
+                // Two crossing arrows.
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(u(2.4f));
+                path.reset();
+                path.moveTo(u(3), u(7));
+                path.lineTo(u(8), u(7));
+                path.cubicTo(u(13), u(7), u(12), u(17), u(17), u(17));
+                path.lineTo(u(20), u(17));
+                c.drawPath(path, p);
+                path.reset();
+                path.moveTo(u(3), u(17));
+                path.lineTo(u(8), u(17));
+                path.cubicTo(u(13), u(17), u(12), u(7), u(17), u(7));
+                path.lineTo(u(20), u(7));
+                c.drawPath(path, p);
+                p.setStyle(Paint.Style.FILL);
+                path.reset();
+                path.moveTo(u(22), u(7));
+                path.lineTo(u(18), u(4));
+                path.lineTo(u(18), u(10));
+                path.close();
+                c.drawPath(path, p);
+                path.reset();
+                path.moveTo(u(22), u(17));
+                path.lineTo(u(18), u(14));
+                path.lineTo(u(18), u(20));
                 path.close();
                 c.drawPath(path, p);
                 break;

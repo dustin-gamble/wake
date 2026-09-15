@@ -203,6 +203,11 @@ abstract class GameView extends View {
         }
     }
 
+    /** Carries the needle over from the previous game in SHUFFLE. Call after {@link #start()}. */
+    void seedSpeed(float metresPerSecond) {
+        boat.seed(metresPerSecond);
+    }
+
     /** Coasted boat speed, for the shared vitals strip. */
     float boatSpeed() {
         return boat.value();

@@ -85,6 +85,15 @@ final class BoatSpeedModel {
         return !driving && shown > 0f;
     }
 
+    /**
+     * Starts the needle at a speed already showing elsewhere - SHUFFLE hands the boat from one game
+     * to the next, and a fresh model would otherwise drop the gauge to zero mid-stroke.
+     */
+    void seed(float metresPerSecond) {
+        shown = Math.max(0f, metresPerSecond);
+        coast.cancel();
+    }
+
     void reset() {
         target = 0f;
         shown = 0f;

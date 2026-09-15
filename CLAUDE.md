@@ -1003,6 +1003,15 @@ ART (`SessionArtView`, shown on returning home after 60+ strokes), HELP (first-r
 RACE SHARE/IMPORT go through the laptop: `GET/POST /api/ghosts`, files in `server/data/ghosts` - swap
 by copying the file. **The dashboard must be restarted to get those routes.**
 
+**SHUFFLE (3.19.0).** The rower's idea: random games back to back. `ShuffleBag` (tested) deals
+every game once per round and never the same one twice running. A game switches after N minutes of
+its *rowing* clock (chip: 1/2/3/5, default 2), so resting does not burn through games; SKIP jumps.
+The strip clock shows `shuffleAccumSeconds + currentGame.activeSeconds()`, and `seedSpeed()` hands
+the coasted needle to the next game so the gauge does not drop to zero at a switch. Any other
+`showScreen` ends the shuffle (`shuffleSwitching` guards the shuffle's own switches). Excluded:
+Coast Flight (slow map load, needs internet), Zone Row (no strip, own timed piece), Regatta and Daily
+Row (once a day - a random visit would spend them). Record: `shuffle.minutes`.
+
 **Handing back to Ergatta:** the rower decided a tablet restart is the accepted way back. It is in
 the HELP tour and on the GitHub page; it is not a bug to fix.
 

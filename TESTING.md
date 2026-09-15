@@ -1,4 +1,4 @@
-# Testing WAKE 3.18.2 on the rower
+# Testing WAKE 3.19.0 on the rower
 
 The tablet is still on 3.11.1. Everything below was built and checked on the laptop but hasn't run
 on the tablet yet, so screen layouts are the most likely thing to be off.
@@ -8,7 +8,7 @@ lands on the laptop, where I can see it.
 
 ## 1. Install and launch (2 min)
 
-- [ ] Install from the dashboard: **Install APK**, then **3.18.2**.
+- [ ] Install from the dashboard: **Install APK**, then **3.19.0**.
 - [ ] A **Help tour** appears on first launch. Page through it.
 - [ ] **Home:**
   - [ ] 20 cards and a progress row (week ring, level, streak, CONTINUE, SESSION ART, HELP).
@@ -50,6 +50,11 @@ Tap **CALIBRATE** and follow the steps; see [CALIBRATION.md](CALIBRATION.md).
   - [ ] Is it smooth enough?
 
 ## 4. Quick passes (a minute or two each)
+
+- [ ] **Shuffle:** set **1 MIN EACH** and row through three or four games.
+  - [ ] Does the strip's clock keep counting across switches?
+  - [ ] Does the speed needle carry over without dropping to zero?
+  - [ ] Does the countdown name the next game?
 
 - [ ] **Race:** vs RIVAL, does it stay close? Tap **VS** to cycle opponents.
 - [ ] **Crew Boat:** does even rowing raise the SYNC %?
