@@ -15,8 +15,9 @@ further. Read the note at the top of GAME_IDEAS.md before designing a new one.
 
 Four things that will cost you a day each if you skip them:
 
-1. **There is no Android emulator in this environment.** You can compile but not see the
-   UI. Ship a build and ask the user what it looks like. Do not assume a layout works.
+1. **You can see the UI now - use the emulator (3.19.4).** A tablet-sized emulator and a simulated
+   rower let you launch any game, row it and screenshot it without the user. See "Self-testing on
+   an emulator" below. It is not the tablet: check performance and the real link on the machine.
 2. **Never hold a displayed value flat while waiting for a fresh reading.** The S4 holds
    stale values instead of decaying them. See "the decay IS the instrument" below - this
    single mistake caused more rework than everything else combined.
@@ -197,8 +198,37 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.18.2-debug
+3.19.4-debug
 ```
+
+## Self-testing on an emulator (3.19.4)
+
+The rower asked for "launch it, test with mock rowing, screenshot it, then review and improve".
+
+- **`DemoRower`** (local builds only, inside `BuildConfig.SCREENSHOT_UPLOAD`) generates the bytes an
+  S4 sends - `Pxx` pulse counts every 25 ms and `IDx` replies for 088/14A/1A9/140/057/1E1 - from the
+  same flywheel model as `PulseMeterTest`, and feeds them to `S4Protocol.accept`. Everything
+  downstream runs unchanged. A 90 s script: steady ~130 W at 25 spm, a surge (~220 W, 31 spm),
+  easy strokes, an 8 s stop. `DemoRowerTest` checks it decodes to this machine's envelope.
+  Verified compiled out of the public APK (`demoWatts` absent from its dex).
+- **Launch extras:** `adb shell am start -S -n com.codex.waterrowerdiagnostic.debug/com.codex.waterrowerdiagnostic.MainActivity --ez demo true --es game "'HEAD RACE'"`.
+  `game` is a home card title; `demoWatts` sets the base power. The help tour is skipped.
+- **Emulator** lives outside `~/Documents` on purpose: SDK at `~/wake-android-sdk` (emulator,
+  platform-tools, `system-images/android-30/google_apis/arm64-v8a`), AVD `wake` at 1920x1080,
+  density 160, like the tablet. Boot headless:
+  `ANDROID_SDK_ROOT=~/wake-android-sdk ~/wake-android-sdk/emulator/emulator -avd wake -no-window -no-audio -no-snapshot -gpu swiftshader_indirect`.
+- **Screenshot:** `adb exec-out screencap -p > shot.png` after ~30-50 s of demo rowing (the surge
+  runs 40-52 s). This captures everything, Coast Flight's WebGL included.
+- The emulator shows Android's navigation bar and has no kiosk; the tablet does not.
+
+## Warning: ~/Documents is on iCloud Drive
+
+On 2026-09-15, with the disk 98% full, macOS offloaded almost every project file to iCloud and the
+downloads back stalled. Reads hung silently: `cat`, `javac`, git (`.git/HEAD`) and Gradle (its own jars
+under `work/tools`). Symptoms: a build or commit that sits at 0% CPU for many minutes. Check with a
+timed read, e.g. `perl -e 'alarm 3; open(F,"<",$ARGV[0]); read(F,$b,1)' file`, and `brctl status`.
+The fix is disk space plus Finder > Keep Downloaded on the project and on `work/tools`. Keep large
+tooling (emulator, images) out of `~/Documents`.
 
 **Check newer Android APIs with lint before trusting a build on the tablet** (Android 9, API 28):
 

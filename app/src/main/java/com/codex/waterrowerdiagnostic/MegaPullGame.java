@@ -9,6 +9,10 @@ import android.view.MotionEvent;
  * Mega Pull: a carnival high-striker. Five strokes, hardest you have got; the puck flies up the
  * tower to your peak watts and rings the bell if you clear the target. The target creeps up as
  * your record does. Pure peak, ten seconds, good between sets.
+ *
+ * <p>3.19.4 (the emulator screenshot was a pole on purple): a night fairground - striped tents, a
+ * string of twinkling bulbs, sweeping spotlights, a crowd that jumps when the bell rings - and a
+ * tower whose bulbs light up behind the puck and chase when you ring it.
  */
 final class MegaPullGame extends GameView {
 
@@ -20,6 +24,9 @@ final class MegaPullGame extends GameView {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Fx.Particles fx = new Fx.Particles();
     private final Fx.Shake shake = new Fx.Shake();
+    private final android.graphics.Path tent = new android.graphics.Path();
+    private android.graphics.LinearGradient skyShader;
+    private float skyHeight;
 
     private Phase phase = Phase.READY;
     private int strokesLeft;
@@ -112,6 +119,94 @@ final class MegaPullGame extends GameView {
         return super.onTouchEvent(e);
     }
 
+    /** Tents, a string of bulbs, sweeping spotlights and a crowd along the bottom. */
+    private void drawFairground(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        // Spotlights from the bottom corners.
+        for (int side = 0; side < 2; side++) {
+            float ox = side == 0 ? w * 0.08f : w * 0.92f;
+            double a = -Math.PI / 2 + Math.sin(t * 0.6 + side * 2) * 0.55;
+            float len = h * 1.1f;
+            float tx = ox + (float) Math.cos(a) * len;
+            float ty = h + (float) Math.sin(a) * len;
+            float nx = (float) -Math.sin(a) * dp(70f);
+            float ny = (float) Math.cos(a) * dp(70f);
+            tent.rewind();
+            tent.moveTo(ox, h);
+            tent.lineTo(tx + nx, ty + ny);
+            tent.lineTo(tx - nx, ty - ny);
+            tent.close();
+            paint.setColor(rang ? 0x30FFE28A : 0x1ABFD8FF);
+            c.drawPath(tent, paint);
+        }
+        // Stars.
+        paint.setColor(0x88FFFFFF);
+        for (int i = 0; i < 40; i++) {
+            float sx = (i * 197 % 1000) / 1000f * w;
+            float sy = (i * 331 % 1000) / 1000f * h * 0.45f;
+            float tw = 0.5f + 0.5f * (float) Math.sin(t * 2 + i);
+            c.drawCircle(sx, sy, dp(1f) + tw * dp(1f), paint);
+        }
+        // Two striped tents.
+        for (int k = 0; k < 2; k++) {
+            float tcx = k == 0 ? w * 0.17f : w * 0.83f;
+            float tw = w * 0.13f;
+            float roofTop = h * 0.50f;
+            float eave = h * 0.66f;
+            float floor = h * 0.9f;
+            int stripes = 8;
+            for (int i = 0; i < stripes; i++) {
+                float x0 = tcx - tw + 2 * tw * i / stripes;
+                float x1 = tcx - tw + 2 * tw * (i + 1) / stripes;
+                paint.setColor((i & 1) == 0 ? 0xFFB8323A : 0xFFEDE3D0);
+                tent.rewind();
+                tent.moveTo(tcx, roofTop);
+                tent.lineTo(x0, eave);
+                tent.lineTo(x1, eave);
+                tent.close();
+                c.drawPath(tent, paint);
+                c.drawRect(x0, eave, x1, floor, paint);
+            }
+            paint.setColor(0xFF1A1020);
+            c.drawRect(tcx - tw * 0.22f, eave + dp(20f), tcx + tw * 0.22f, floor, paint);
+            paint.setColor(0xFFF5C518);
+            c.drawRect(tcx - dp(1.5f), roofTop - dp(30f), tcx + dp(1.5f), roofTop, paint);
+            float flap = (float) Math.sin(t * 5 + k) * dp(4f);
+            tent.rewind();
+            tent.moveTo(tcx + dp(1.5f), roofTop - dp(30f));
+            tent.lineTo(tcx + dp(26f), roofTop - dp(24f) + flap);
+            tent.lineTo(tcx + dp(1.5f), roofTop - dp(18f));
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        // A string of bulbs swinging across the top.
+        int n = 26;
+        for (int i = 0; i < n; i++) {
+            float f = i / (n - 1f);
+            float x = w * f;
+            float y = h * 0.08f + (float) Math.sin(f * Math.PI) * h * 0.1f;
+            boolean on = rang ? ((int) (t * 10) + i) % 2 == 0 : ((int) (t * 3) + i) % 5 != 0;
+            int col = i % 3 == 0 ? 0xFFFF5A7A : i % 3 == 1 ? 0xFFF5C518 : 0xFF6BD8FF;
+            paint.setColor(on ? col : 0xFF3A2A48);
+            c.drawCircle(x, y, dp(5f), paint);
+            if (on) {
+                Fx.glow(c, x, y, dp(16f), (col & 0x00FFFFFF) | 0x55000000);
+            }
+        }
+        // Crowd along the bottom, jumping when the bell rings.
+        float ground = h;
+        for (int i = 0; i < 60; i++) {
+            float x = w * (i + 0.5f) / 60f;
+            float jump = rang ? (float) Math.abs(Math.sin(t * 9 + i)) * dp(12f) : (float) Math.abs(Math.sin(t * 1.5 + i)) * dp(2f);
+            paint.setColor(0xFF3A2858);
+            c.drawRoundRect(x - dp(11f), ground - dp(34f) - jump, x + dp(11f), ground + dp(10f), dp(8f), dp(8f), paint);
+            c.drawCircle(x, ground - dp(44f) - jump, dp(9f), paint);
+            if (rang && i % 3 == 0) {
+                c.drawRect(x - dp(13f), ground - dp(66f) - jump, x - dp(9f), ground - dp(34f) - jump, paint);
+            }
+        }
+    }
+
     @Override
     protected void render(Canvas c, float dt) {
         float w = getWidth();
@@ -125,10 +220,15 @@ final class MegaPullGame extends GameView {
 
         c.save();
         c.translate(shake.dx, shake.dy);
-        paint.setShader(new android.graphics.LinearGradient(0, 0, 0, h, 0xFF2A1040, 0xFF0A0E14,
-                android.graphics.Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, h, paint);
+        if (skyShader == null || skyHeight != h) {
+            skyHeight = h;
+            skyShader = new android.graphics.LinearGradient(0, 0, 0, h, 0xFF2A1040, 0xFF0A0E14,
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        paint.setShader(skyShader);
+        c.drawRect(-dp(30f), -dp(30f), w + dp(30f), h + dp(30f), paint);
         paint.setShader(null);
+        drawFairground(c, w, h);
 
         // Tower.
         float cx = w * 0.5f;
@@ -138,6 +238,21 @@ final class MegaPullGame extends GameView {
         c.drawRect(cx - dp(14f), top, cx + dp(14f), base, paint);
         paint.setColor(0xFF5A3A8A);
         c.drawRect(cx - dp(60f), base, cx + dp(60f), base + dp(16f), paint);
+        // Bulbs up both edges of the tower: lit behind the puck, chasing once the bell rings.
+        int bulbs = 24;
+        for (int i = 0; i < bulbs; i++) {
+            float f = (i + 0.5f) / bulbs;
+            float y = base - (base - top) * f;
+            boolean lit = rang ? ((int) (sessionSeconds * 12) - i) % 4 == 0 || f <= puck : f <= puck;
+            int col = f > 0.85f ? 0xFFFF5A5A : f > 0.6f ? 0xFFF5C518 : 0xFF6BFFB8;
+            paint.setColor(lit ? col : 0xFF2A2140);
+            c.drawCircle(cx - dp(22f), y, dp(4f), paint);
+            c.drawCircle(cx + dp(22f), y, dp(4f), paint);
+            if (lit) {
+                Fx.glow(c, cx - dp(22f), y, dp(12f), (col & 0x00FFFFFF) | 0x66000000);
+                Fx.glow(c, cx + dp(22f), y, dp(12f), (col & 0x00FFFFFF) | 0x66000000);
+            }
+        }
         // Scale marks with watts.
         for (int i = 0; i <= 10; i++) {
             float f = i / 10f;

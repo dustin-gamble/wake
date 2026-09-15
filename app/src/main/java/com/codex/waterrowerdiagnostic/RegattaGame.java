@@ -27,6 +27,17 @@ final class RegattaGame extends GameView {
     private final PersonalBests bests;
     private final RiverRenderer river;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // 3.19.4: the course dressed like Head Race - sky, crowd, buoys, finish line, callouts, confetti.
+    private final RiverScenery scenery;
+    private final Fx.Particles fx = new Fx.Particles();
+    private android.graphics.LinearGradient skyShader;
+    private float skyHeight;
+    private int lastAhead = -1;
+    private String callout = "";
+    private int calloutColor = ACCENT;
+    private double calloutUntil;
+    private double confettiUntil;
+    private float cheer;
     private final double[] finishTimes = new double[3];
     private final float[] rivalX = new float[3];
 
@@ -43,6 +54,7 @@ final class RegattaGame extends GameView {
         super(context);
         this.bests = bests;
         this.river = new RiverRenderer(getResources().getDisplayMetrics().density);
+        this.scenery = new RiverScenery(getResources().getDisplayMetrics().density);
     }
 
     static long today() {
@@ -125,6 +137,11 @@ final class RegattaGame extends GameView {
             } else {
                 outcome = "PRACTICE - TODAY'S RANKED RACE IS DONE";
             }
+            confettiUntil = sessionSeconds + (placing == 1 ? 4.0 : 1.2);
+            callout = placing == 1 ? "YOU WIN!" : placing == 4 ? "LAST PLACE" : "FINISHED";
+            calloutColor = placing == 1 ? 0xFFF5C518 : placing == 4 ? BAD : WARN;
+            calloutUntil = sessionSeconds + 3.0;
+            lastAhead = -1;
         }
 
         float waterTop = h * 0.24f;
@@ -132,9 +149,28 @@ final class RegattaGame extends GameView {
         float ppm = w / 70f;
         float speed = boat.value();
         river.advance(phase == Phase.RACING ? speed : 0f, dt, ppm);
+        float bankTop = waterTop - dp(46f);
+        if (skyShader == null || skyHeight != bankTop) {
+            skyHeight = bankTop;
+            skyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, 0xFF0B1322, 0xFF2A4E74,
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setShader(skyShader);
+        c.drawRect(0, 0, w, bankTop, paint);
+        paint.setShader(null);
         river.drawWater(c, waterTop, waterBottom, w);
+        fx.step(dt, dp(260f));
         float laneH = (waterBottom - waterTop) / 4f;
         float yourX = w * 0.42f;
+        scenery.drawBank(c, w, bankTop, waterTop, you, ppm, sessionSeconds, cheer);
+        for (int lane = 1; lane < 4; lane++) {
+            scenery.drawBuoys(c, w, waterTop + laneH * lane, you, ppm, sessionSeconds, 10f);
+        }
+        float finishX = yourX + dp(66f) + (float) (RACE_METERS - you) * ppm;
+        if (finishX < w + dp(40f)) {
+            scenery.drawFinishLine(c, finishX, waterTop, waterBottom, sessionSeconds);
+        }
         int ahead = 0;
         for (int i = 0; i < 3; i++) {
             double d = crewDistance(i, t);
@@ -147,13 +183,43 @@ final class RegattaGame extends GameView {
                 rivalX[i] = target;
             }
             float ly = waterTop + laneH * (i + 0.5f);
-            river.drawBoat(c, rivalX[i], ly, dp(120f), COLORS[i], phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
-            label(c, PLANS[i], rivalX[i], ly - dp(18f), 8.5f, COLORS[i], Paint.Align.CENTER);
+            river.drawBoat(c, rivalX[i], ly, dp(150f), COLORS[i], phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
+            label(c, PLANS[i] + String.format(java.util.Locale.US, "  %+.0f m", d - you),
+                    Math.max(dp(70f), Math.min(w - dp(70f), rivalX[i])),
+                    ly - dp(22f), 11f, COLORS[i], Paint.Align.CENTER);
         }
+        if (phase == Phase.RACING) {
+            if (lastAhead >= 0 && ahead != lastAhead) {
+                boolean gained = ahead < lastAhead;
+                callout = gained ? (ahead == 0 ? "YOU TAKE THE LEAD!" : "PASSED ONE!") : "YOU'VE BEEN PASSED";
+                calloutColor = gained ? ACCENT : BAD;
+                calloutUntil = sessionSeconds + 1.8;
+                if (gained) {
+                    fx.burst(yourX, waterTop + laneH * 3.5f, 26, dp(160f), 0.9f, dp(3f), 0xFFF5C518, true);
+                }
+            }
+            lastAhead = ahead;
+        }
+        float cheerTarget = phase == Phase.DONE ? (placing == 1 ? 1f : 0.3f)
+                : phase == Phase.RACING ? (ahead == 0 ? 1f : ahead == 1 ? 0.5f : 0.15f) : 0f;
+        cheer += (cheerTarget - cheer) * Math.min(1f, 2f * dt);
         float yourY = waterTop + laneH * 3.5f;
-        river.bowSpray(yourX + dp(42f), yourY, speed, dt);
-        river.drawBoat(c, yourX, yourY, dp(126f), ACCENT, speed, false);
+        if (phase != Phase.READY && ahead == 0) {
+            Fx.glow(c, yourX, yourY, dp(90f), 0x44F5C518);
+        }
+        river.bowSpray(yourX + dp(54f), yourY, speed, dt);
+        river.drawBoat(c, yourX, yourY, dp(156f), ACCENT, speed, false);
         river.drawSpray(c);
+        bold(c, "YOU", yourX, yourY + dp(34f), 11f, ACCENT, Paint.Align.CENTER);
+        if (sessionSeconds < confettiUntil && Math.random() < 0.7) {
+            int[] colors = {0xFFF5C518, 0xFFF0655D, 0xFF35D0BA, 0xFF6F8CFF, 0xFFFFFFFF};
+            fx.spawn((float) Math.random() * w, waterTop - dp(40f), (float) (Math.random() - 0.5) * dp(80f),
+                    dp(20f), 2.2f, dp(3f), colors[(int) (Math.random() * colors.length)], true);
+        }
+        fx.draw(c);
+        if (sessionSeconds < calloutUntil) {
+            bold(c, callout, w / 2f, waterTop + (waterBottom - waterTop) * 0.5f, 30f, calloutColor, Paint.Align.CENTER);
+        }
 
         bold(c, DIVISIONS[division] + " DIVISION", dp(18f), dp(34f), 20f, ACCENT, Paint.Align.LEFT);
         label(c, (ranked ? "TODAY'S RANKED RACE" : "PRACTICE") + "  ·  " + RACE_METERS + " m  ·  win to move up, last to drop",

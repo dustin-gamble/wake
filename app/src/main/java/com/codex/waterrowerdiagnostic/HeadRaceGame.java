@@ -86,6 +86,8 @@ final class HeadRaceGame extends GameView {
     private double calloutUntil;
     private double confettiUntil;
     private float cheer;
+    private android.graphics.LinearGradient skyShader;
+    private float skyHeight;
     private final android.graphics.Path trace = new android.graphics.Path();
 
     private int raceMeters = 2000;
@@ -153,10 +155,10 @@ final class HeadRaceGame extends GameView {
             float bx = getWidth() * 0.40f;
             float by = getHeight() * (0.26f + 0.48f * 0.875f);
             for (int side = -1; side <= 1; side += 2) {
-                for (int k = 0; k < 7; k++) {
+                for (int k = 0; k < 10; k++) {
                     fx.spawn(bx - dp(10f) + (float) Math.random() * dp(20f), by + side * dp(20f),
                             (float) (Math.random() - 0.7) * dp(60f), -dp(40f) - (float) Math.random() * dp(70f),
-                            0.6f, dp(2.4f), 0xDDDDF2FF, true);
+                            0.7f, dp(3.5f), 0xEEDDF2FF, true);
                 }
             }
         }
@@ -218,6 +220,24 @@ final class HeadRaceGame extends GameView {
                 gapCount = Math.min(GAP_SAMPLES, gapCount + 1);
             }
         }
+        // Sky above the bank, so the header reads as a place rather than a dashboard.
+        float bankTop = waterTop - dp(46f);
+        if (skyShader == null || skyHeight != bankTop) {
+            skyHeight = bankTop;
+            skyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, 0xFF0B1322, 0xFF2A4E74,
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        panel.setStyle(Paint.Style.FILL);
+        panel.setShader(skyShader);
+        c.drawRect(0, 0, w, bankTop, panel);
+        panel.setShader(null);
+        Fx.glow(c, w * 0.86f, bankTop - dp(10f), dp(120f), 0x44FFC98A);
+        panel.setColor(0xFF1C3350);
+        float hillScroll = (float) ((raceDistance() * (w / 80f) * 0.08) % (w * 0.5f));
+        for (int k = -1; k < 4; k++) {
+            float hx = k * w * 0.5f - hillScroll;
+            c.drawOval(hx - w * 0.3f, bankTop - dp(34f), hx + w * 0.3f, bankTop + dp(40f), panel);
+        }
         float ppm = w / 80f;
         float speed = boat.value();
         river.advance(phase == Phase.RACING ? speed : 0f, dt, ppm);
@@ -255,10 +275,10 @@ final class HeadRaceGame extends GameView {
                 rivalX[i] = target;
             }
             float ly = waterTop + laneH * (i + 0.5f);
-            river.drawBoat(c, rivalX[i], ly, dp(120f), r.color,
+            river.drawBoat(c, rivalX[i], ly, dp(150f), r.color,
                     phase == Phase.RACING ? r.speedAt(t) * (raceMeters / (float) r.finishTime) : 0f, true);
             label(c, r.name + String.format(java.util.Locale.US, "  %+.0f m", d - you), rivalX[i],
-                    ly - dp(18f), 8.5f, d > you ? r.color : FAINT, Paint.Align.CENTER);
+                    ly - dp(22f), 11f, d > you ? r.color : DIM, Paint.Align.CENTER);
         }
         if (phase == Phase.RACING) {
             if (lastAhead >= 0 && ahead != lastAhead) {
@@ -281,10 +301,10 @@ final class HeadRaceGame extends GameView {
         if (phase != Phase.READY && ahead == 0) {
             Fx.glow(c, yourX, yourY, dp(90f), 0x44F5C518);
         }
-        river.bowSpray(yourX + dp(42f), yourY, speed, dt);
-        river.drawBoat(c, yourX, yourY, dp(124f), ACCENT, speed, false);
+        river.bowSpray(yourX + dp(54f), yourY, speed, dt);
+        river.drawBoat(c, yourX, yourY, dp(156f), ACCENT, speed, false);
         river.drawSpray(c);
-        label(c, "YOU", yourX, yourY + dp(28f), 9f, FAINT, Paint.Align.CENTER);
+        bold(c, "YOU", yourX, yourY + dp(34f), 11f, ACCENT, Paint.Align.CENTER);
         if (sessionSeconds < confettiUntil && Math.random() < 0.7) {
             int[] colors = {0xFFF5C518, 0xFFF0655D, 0xFF35D0BA, 0xFF6F8CFF, 0xFFFFFFFF};
             fx.spawn((float) Math.random() * w, waterTop - dp(40f), (float) (Math.random() - 0.5) * dp(80f),
