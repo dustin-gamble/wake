@@ -14,6 +14,11 @@ import android.view.MotionEvent;
  * <p>The horde creeps faster every minute and surges every so often, so you cannot settle. A
  * safe house every 500 m makes them fall back - a rest interval you have to earn by reaching it.
  * The gap is the game: it sits huge in the middle and every stroke moves it.
+ *
+ * <p>3.19.2, on the rower's direction ("funny speak boxes"): the horde talks. Every few seconds a
+ * zombie says something that fits the moment - lurching at the start, closing in, surging, sulking at
+ * a safe house, gloating when it has you - and when you are well clear, you answer back. Figures are
+ * drawn twice the size they first shipped, which on the tablet were barely readable.
  */
 final class ZombieRunGame extends GameView {
 
@@ -46,6 +51,25 @@ final class ZombieRunGame extends GameView {
     private float dustAccum;
     private boolean caughtFx;
 
+    /* Speech bubbles. Which figure speaks: 0-6 a zombie, -1 you. */
+    private static final float FIGURE_SCALE = 2.0f;
+    private static final String[] LINES_START = {"Is he... rowing?", "Lunch is getting away!", "Walk faster, Gary!", "Fresh legs!"};
+    private static final String[] LINES_CHASE = {"BRAAAINS", "Mmm, cardio-flavoured", "We never skip leg day", "Wait up!", "Is that a rowing machine?"};
+    private static final String[] LINES_CLOSE = {"Just a little nibble!", "Almost... there...", "I can smell the sweat!", "So close!", "Nom nom nom?"};
+    private static final String[] LINES_SURGE = {"CARDIO DAY!", "CHAAARGE!", "Sprint intervals!", "Faster, team!"};
+    private static final String[] LINES_SAFE = {"Aww, not the safe house", "We'll wait. We have time.", "No fair!", "Snack break over there?"};
+    private static final String[] LINES_GRABBED = {"Hold still, snack!", "Gotcha!", "Dinner is served!", "Don't wriggle!"};
+    private static final String[] LINES_FAR = {"Slow down!", "No fair, you have a boat!", "My legs fell off", "Are we there yet?", "I need a nap"};
+    private static final String[] LINES_YOU = {"Not today!", "Catch me if you can!", "Row, row, row your... bye!", "Is that all you've got?"};
+    private final java.util.Random chatter = new java.util.Random();
+    private String bubble = "";
+    private int bubbleWho;
+    private double bubbleUntil;
+    private double nextBubbleAt;
+    private boolean wasSurging;
+    private boolean wasSafe;
+    private boolean wasGrabbed;
+
     ZombieRunGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
@@ -70,6 +94,80 @@ final class ZombieRunGame extends GameView {
         creep = 0;
         surgeUntil = 0;
         safeUntil = 0;
+        bubbleUntil = 0;
+        nextBubbleAt = 1.5;
+        wasSurging = false;
+        wasSafe = false;
+        wasGrabbed = false;
+    }
+
+    /** Picks a line for the moment and who says it. Surges, safe houses and grabs speak at once. */
+    private void chatter() {
+        boolean surge = surging() && phase == Phase.RUNNING;
+        boolean inSafe = safe();
+        boolean grabbed = grabbedSeconds > 0;
+        boolean event = (surge && !wasSurging) || (inSafe && !wasSafe) || (grabbed && !wasGrabbed);
+        wasSurging = surge;
+        wasSafe = inSafe;
+        wasGrabbed = grabbed;
+        if (!event && sessionSeconds < nextBubbleAt) {
+            return;
+        }
+        String[] lines;
+        int who = chatter.nextInt(7);
+        if (phase == Phase.CAUGHT) {
+            return;
+        } else if (grabbed) {
+            lines = LINES_GRABBED;
+        } else if (surge) {
+            lines = LINES_SURGE;
+        } else if (inSafe) {
+            lines = LINES_SAFE;
+        } else if (phase == Phase.READY) {
+            lines = LINES_START;
+        } else if (gap < 14) {
+            lines = LINES_CLOSE;
+        } else if (gap > 60 && chatter.nextInt(3) == 0) {
+            lines = LINES_YOU;
+            who = -1;
+        } else if (gap > 60) {
+            lines = LINES_FAR;
+        } else {
+            lines = LINES_CHASE;
+        }
+        bubble = lines[chatter.nextInt(lines.length)];
+        bubbleWho = who;
+        bubbleUntil = sessionSeconds + 2.8;
+        nextBubbleAt = sessionSeconds + 4.0 + chatter.nextDouble() * 3.0;
+    }
+
+    /** A comic speech bubble with a tail, pointing down at the speaker's head. */
+    private void drawBubble(Canvas c, float headX, float headY, float w) {
+        double left = bubbleUntil - sessionSeconds;
+        if (left <= 0 || bubble.isEmpty()) {
+            return;
+        }
+        float alpha = (float) Math.min(1.0, Math.min(left / 0.3, (2.8 - left) / 0.2 + 0.1));
+        textPaint.setTextSize(dp(15f));
+        float tw = textPaint.measureText(bubble);
+        float padX = dp(12f);
+        float bh = dp(34f);
+        float bx = Math.max(dp(10f), Math.min(w - tw - padX * 2 - dp(10f), headX - tw / 2f - padX));
+        float by = headY - dp(22f) - bh;
+        paint.setColor(0xFFFFFFFF);
+        paint.setAlpha((int) (235 * alpha));
+        c.drawRoundRect(bx, by, bx + tw + padX * 2, by + bh, dp(14f), dp(14f), paint);
+        path.reset();
+        float tailX = Math.max(bx + dp(14f), Math.min(bx + tw + padX * 2 - dp(14f), headX));
+        path.moveTo(tailX - dp(8f), by + bh - dp(1f));
+        path.lineTo(tailX + dp(8f), by + bh - dp(1f));
+        path.lineTo(headX, headY - dp(6f));
+        path.close();
+        c.drawPath(path, paint);
+        paint.setAlpha(255);
+        int textColour = bubbleWho < 0 ? 0xFF0E6E60 : 0xFF3A1010;
+        bold(c, bubble, bx + padX + tw / 2f, by + bh * 0.66f, 15f,
+                (((int) (255 * alpha)) << 24) | (textColour & 0x00FFFFFF), Paint.Align.CENTER);
     }
 
     @Override
@@ -153,6 +251,7 @@ final class ZombieRunGame extends GameView {
                 grabbedSeconds = 0;
             }
         }
+        chatter();
         float danger = (float) Math.max(0, 1 - gap / 30.0);
         if (danger > 0.3f) {
             shake.kick(danger * dp(5f));
@@ -240,12 +339,18 @@ final class ZombieRunGame extends GameView {
 
         // The horde.
         float hordeX = youX - (float) gap * ppm;
+        float speakerX = youX;
         for (int i = 0; i < 7; i++) {
-            float zx = hordeX - i * dp(16f) - (i % 3) * dp(5f);
+            float zx = hordeX - i * dp(30f) - (i % 3) * dp(9f);
+            if (i == bubbleWho) {
+                speakerX = zx;
+            }
             float bob = (float) Math.sin(sessionSeconds * 6 + i) * dp(2f);
             drawRunner(c, zx, groundY + bob, i % 2 == 0 ? BAD : 0xFF9A3B32, hordeSpeed(),
                     (float) (scroll * 2.2 + i * 40), true);
         }
+        float headY = groundY - 46f * FIGURE_SCALE * dp(1f);
+        drawBubble(c, bubbleWho < 0 ? youX : Math.max(dp(40f), speakerX), headY, w);
         if (phase == Phase.CAUGHT && !caughtFx) {
             caughtFx = true;
             dust.burst(youX, groundY - dp(24f), 40, dp(120f), 0.9f, dp(3.5f), 0xFFB3122E, true);
@@ -308,7 +413,7 @@ final class ZombieRunGame extends GameView {
     /** A chunky figure with legs that swing with distance covered. */
     private void drawRunner(Canvas c, float x, float groundY, int color, float speed, float phaseIn,
                             boolean zombie) {
-        float s = dp(1f);
+        float s = dp(FIGURE_SCALE);
         float legSwing = speed > 0.2f ? (float) Math.sin(phaseIn) * 8f * s : 0f;
         paint.setColor(color);
         // Legs.

@@ -90,7 +90,7 @@ final class CanyonFlightGame extends GameView {
         float low = (float) profile.lowSpeed() - 0.4f;
         float high = (float) profile.highSpeed() + 0.2f;
         while (nextGateAt < x + 160f) {
-            float centre = recentSpeed + ((float) profile.typicalSpeed() - recentSpeed) * 0.3f;
+            float centre = recentSpeed + ((float) profile.typicalSpeed() - recentSpeed) * 0.1f;
             float target = centre + (rng.nextFloat() - 0.5f) * 0.8f;
             target = Math.max(Math.max(minSpeed + 0.3f, low), Math.min(Math.min(maxSpeed - 0.3f, high), target));
             gates.add(new Gate(nextGateAt, target));
@@ -107,6 +107,11 @@ final class CanyonFlightGame extends GameView {
         if (!started && driving && boat.value() > 0.3f) {
             started = true;
             runStart = sessionMeters;
+            // Rings start from the speed actually being rowed, not the profile's typical: on the tablet
+            // the first ring sat at 4.0 m/s against a 2.6 m/s row.
+            recentSpeed = Math.max(boat.value(), (float) profile.lowSpeed() - 0.3f);
+            gates.clear();
+            nextGateAt = (float) (sessionMeters - runStart) + 80f;
         }
     }
 

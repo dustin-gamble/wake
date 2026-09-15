@@ -121,11 +121,11 @@ var ROUTE = [
    resolution, labels on the ground". Altitude is now height above the ground or sea, and level
    flight is set from the rower's own typical power rather than a fixed 60 W. */
 var TAKEOFF_STROKES = 3;     // strokes before the bird leaves its hover
-var MIN_AGL = 35;            // metres above the ground or sea
+var MIN_AGL = 60;            // metres above the ground or sea (was 35: too close to unloaded hills)
 var MAX_AGL = 700;
 var START_AGL = 140;
 var CLIMB_SCALE = 22;        // m/s of climb per typical-watts above level flight
-var LEVEL_SHARE = 0.9;       // holding 90% of typical power holds your height
+var LEVEL_SHARE = 0.6;       // 60% of typical power holds your height (at 90% an easy row only skimmed the water)
 // Low flight feels fast: ~50 m/s (180 km/h) at a typical pace keeps the coast readable. It was
 // 250 km/h at 600 m, and 550 km/h before that, which blurred.
 var BASE_AIRSPEED = 15;      // m/s gliding with the boat stopped
@@ -477,8 +477,13 @@ function frame(now) {
   var probe = offsetPoint(atDistance(state.along + 500), state.weaveOffset);
   var under = groundAt(here.lat, here.lon);
   var front = groundAt(probe.lat, probe.lon);
+  // Until a terrain tile has loaded its height is unknown; never assume the ground has dropped away
+  // then, or the camera can end up inside a hill it cannot see yet.
+  var known = under !== null || front !== null;
   var target = Math.max(under === null ? state.ground : under, front === null ? 0 : front * 0.8);
-  state.ground += (target - state.ground) * Math.min(1, dt * (target > state.ground ? 1.4 : 0.5));
+  if (known || target > state.ground) {
+    state.ground += (target - state.ground) * Math.min(1, dt * (target > state.ground ? 1.4 : 0.5));
+  }
   var hoverBob = state.hovering ? Math.sin(now / 900) * 4 : 0;
   var altitude = state.ground + state.agl + state.bob + hoverBob;
   state.altitude = state.agl;

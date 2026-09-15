@@ -184,7 +184,11 @@ final class SkylineGame extends GameView {
         shake.step(dt);
         fx.step(dt, dp(220f));
 
-        if (driving && watts > 0) {
+        // Build whenever the rowing clock runs. The first version needed `driving`, which is only true
+        // briefly after each speed reading changes - on the tablet the crane said "idle" mid-row and
+        // placed nothing.
+        boolean building = isClockRunning() && watts > 0;
+        if (building) {
             concrete += watts * dt;
             while (concrete >= cost(nextUnits)) {
                 int[] plot = lowestPlot();
@@ -351,8 +355,9 @@ final class SkylineGame extends GameView {
         c.drawRect(hx, hy + hopH * (1f - full), hx + hopW, hy + hopH, paint);
         bold(c, nextUnits + (nextUnits == 1 ? " FLOOR" : " FLOORS"), hookX, hy + hopH + dp(16f), 11f,
                 nextUnits > 1 ? ACCENT : TEXT, Paint.Align.CENTER);
-        label(c, driving ? "pull harder for bigger blocks" : "CRANES IDLE - ROW TO BUILD", hookX,
-                hy + hopH + dp(30f), 8.5f, driving ? FAINT : WARN, Paint.Align.CENTER);
+        boolean working = isClockRunning();
+        label(c, working ? "pull harder for bigger blocks" : "CRANES IDLE - ROW TO BUILD", hookX,
+                hy + hopH + dp(30f), 8.5f, working ? FAINT : WARN, Paint.Align.CENTER);
     }
 
     /** This session's floors as their own tower on the right, windows lit by today's energy. */

@@ -119,8 +119,11 @@ final class WaveRiderGame extends GameView {
 
         if (phase == Phase.RIDING) {
             rideSeconds += dt;
-            // Position is the integral of the speed difference: match the wave and you hold.
-            position += (speed - wave) * dt * 0.42f;
+            // Position is the integral of the speed difference: match the wave and you hold. The first
+            // seconds of a ride are forgiven - on the tablet a rower still getting up to speed was
+            // wiped out after five seconds - and the drift is gentler than it first shipped (0.42).
+            float gain = rideSeconds < 6 ? 0.08f : 0.3f;
+            position += (speed - wave) * dt * gain;
             // With the handle sensor, leaning carves along the face - a small correction, not a
             // substitute for matching the wave's pace.
             if (hasSteering()) {

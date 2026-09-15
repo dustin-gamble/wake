@@ -8,8 +8,14 @@ import android.graphics.Path;
 /**
  * STROKE COACH: the shape of every stroke, against your best one, with one thing to work on.
  *
- * <p>Built on {@link PulseMeter}: each drive's paddle-speed curve at 100 ms resolution. Nothing else
+ * <p>Built on {@link PulseMeter}: each drive's <em>power</em> curve at 100 ms resolution. Nothing else
  * on this machine can show it - the monitor's own readings refresh once a stroke at best.
+ *
+ * <p>Power, not paddle speed. The first version drew speed, and on the tablet every stroke scored
+ * "peak arrives late" with the peak at 100%: a paddle keeps accelerating for as long as the hand
+ * pushes harder than the water drags, so its speed always peaks at the very end of the drive. The
+ * coaching question - where in the drive the effort peaks - is answered by power. Before energy is
+ * measured, the paddle's acceleration is used instead, which peaks at the same moment force does.
  *
  * <p>Per stroke it scores three things, 0-100: how closely the drive's shape matches your best
  * stroke, how near the drive:recovery ratio is to the coaching target of 1:2, and how consistent the
@@ -58,7 +64,7 @@ final class StrokeCoachGame extends GameView {
         scoreHead = 0;
         strokes = 0;
         scoreSum = 0;
-        String saved = bests.getString("coach.best");
+        String saved = bests.getString("coach.best.power");
         hasBest = false;
         if (saved != null) {
             String[] parts = saved.split(",");
@@ -96,8 +102,23 @@ final class StrokeCoachGame extends GameView {
         analyse(stroke, s);
     }
 
+    /** The effort through the drive: power when measured, else acceleration of the paddle. */
+    private static float[] effortCurve(PulseMeter.Stroke stroke) {
+        if (stroke.drivePower != null && stroke.drivePower.length == stroke.driveRates.length) {
+            return stroke.drivePower;
+        }
+        float[] r = stroke.driveRates;
+        float[] a = new float[r.length];
+        for (int i = 0; i < r.length; i++) {
+            float before = i > 0 ? r[i - 1] : r[i];
+            float after = i + 1 < r.length ? r[i + 1] : r[i];
+            a[i] = Math.max(0f, after - before);
+        }
+        return a;
+    }
+
     private void analyse(PulseMeter.Stroke stroke, S4Protocol.Status s) {
-        float[] shape = resample(stroke.driveRates);
+        float[] shape = resample(effortCurve(stroke));
         int peakIndex = 0;
         for (int i = 1; i < SHAPE; i++) {
             if (shape[i] > shape[peakIndex]) {
@@ -149,7 +170,7 @@ final class StrokeCoachGame extends GameView {
                 }
                 sb.append(String.format(java.util.Locale.US, "%.3f", best[i]));
             }
-            bests.putString("coach.best", sb.toString());
+            bests.putString("coach.best.power", sb.toString());
             bests.putFloat("coach.bestPower", bestPower);
         }
 
@@ -220,7 +241,7 @@ final class StrokeCoachGame extends GameView {
         float cb = h * 0.70f;
         paint.setColor(0xFF0D1420);
         c.drawRoundRect(cl - dp(12f), ct - dp(28f), cr + dp(12f), cb + dp(34f), dp(14f), dp(14f), paint);
-        label(c, "DRIVE SHAPE  ·  paddle speed from catch to finish", cl, ct - dp(8f), 10f, FAINT, Paint.Align.LEFT);
+        label(c, "DRIVE SHAPE  ·  your power from catch to finish", cl, ct - dp(8f), 10f, FAINT, Paint.Align.LEFT);
         paint.setColor(0x2235D0BA);
         c.drawRect(cl + (cr - cl) * 0.30f, ct, cl + (cr - cl) * 0.55f, cb, paint);
         label(c, "IDEAL PEAK", cl + (cr - cl) * 0.425f, cb + dp(14f), 9f, ACCENT, Paint.Align.CENTER);
@@ -272,7 +293,7 @@ final class StrokeCoachGame extends GameView {
         metric(c, rx, gy, strokes > 0 ? Math.round(similarity) + "%" : "--", "SHAPE MATCH");
         metric(c, rx + col, gy, strokes > 0 ? Math.round(consistency) + "%" : "--", "CONSISTENCY");
         metric(c, rx, gy + dp(64f), s != null ? String.format(java.util.Locale.US, "1:%.1f", s.driveSeconds > 0 ? s.recoverySeconds / s.driveSeconds : 0) : "--", "RATIO (AIM 1:2)");
-        metric(c, rx + col, gy + dp(64f), strokes > 0 ? Math.round(peakPos * 100) + "%" : "--", "PEAK THROUGH DRIVE");
+        metric(c, rx + col, gy + dp(64f), strokes > 0 ? Math.round(peakPos * 100) + "%" : "--", "POWER PEAKS AT (AIM 30-55%)");
         metric(c, rx, gy + dp(128f), s != null ? String.format(java.util.Locale.US, "%.2f s", s.driveSeconds) : "--", "DRIVE");
         metric(c, rx + col, gy + dp(128f), s != null && !Double.isNaN(s.averagePowerW) ? Math.round(s.averagePowerW) + " W" : "--", "POWER");
         String extra = s != null && !Double.isNaN(s.peakForceN) ? Math.round(s.peakForceN / 9.80665) + " kg" : "--";

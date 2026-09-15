@@ -15,19 +15,22 @@ LAPTOP_URL=${LAPTOP_URL:-$(cat "$ROOT/.laptop-url" 2>/dev/null || true)}
 
 export ANDROID_HOME="$WORK/android-sdk"
 export ANDROID_SDK_ROOT="$WORK/android-sdk"
+# --no-daemon: builds hung twice on 2026-09-15 with the client, a daemon and aapt2 all idle at 0% CPU
+# for over ten minutes. A daemon-less build is slower to start but cannot wedge on a stale daemon.
 GRADLE="$WORK/tools/gradle-8.13/bin/gradle"
+GRADLE_FLAGS="--no-daemon"
 
 NAME=$(sed -n "s/.*versionName '\(.*\)'.*/\1/p" "$ROOT/app/build.gradle")
 CODE=$(sed -n 's/.*versionCode \([0-9]*\).*/\1/p' "$ROOT/app/build.gradle")
 
 cd "$ROOT"
 echo "==> local build $NAME ($CODE)"
-"$GRADLE" -q assembleDebug -PdiagnosticServerUrl="$LAPTOP_URL" -PscreenshotUpload=true
+"$GRADLE" $GRADLE_FLAGS -q assembleDebug -PdiagnosticServerUrl="$LAPTOP_URL" -PscreenshotUpload=true
 cp app/build/outputs/apk/debug/app-debug.apk server/public/downloads/ergatta-row-diagnostic-debug.apk
 cp app/build/outputs/apk/debug/app-debug.apk "$WORK/../outputs/ergatta-row-diagnostic-debug.apk" 2>/dev/null || true
 
 echo "==> public build $NAME ($CODE)"
-"$GRADLE" -q assembleDebug
+"$GRADLE" $GRADLE_FLAGS -q assembleDebug
 rm -f docs/downloads/wake-*.apk
 cp app/build/outputs/apk/debug/app-debug.apk "docs/downloads/wake-$NAME-debug.apk"
 sed -i '' "s/wake-[0-9][0-9.]*-debug\.apk/wake-$NAME-debug.apk/g; s/Download APK · [0-9][0-9.]*/Download APK · $NAME/" docs/index.html

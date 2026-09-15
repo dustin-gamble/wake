@@ -133,6 +133,8 @@ public class MainActivity extends Activity
      * sessions and can be reset on the S4, so the app tracks its own base and re-bases on a reset.
      */
     private long sessionFirstStrokeMs;
+    /** Lifetime + session metres when this session's first stroke landed. */
+    private double sessionStartMetres = -1;
     private double sessionWattSum;
     private int sessionWattSamples;
     private TextView lastSessionCard;
@@ -817,6 +819,7 @@ public class MainActivity extends Activity
         if (status.watts > 0) {
             if (sessionFirstStrokeMs == 0) {
                 sessionFirstStrokeMs = System.currentTimeMillis();
+                sessionStartMetres = journeyLifetime + journeySession;
             }
             sessionWattSum += status.watts;
             sessionWattSamples++;
@@ -835,14 +838,22 @@ public class MainActivity extends Activity
         journeySession = d - journeyBase;
     }
 
+    /**
+     * Metres rowed since this session's first stroke. Not journeySession: that is folded into the
+     * lifetime total every minute, so on the tablet "Last session" read 46 m and Session Art 0 m.
+     */
+    private double sessionMetres() {
+        return sessionStartMetres < 0 ? 0 : Math.max(0, journeyLifetime + journeySession - sessionStartMetres);
+    }
+
     /** Remembers this session's headline numbers for the home screen. */
     private void saveLastSession() {
-        if (sessionFirstStrokeMs == 0 || journeySession < 20) {
+        if (sessionFirstStrokeMs == 0 || sessionMetres() < 20) {
             return;
         }
         float seconds = (System.currentTimeMillis() - sessionFirstStrokeMs) / 1000f;
         personalBests.putString("last.session", String.format(Locale.US, "%d|%d|%d",
-                Math.round(journeySession), Math.round(seconds),
+                Math.round(sessionMetres()), Math.round(seconds),
                 sessionWattSamples > 0 ? Math.round(sessionWattSum / sessionWattSamples) : 0));
     }
 
@@ -1125,7 +1136,7 @@ public class MainActivity extends Activity
         SessionArtView art = new SessionArtView(this);
         art.setSession(power, rate,
                 java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(new java.util.Date()),
-                Math.round(journeySession) + " m", PersonalBests.formatTime(seconds),
+                Math.round(sessionMetres()) + " m", PersonalBests.formatTime(seconds),
                 (sessionWattSamples > 0 ? Math.round(sessionWattSum / sessionWattSamples) : 0) + " W avg",
                 Math.round(kcal) + " kcal");
 
@@ -1453,7 +1464,8 @@ public class MainActivity extends Activity
         }
         for (java.util.Map.Entry<String, Object> e : sorted.entrySet()) {
             String key = e.getKey();
-            if (key.startsWith("ghost.") || key.startsWith("cal.") || key.equals("regatta.day")
+            if (key.startsWith("ghost.") || key.startsWith("cal.") || key.startsWith("flight.")
+                    || key.startsWith("timelast.") || key.startsWith("timefriend.") || key.equals("regatta.day")
                     || key.equals("regatta.division") || key.equals("hr.max")) {
                 continue;   // a recording or a calibration constant, not a record
             }
@@ -2244,8 +2256,12 @@ public class MainActivity extends Activity
         bars.setOrientation(LinearLayout.HORIZONTAL);
         bars.setPadding(dp(12), dp(8), dp(12), dp(8));
         bars.setBackgroundColor(getColorCompat(R.color.surface));
-        bars.addView(powerBar, new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        // A gap between the two: on the tablet the power bar's value ran straight into the rate
+        // bar's label ("59 WSTROKE RATE").
+        LinearLayout.LayoutParams powerParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        powerParams.rightMargin = dp(32);
+        bars.addView(powerBar, powerParams);
         bars.addView(rateBar, new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(bars, marginTop(dp(4)));

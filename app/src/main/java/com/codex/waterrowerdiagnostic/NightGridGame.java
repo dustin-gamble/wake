@@ -51,7 +51,7 @@ final class NightGridGame extends GameView {
             float row = r.nextFloat();
             houseY[i] = 0.52f + row * 0.36f;
             houseX[i] = 0.24f + r.nextFloat() * 0.74f;
-            houseS[i] = 0.6f + row * 0.7f;
+            houseS[i] = 1.0f + row * 1.1f;   // bigger than first shipped: dark houses were invisible
         }
         // Lit in order of distance from the wheel at the bottom left.
         Integer[] idx = new Integer[MAX_HOUSES];
@@ -96,8 +96,9 @@ final class NightGridGame extends GameView {
     }
 
     private float demand() {
-        // An evening peak every few minutes: 80% of typical power, swelling by a tenth.
-        return (float) (profile.typicalWatts() * 0.8 * (1 + 0.1 * Math.sin(sessionSeconds / 45.0)));
+        // An evening peak every few minutes: 60% of typical power, swelling by a tenth. Was 80%, and
+        // on the tablet an easy 32 W row against 106 W demand lit nothing at all - it looked dead.
+        return (float) (profile.typicalWatts() * 0.6 * (1 + 0.1 * Math.sin(sessionSeconds / 45.0)));
     }
 
     @Override
@@ -120,7 +121,9 @@ final class NightGridGame extends GameView {
         }
         lastWork = work;
         boolean rowing = isClockRunning();
-        float targetShare = Math.max(0f, Math.min(1f, 0.5f + (supply - demand) / demand * 1.5f));
+        // The share of the town lit follows supply over demand, so easy rowing lights part of it
+        // and meeting demand lights it all. (Was all-or-nothing around the demand line.)
+        float targetShare = Math.max(0f, Math.min(1f, supply / demand));
         if (!rowing && supply < 5) {
             targetShare = 0f;
         }
@@ -206,21 +209,34 @@ final class NightGridGame extends GameView {
             float hx = houseX[i] * w;
             float hy = houseY[i] * h;
             float s = houseS[i] * dp(22f);
-            paint.setColor(0xFF1C2433);
+            // Walls and roof in moonlit tones, so the unlit town still reads as a town.
+            paint.setColor(on[i] ? 0xFF3A3F52 : 0xFF2A3346);
             c.drawRect(hx - s * 0.5f, hy - s * 0.6f, hx + s * 0.5f, hy, paint);
             path.reset();
-            path.moveTo(hx - s * 0.6f, hy - s * 0.6f);
-            path.lineTo(hx, hy - s);
-            path.lineTo(hx + s * 0.6f, hy - s * 0.6f);
+            path.moveTo(hx - s * 0.62f, hy - s * 0.6f);
+            path.lineTo(hx, hy - s * 1.02f);
+            path.lineTo(hx + s * 0.62f, hy - s * 0.6f);
             path.close();
-            paint.setColor(0xFF141A26);
+            paint.setColor(on[i] ? 0xFF5A3A36 : 0xFF3A2E33);
             c.drawPath(path, paint);
+            paint.setColor(0xFF1A2030);
+            c.drawRect(hx - s * 0.08f, hy - s * 0.28f, hx + s * 0.08f, hy, paint);   // door
             if (on[i]) {
                 float flicker = 0.85f + 0.15f * (float) Math.sin(sessionSeconds * 3 + i);
-                Fx.glow(c, hx, hy - s * 0.3f, s * 1.3f, ((int) (0x50 * flicker) << 24) | 0xFFD37A);
+                Fx.glow(c, hx, hy - s * 0.3f, s * 1.6f, ((int) (0x66 * flicker) << 24) | 0xFFD37A);
                 paint.setColor(0xFFFFE08A);
-                c.drawRect(hx - s * 0.3f, hy - s * 0.45f, hx - s * 0.05f, hy - s * 0.2f, paint);
-                c.drawRect(hx + s * 0.05f, hy - s * 0.45f, hx + s * 0.3f, hy - s * 0.2f, paint);
+                c.drawRect(hx - s * 0.38f, hy - s * 0.48f, hx - s * 0.14f, hy - s * 0.26f, paint);
+                c.drawRect(hx + s * 0.14f, hy - s * 0.48f, hx + s * 0.38f, hy - s * 0.26f, paint);
+                // A street lamp beside every lit house.
+                paint.setColor(0xFF8A93A6);
+                c.drawRect(hx + s * 0.72f, hy - s * 0.9f, hx + s * 0.76f, hy, paint);
+                Fx.glow(c, hx + s * 0.74f, hy - s * 0.92f, s * 0.6f, 0x88FFE8A0);
+                paint.setColor(0xFFFFF2C0);
+                c.drawCircle(hx + s * 0.74f, hy - s * 0.92f, s * 0.07f, paint);
+            } else {
+                paint.setColor(0xFF141A26);
+                c.drawRect(hx - s * 0.38f, hy - s * 0.48f, hx - s * 0.14f, hy - s * 0.26f, paint);
+                c.drawRect(hx + s * 0.14f, hy - s * 0.48f, hx + s * 0.38f, hy - s * 0.26f, paint);
             }
         }
         if (supply < demand * 0.8f && rowing) {
