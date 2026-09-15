@@ -395,6 +395,7 @@ final class RowRunnerGame extends GameView {
         Fx.glow(c, w * 0.85f, h * 0.14f, dp(60f), 0x66FFE28A);
         paint.setColor(0xFFFFE28A);
         c.drawCircle(w * 0.85f, h * 0.14f, dp(22f), paint);
+        drawPixelSky(c, w, h, groundY, ppm, camX);
         paint.setColor(0xFF4E9E4A);
         for (int i = 0; i < 6; i++) {
             float hx = ((i * 260f * dp(1f)) - (camX * ppm * 0.12f)) % (w + dp(300f));
@@ -491,6 +492,81 @@ final class RowRunnerGame extends GameView {
                     }
                     break;
             }
+        }
+    }
+
+    /**
+     * 3.19.5: the sky was two-thirds of the screen and nearly empty. In the same blocky style as the
+     * clouds: far mountains with snow caps, a castle on the horizon now and then, pixel birds, and an
+     * airship drifting the other way. All pure background - nothing up here can be hit.
+     */
+    private void drawPixelSky(Canvas c, float w, float h, float groundY, float ppm, float camX) {
+        double t = sessionSeconds;
+        float px = dp(6f);
+        // Far mountains: stepped pixel triangles at a very slow parallax.
+        float mSpan = dp(360f);
+        float mOff = (camX * ppm * 0.05f) % mSpan;
+        for (float mx = -mOff - mSpan; mx < w + mSpan; mx += mSpan) {
+            int k = (int) Math.floor((mx + camX * ppm * 0.05f) / mSpan + 0.5f);
+            float peakH = dp(150f) + (Math.abs(k * 7) % 3) * dp(40f);
+            float base = groundY + dp(10f);
+            for (float step = 0; step < peakH; step += px * 2) {
+                float half = (peakH - step) * 0.9f;
+                paint.setColor(0xFF7FA3C8);
+                c.drawRect(mx - half, base - step - px * 2, mx + half, base - step, paint);
+            }
+            paint.setColor(0xFFF2F7FB);
+            for (float step = peakH - dp(36f); step < peakH; step += px * 2) {
+                float half = (peakH - step) * 0.9f;
+                c.drawRect(mx - half, base - step - px * 2, mx + half, base - step, paint);
+            }
+        }
+        // A castle on the horizon every so often.
+        float cSpan = w * 1.6f;
+        float cx = (float) (((w * 0.7f - camX * ppm * 0.08f) % cSpan + cSpan) % cSpan) - dp(100f);
+        float cBase = groundY - dp(60f);
+        paint.setColor(0xFF5F7FA6);
+        c.drawRect(cx - dp(48f), cBase - dp(48f), cx + dp(48f), cBase + dp(40f), paint);
+        c.drawRect(cx - dp(66f), cBase - dp(84f), cx - dp(38f), cBase + dp(40f), paint);
+        c.drawRect(cx + dp(38f), cBase - dp(84f), cx + dp(66f), cBase + dp(40f), paint);
+        for (int b = 0; b < 3; b++) {
+            c.drawRect(cx - dp(66f) + b * dp(10f), cBase - dp(96f), cx - dp(60f) + b * dp(10f), cBase - dp(84f), paint);
+            c.drawRect(cx + dp(38f) + b * dp(10f), cBase - dp(96f), cx + dp(44f) + b * dp(10f), cBase - dp(84f), paint);
+        }
+        paint.setColor(0xFFE0582E);
+        c.drawRect(cx - dp(53f), cBase - dp(120f), cx - dp(51f), cBase - dp(96f), paint);
+        c.drawRect(cx - dp(51f), cBase - dp(120f), cx - dp(37f) + (float) Math.sin(t * 5) * dp(2f), cBase - dp(110f), paint);
+        paint.setColor(0xFF2E4466);
+        c.drawRect(cx - dp(10f), cBase + dp(10f), cx + dp(10f), cBase + dp(40f), paint);
+        // Pixel birds: two-block wings that flap.
+        paint.setColor(0xFF1F2A3A);
+        float fx = (float) (w - ((t * dp(45f)) % (w + dp(300f))));
+        for (int b = 0; b < 4; b++) {
+            float bx = fx + b * dp(28f);
+            float by = h * 0.26f + (b % 2) * dp(14f);
+            boolean up = ((int) (t * 6 + b)) % 2 == 0;
+            c.drawRect(bx - px * 2, by + (up ? -px : 0), bx - px, by + (up ? 0 : px), paint);
+            c.drawRect(bx - px, by, bx + px, by + px, paint);
+            c.drawRect(bx + px, by + (up ? -px : 0), bx + px * 2, by + (up ? 0 : px), paint);
+        }
+        // An airship drifting the other way, slowly.
+        float ax = (float) (((t * dp(18f)) % (w + dp(400f))) - dp(200f));
+        float ay = h * 0.20f;
+        paint.setColor(0xFFE8E3D3);
+        c.drawRect(ax - dp(60f), ay - dp(14f), ax + dp(60f), ay + dp(14f), paint);
+        c.drawRect(ax - dp(48f), ay - dp(20f), ax + dp(48f), ay + dp(20f), paint);
+        paint.setColor(0xFFE0582E);
+        c.drawRect(ax - dp(48f), ay - dp(3f), ax + dp(48f), ay + dp(3f), paint);
+        paint.setColor(0xFF8B5A2B);
+        c.drawRect(ax - dp(18f), ay + dp(24f), ax + dp(18f), ay + dp(34f), paint);
+        paint.setColor(0xFFFFE28A);
+        c.drawRect(ax - dp(12f), ay + dp(27f), ax - dp(6f), ay + dp(31f), paint);
+        c.drawRect(ax + dp(6f), ay + dp(27f), ax + dp(12f), ay + dp(31f), paint);
+        paint.setColor(0xFFDCEBF7);
+        if (((int) (t * 8)) % 2 == 0) {
+            c.drawRect(ax - dp(70f), ay - dp(12f), ax - dp(62f), ay + dp(12f), paint);
+        } else {
+            c.drawRect(ax - dp(70f), ay - dp(4f), ax - dp(62f), ay + dp(4f), paint);
         }
     }
 

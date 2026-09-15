@@ -232,7 +232,9 @@ final class DailyRowGame extends GameView {
         float barY = h * 0.34f;
         // A progress ring around a medal, left of the live readout.
         if (phase == Phase.DONE) {
-            progress = 1f;
+            // A win fills the ring; a miss shows how close it came - a miss must not look like a win.
+            double ratio = challenge == Challenge.TRIAL_500 ? target / Math.max(1e-6, result) : result / Math.max(1e-6, target);
+            progress = success ? 1f : (float) Math.max(0, Math.min(0.99, ratio));
         }
         ringShown += (progress - ringShown) * Math.min(1f, dt * 4f);
         float rcx = w * 0.17f;
@@ -249,9 +251,10 @@ final class DailyRowGame extends GameView {
         paint.setStyle(Paint.Style.FILL);
         boolean won = phase == Phase.DONE && success;
         Fx.glow(c, rcx, rcy, rr * (1.2f + 0.3f * ringShown), won ? 0x88F5C518 : ((int) (40 + 60 * ringShown) << 24) | 0x35D0BA);
-        paint.setColor(won ? 0xFFF5C518 : blend(0xFF2A3648, 0xFFB8890B, ringShown));
+        boolean lost = phase == Phase.DONE && !success;
+        paint.setColor(won ? 0xFFF5C518 : lost ? 0xFF4A3F36 : blend(0xFF2A3648, 0xFFB8890B, ringShown));
         c.drawCircle(rcx, rcy, rr * 0.55f, paint);
-        paint.setColor(won ? 0xFFFFE28A : blend(0xFF3A4658, 0xFFF5C518, ringShown));
+        paint.setColor(won ? 0xFFFFE28A : lost ? 0xFF7A6A58 : blend(0xFF3A4658, 0xFFF5C518, ringShown));
         shape.rewind();
         for (int k = 0; k < 10; k++) {
             double a = -Math.PI / 2 + k * Math.PI / 5;
