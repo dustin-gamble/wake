@@ -219,7 +219,7 @@ final class CrewBoatGame extends GameView {
         // 3.19.5: the HUD sits on the light sky, so it gets dark pills (seen unreadable on the emulator).
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0x990A1420);
-        c.drawRoundRect(cx - dp(120f), dp(6f), cx + dp(120f), dp(86f), dp(14f), dp(14f), paint);
+        c.drawRoundRect(cx - dp(170f), dp(6f), cx + dp(170f), dp(86f), dp(14f), dp(14f), paint);
         c.drawRoundRect(dp(8f), dp(16f), dp(300f), dp(38f), dp(10f), dp(10f), paint);
         bold(c, Math.round(sync * 100) + "%", cx, dp(44f), 38f, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD, Paint.Align.CENTER);
         label(c, swing >= 6 ? "SWING  ·  " + swing + " STROKES IN TIME" : "CREW SYNC", cx, dp(62f), 10f,
