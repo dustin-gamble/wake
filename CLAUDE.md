@@ -240,6 +240,14 @@ last frame left on the paint - a 20%-white "lost life" dot, say - dimmed the who
 anything new**, or give gradients their own paint. No amount of reading the code found this; one
 screenshot did.
 
+## Fx.glow is cached - keep it that way (3.19.5)
+
+`Fx.glow` used to build a new `RadialGradient` on every call. The scenery pass calls it dozens of times
+a frame (Mega Pull's lit bulbs alone ~70), which is garbage the tablet's older hardware would stutter
+on - and the fast emulator cannot show it. Gradients are now centred on the origin, drawn with a
+canvas translate, and cached (LRU of 96) by rounded radius and alpha quantised to 16 steps. Glows in a
+loop are fine now; a glow whose radius changes every frame still allocates, so keep animated glows few.
+
 ## The 3.19.4 - 3.19.5 visual scrub
 
 Every game was screenshotted on the emulator with the demo rower, the emptiest fixed first:

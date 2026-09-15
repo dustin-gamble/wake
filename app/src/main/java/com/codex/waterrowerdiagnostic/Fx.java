@@ -100,12 +100,31 @@ final class Fx {
     private static final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint vignettePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
+    /**
+     * Gradients for {@link #glow}, centred on the origin and reused. 3.19.5: the scenery pass calls
+     * glow ~70 times a frame in places (Mega Pull's bulbs), and a new RadialGradient each call is
+     * garbage the tablet's older hardware would stutter on. The emulator could not show that.
+     */
+    private static final android.util.LruCache<Long, RadialGradient> glowCache =
+            new android.util.LruCache<>(96);
+
     /** Soft radial glow, e.g. behind the player or around a coin. */
     static void glow(Canvas c, float cx, float cy, float radius, int argb) {
-        glowPaint.setShader(new RadialGradient(cx, cy, radius, argb, argb & 0x00FFFFFF,
-                Shader.TileMode.CLAMP));
-        c.drawCircle(cx, cy, radius, glowPaint);
+        int r = Math.max(1, Math.round(radius));
+        // Alpha quantised to 16 steps so a continuously fading glow reuses a handful of shaders.
+        int colour = (argb & 0x00FFFFFF) | ((((argb >>> 24) & 0xFF) & 0xF0) << 24);
+        long key = ((long) r << 32) ^ (colour & 0xFFFFFFFFL);
+        RadialGradient g = glowCache.get(key);
+        if (g == null) {
+            g = new RadialGradient(0, 0, r, colour, colour & 0x00FFFFFF, Shader.TileMode.CLAMP);
+            glowCache.put(key, g);
+        }
+        c.save();
+        c.translate(cx, cy);
+        glowPaint.setShader(g);
+        c.drawCircle(0, 0, r, glowPaint);
         glowPaint.setShader(null);
+        c.restore();
     }
 
     /** Darkens the edges; {@code strength} 0..1, tinted so danger can read as red. */

@@ -174,7 +174,10 @@ final class CanyonChaseGame extends GameView {
         drawHorizonLife(c, w, horizon);
 
         // Canyon: walk segments from far to near so nearer geometry paints over farther.
-        float camLat = lateral;
+        // Camera kept inside the walls. Speed steering does not follow the bends, so offLine can pass
+        // CANYON_HALF and the camera ended up outside the canyon, looking at a black void (emulator,
+        // 3.19.5). Drawing only: scraping and the hunter still use the real offLine.
+        float camLat = centre + Math.max(-(CANYON_HALF - 1.5f), Math.min(CANYON_HALF - 1.5f, offLine));
         for (int i = SEGMENTS - 1; i >= 1; i--) {
             float zFar = i * SEG_LEN;
             float zNear = (i - 1) * SEG_LEN;
