@@ -238,6 +238,7 @@ final class CrewBoatGame extends GameView {
 
     /** Sky, a far bank of trees and a crowd along it with flags, scrolling with the boat. */
     private void drawBank(Canvas c, float w, float h, float waterTop, float ppm) {
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new android.graphics.LinearGradient(0, 0, 0, waterTop, 0xFF3D78B8, 0xFFBFDDF2,
                 android.graphics.Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, waterTop, paint);

@@ -35,6 +35,15 @@ final class RocketLaunchGame extends GameView {
     private final Path path = new Path();
     private final Fx.Particles fx = new Fx.Particles();
     private final Fx.Shake shake = new Fx.Shake();
+    // 3.19.5: smoke trail puffs, and the spent booster tumbling away after a stage.
+    private final float[] smokeX = new float[40];
+    private final float[] smokeY = new float[40];
+    private final float[] smokeLife = new float[40];
+    private int smokeNext;
+    private double smokeClock;
+    private float boosterY;
+    private float boosterSpin;
+    private double boosterUntil;
     private final float[] starX = new float[70];
     private final float[] starY = new float[70];
     private final float[] starR = new float[70];
@@ -152,6 +161,9 @@ final class RocketLaunchGame extends GameView {
                 stageFlash = 1.4;
                 shake.kick(dp(10f));
                 fx.burst(w * 0.5f, h * 0.62f, 34, dp(200f), 0.9f, dp(4f), 0xFFBFE3FF, false);
+                boosterY = h * 0.58f + dp(44f);
+                boosterSpin = 0f;
+                boosterUntil = sessionSeconds + 3.0;
             }
             if (altitude >= KARMAN) {
                 orbit = true;
@@ -168,6 +180,7 @@ final class RocketLaunchGame extends GameView {
         float space = Math.min(1f, altitude / 80_000f);
         c.save();
         c.translate(shake.dx, shake.dy);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, h,
                 blend(0xFF2F7FD0, 0xFF000308, space), blend(0xFF9ED2F5, 0xFF040A14, space),
                 Shader.TileMode.CLAMP));
@@ -186,7 +199,9 @@ final class RocketLaunchGame extends GameView {
 
         float rocketY = h * 0.58f;
         // Ground and the curve of the earth receding.
-        float groundY = rocketY + dp(60f) + Math.min(h, altitude * 0.012f);
+        // 3.19.5: the ground drops away within the first few km. At 0.012 px/m the rocket still sat
+        // beside its launch tower at 2.4 km on the emulator.
+        float groundY = rocketY + dp(60f) + Math.min(h, altitude * 0.25f);
         if (groundY < h + dp(400f)) {
             paint.setColor(0xFF2E6B35);
             if (altitude < 20_000f) {
@@ -196,9 +211,22 @@ final class RocketLaunchGame extends GameView {
                 for (float gx = -scroll; gx < w; gx += dp(60f)) {
                     c.drawRect(gx, groundY, gx + dp(3f), h, paint);
                 }
-                // Launch pad.
+                // Launch pad and its tower, which the rocket leaves behind.
                 paint.setColor(0xFF4A4A55);
                 c.drawRect(w * 0.5f - dp(40f), groundY - dp(6f), w * 0.5f + dp(40f), groundY, paint);
+                float towerX = w * 0.5f - dp(48f);
+                paint.setColor(0xFFB8452F);
+                c.drawRect(towerX - dp(6f), groundY - dp(120f), towerX, groundY - dp(6f), paint);
+                c.drawRect(towerX - dp(14f), groundY - dp(120f), towerX - dp(10f), groundY - dp(6f), paint);
+                paint.setStrokeWidth(dp(1.5f));
+                for (float ty = groundY - dp(114f); ty < groundY - dp(8f); ty += dp(14f)) {
+                    c.drawLine(towerX - dp(14f), ty, towerX, ty + dp(14f), paint);
+                }
+                c.drawRect(towerX - dp(14f), groundY - dp(80f), w * 0.5f - dp(16f), groundY - dp(76f), paint);
+                if (((int) (sessionSeconds * 2)) % 2 == 0) {
+                    paint.setColor(0xFFFF3B3B);
+                    c.drawCircle(towerX - dp(7f), groundY - dp(126f), dp(3f), paint);
+                }
             } else {
                 // High enough for the horizon to curve.
                 paint.setColor(0xFF2E6B35);
@@ -211,17 +239,35 @@ final class RocketLaunchGame extends GameView {
             }
         }
 
-        // Clouds drifting down past you while in the troposphere.
+        // Clouds drifting down past you while in the troposphere: puffy, several sizes.
         if (altitude < 16_000f) {
-            paint.setColor(0xCCFFFFFF);
-            for (int i = 0; i < 5; i++) {
-                float cy = ((i * 173f * dp(1f)) + altitude * 0.05f) % (h + dp(120f)) - dp(60f);
-                float cx = (i % 2 == 0 ? 0.22f : 0.78f) * w + (float) Math.sin(i + sessionSeconds * 0.2) * dp(20f);
-                paint.setAlpha((int) (170 * (1f - altitude / 16_000f)));
-                c.drawRoundRect(cx - dp(46f), cy, cx + dp(46f), cy + dp(20f), dp(10f), dp(10f), paint);
-                c.drawRoundRect(cx - dp(26f), cy - dp(12f), cx + dp(22f), cy + dp(20f), dp(12f), dp(12f), paint);
+            int cloudA = (int) (190 * (1f - altitude / 16_000f));
+            for (int i = 0; i < 7; i++) {
+                float cy = ((i * 151f * dp(1f)) + altitude * 0.05f) % (h + dp(160f)) - dp(80f);
+                if (cy > groundY - dp(30f)) {
+                    continue;   // clouds belong in the sky, not drifting across the field
+                }
+                float cx = ((i * 0.29f + 0.1f) % 1f) * w + (float) Math.sin(i + sessionSeconds * 0.2) * dp(20f);
+                float sc = 0.7f + (i % 3) * 0.35f;
+                paint.setColor((cloudA << 24) | 0xFFFFFF);
+                c.drawOval(cx - dp(70f) * sc, cy - dp(12f) * sc, cx + dp(70f) * sc, cy + dp(14f) * sc, paint);
+                c.drawOval(cx - dp(40f) * sc, cy - dp(30f) * sc, cx + dp(20f) * sc, cy + dp(6f) * sc, paint);
+                c.drawOval(cx - dp(4f) * sc, cy - dp(22f) * sc, cx + dp(46f) * sc, cy + dp(8f) * sc, paint);
             }
-            paint.setAlpha(255);
+        }
+        drawAltitudeLife(c, w, h);
+        drawSmoke(c, w, h, dt);
+        if (sessionSeconds < boosterUntil) {
+            // The spent stage falls away, tumbling.
+            boosterY += dp(160f) * dt;
+            boosterSpin += 220f * dt;
+            c.save();
+            c.rotate(boosterSpin, w * 0.5f + dp(26f), boosterY);
+            paint.setColor(0xFFCFD6DE);
+            c.drawRoundRect(w * 0.5f + dp(18f), boosterY - dp(22f), w * 0.5f + dp(34f), boosterY + dp(22f), dp(4f), dp(4f), paint);
+            paint.setColor(0xFFD8453C);
+            c.drawRect(w * 0.5f + dp(18f), boosterY + dp(12f), w * 0.5f + dp(34f), boosterY + dp(22f), paint);
+            c.restore();
         }
 
         // Exhaust plume, then the rocket.
@@ -363,6 +409,96 @@ final class RocketLaunchGame extends GameView {
         label(c, "HOVER " + Math.round(hoverWatts()) + " W", hoverX, barY - dp(9f), 8f, TEXT,
                 Paint.Align.CENTER);
         label(c, watts + " W", barL, barY - dp(9f), 8.5f, FAINT, Paint.Align.LEFT);
+    }
+
+    /** Birds and a jet low down, a weather balloon higher, then satellites, the moon and a station. */
+    private void drawAltitudeLife(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        if (altitude < 6_000f) {
+            float by = h * 0.35f + (altitude * 0.08f) % (h * 0.6f);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2f));
+            paint.setColor(0xAA1A2230);
+            float bx0 = (float) (w - ((t * dp(50f)) % (w + dp(300f))));
+            for (int b = 0; b < 5; b++) {
+                float bx = bx0 + b * dp(22f);
+                float yy = by + (b % 2) * dp(9f);
+                float flap = (float) Math.sin(t * 8 + b) * dp(4f);
+                c.drawLine(bx - dp(7f), yy - flap, bx, yy, paint);
+                c.drawLine(bx, yy, bx + dp(7f), yy - flap, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+        if (altitude > 3_000f && altitude < 14_000f) {
+            float jy = h * 0.2f + ((altitude - 3_000f) * 0.06f) % (h * 0.7f);
+            float jx = (float) (((t * dp(120f)) % (w + dp(400f))) - dp(200f));
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(0x88FFFFFF);
+            c.drawLine(jx - dp(220f), jy, jx - dp(20f), jy, paint);
+            paint.setColor(0xFFE9EEF5);
+            c.drawRoundRect(jx - dp(22f), jy - dp(4f), jx + dp(22f), jy + dp(4f), dp(4f), dp(4f), paint);
+            c.drawRect(jx - dp(6f), jy - dp(14f), jx + dp(4f), jy + dp(14f), paint);
+        }
+        if (altitude > 18_000f && altitude < 40_000f) {
+            float gy = h * 0.3f + ((altitude - 18_000f) * 0.02f) % (h * 0.6f);
+            float gx = w * 0.2f + (float) Math.sin(t * 0.3) * dp(20f);
+            paint.setColor(0xDDF4F4F4);
+            c.drawCircle(gx, gy, dp(18f), paint);
+            paint.setStrokeWidth(dp(1f));
+            paint.setColor(0x99FFFFFF);
+            c.drawLine(gx, gy + dp(18f), gx, gy + dp(50f), paint);
+            paint.setColor(0xFFF5C518);
+            c.drawRect(gx - dp(4f), gy + dp(50f), gx + dp(4f), gy + dp(58f), paint);
+        }
+        float space = Math.min(1f, altitude / 80_000f);
+        if (space > 0.5f) {
+            int a = (int) (255 * Math.min(1f, (space - 0.5f) * 3f));
+            Fx.glow(c, w * 0.18f, h * 0.18f, dp(70f), (Math.min(a, 90) << 24) | 0xE9EEF5);
+            paint.setColor((a << 24) | 0xE9EEF5);
+            c.drawCircle(w * 0.18f, h * 0.18f, dp(30f), paint);
+            paint.setColor((Math.min(a, 60) << 24) | 0x9AA5B1);
+            c.drawCircle(w * 0.18f - dp(8f), h * 0.18f - dp(6f), dp(6f), paint);
+            c.drawCircle(w * 0.18f + dp(10f), h * 0.18f + dp(8f), dp(4f), paint);
+            for (int k = 0; k < 2; k++) {
+                float sx = (float) (((t * dp(26f + k * 18f) + k * 700) % (w + dp(200f))) - dp(100f));
+                float sy = h * (0.3f + k * 0.25f);
+                paint.setColor((a << 24) | 0xC8D2DC);
+                c.drawRect(sx - dp(5f), sy - dp(5f), sx + dp(5f), sy + dp(5f), paint);
+                paint.setColor((a << 24) | 0x3A6EA5);
+                c.drawRect(sx - dp(24f), sy - dp(3f), sx - dp(7f), sy + dp(3f), paint);
+                c.drawRect(sx + dp(7f), sy - dp(3f), sx + dp(24f), sy + dp(3f), paint);
+                if (((int) (t * 2 + k)) % 2 == 0) {
+                    paint.setColor((a << 24) | 0xFF4A4A);
+                    c.drawCircle(sx, sy - dp(8f), dp(2f), paint);
+                }
+            }
+        }
+    }
+
+    /** Smoke puffs shed from the nozzle while thrusting, growing and fading as they fall behind. */
+    private void drawSmoke(Canvas c, float w, float h, float dt) {
+        float rocketY = h * 0.58f;
+        smokeClock += dt;
+        if (started && !over && plume > 0.2f && smokeClock > 0.06) {
+            smokeClock = 0;
+            smokeX[smokeNext] = w * 0.5f + (float) (Math.random() - 0.5) * dp(10f);
+            smokeY[smokeNext] = rocketY + dp(40f) + plume * dp(60f);
+            smokeLife[smokeNext] = 1f;
+            smokeNext = (smokeNext + 1) % smokeX.length;
+        }
+        float space = Math.min(1f, altitude / 80_000f);
+        for (int i = 0; i < smokeX.length; i++) {
+            if (smokeLife[i] <= 0) {
+                continue;
+            }
+            smokeLife[i] -= dt * 0.6f;
+            smokeY[i] += dp(120f) * dt * (0.5f + velocity * 0.02f);
+            smokeX[i] += (float) Math.sin(i + smokeLife[i] * 6) * dp(10f) * dt;
+            float r = dp(8f) + (1f - smokeLife[i]) * dp(34f);
+            int a = (int) (smokeLife[i] * 150 * (1f - space));
+            paint.setColor((Math.max(0, a) << 24) | 0xE6E6EA);
+            c.drawCircle(smokeX[i], smokeY[i], r, paint);
+        }
     }
 
     private static int blend(int a, int b, float t) {

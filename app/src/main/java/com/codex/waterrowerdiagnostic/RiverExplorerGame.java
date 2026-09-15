@@ -388,6 +388,7 @@ final class RiverExplorerGame extends GameView {
         float worldHeading = segNow.h0;
 
         // Sky and far hills, which slide with the river's heading.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, horizon, 0xFF3A6EA5, 0xFFF2C39A, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, horizon + 1, paint);
         paint.setShader(null);
@@ -409,6 +410,8 @@ final class RiverExplorerGame extends GameView {
             path.close();
             c.drawPath(path, paint);
         }
+
+        drawSkyLife(c, w, horizon, hillShift);
 
         // Ground: one strip per few pixels, each a distance ahead.
         double forkDist = distanceToFork();
@@ -468,6 +471,46 @@ final class RiverExplorerGame extends GameView {
         fx.draw(c);
         drawMinimap(c, w, h);
         drawHud(c, w, h, speed, forkDist, choice);
+    }
+
+    /**
+     * 3.19.5: a still sky read as a painting. Clouds drift and slide with the river's heading, a
+     * flock crosses, and a hot-air balloon hangs over the far hills.
+     */
+    private void drawSkyLife(Canvas c, float w, float horizon, float hillShift) {
+        double t = sessionSeconds;
+        float span = w + dp(500f);
+        for (int i = 0; i < 5; i++) {
+            float cx = (float) ((((i * 523 + hillShift * 0.25f + t * dp(5f + i)) % span) + span) % span) - dp(250f);
+            float cy = horizon * (0.18f + (i % 3) * 0.17f);
+            float sc = 0.6f + (i % 3) * 0.3f;
+            paint.setColor(0xCCFFFFFF);
+            c.drawOval(cx - dp(80f) * sc, cy - dp(12f) * sc, cx + dp(80f) * sc, cy + dp(12f) * sc, paint);
+            c.drawOval(cx - dp(36f) * sc, cy - dp(28f) * sc, cx + dp(40f) * sc, cy + dp(4f) * sc, paint);
+        }
+        float bx = (float) ((((w * 0.3f + hillShift * 0.3f + t * dp(4f)) % span) + span) % span) - dp(250f);
+        float by = horizon * 0.42f + (float) Math.sin(t * 0.4) * dp(8f);
+        paint.setColor(0xFFE8573C);
+        c.drawOval(bx - dp(16f), by - dp(20f), bx + dp(16f), by + dp(16f), paint);
+        paint.setColor(0xFFF5C518);
+        c.drawRect(bx - dp(4f), by - dp(20f), bx + dp(4f), by + dp(16f), paint);
+        paint.setColor(0xFF6B4A2B);
+        c.drawRect(bx - dp(4f), by + dp(22f), bx + dp(4f), by + dp(28f), paint);
+        paint.setStrokeWidth(dp(1f));
+        c.drawLine(bx - dp(10f), by + dp(12f), bx - dp(4f), by + dp(22f), paint);
+        c.drawLine(bx + dp(10f), by + dp(12f), bx + dp(4f), by + dp(22f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xAA2A3340);
+        float fx = (float) (w - ((t * dp(35f)) % (w + dp(300f))));
+        for (int b = 0; b < 5; b++) {
+            float x0 = fx + b * dp(24f);
+            float y0 = horizon * 0.30f + (b % 2) * dp(10f);
+            float flap = (float) Math.sin(t * 8 + b) * dp(4f);
+            c.drawLine(x0 - dp(7f), y0 - flap, x0, y0, paint);
+            c.drawLine(x0, y0, x0 + dp(7f), y0 - flap, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private void drawLandmarks(Canvas c, float w, float horizon, float focal) {

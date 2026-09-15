@@ -378,6 +378,8 @@ window.wakeFeed = function (d) {
   state.spm = Number(d.r) || 0;
   state.boatSpeed = Number(d.s) || 0;
   state.clock = Number(d.t) || 0;
+  // 3.19.5: how hard the paddle is being driven right now (0..1), from the pulse meter.
+  state.drive = Math.max(0, Math.min(1, Number(d.d) || 0));
   if (Number(d.p) > 0) {
     state.typicalWatts = Number(d.p);
   }
@@ -697,12 +699,18 @@ function drawWings(dt, rowing) {
   var beat = Math.exp(-state.flapPhase * 2.6) * Math.sin(state.flapPhase * Math.PI * 2);
   // Continuous flapping while rowing - faster with rate, bigger with power - small wingbeats while
   // hovering, and wings held up in a glide once the rowing stops. Each stroke adds a big beat.
+  // 3.19.5, the rower's ask: in flight the wings beat on the DRIVE and glide on the recovery.
+  // `drive` comes from the pulse meter (the paddle accelerating), eased so a beat has a shape.
   var active = state.hovering ? 0.55 : rowing ? 1 : 0;
-  var freq = 0.6 + (Math.min(40, state.spm) / 60) * 1.2;
-  state.wingPhase += dt * Math.PI * 2 * freq;
+  var driveNow = state.hovering ? 1 : (rowing ? (state.drive || 0) : 0);
+  state.driveShown = (state.driveShown || 0) + (driveNow - (state.driveShown || 0)) * Math.min(1, dt * 8);
+  var flapping = state.hovering ? 1 : state.driveShown;
+  var freq = state.hovering ? 0.6 + (Math.min(40, state.spm) / 60) * 1.2 : 2.2;
+  state.wingPhase += dt * Math.PI * 2 * freq * (0.15 + 0.85 * flapping);
   var typical = Math.max(40, state.typicalWatts);
-  var amp = active * (10 + 16 * Math.min(1.3, state.smoothWatts / typical));
-  var lift = beat * 30 + Math.sin(state.wingPhase) * amp - (active > 0 ? 0 : 8);
+  var amp = active * (12 + 18 * Math.min(1.3, state.smoothWatts / typical));
+  var glide = (!state.hovering && rowing) ? (1 - flapping) * 16 : 0;
+  var lift = beat * 30 + Math.sin(state.wingPhase) * amp * flapping + glide - (active > 0 ? 0 : 8);
   var bankL = -state.bank * 0.9;
   var bankR = state.bank * 0.9;
 

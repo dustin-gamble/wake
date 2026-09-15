@@ -247,19 +247,29 @@ final class CollectorGame extends GameView {
                     0xFFF5C518, Paint.Align.CENTER);
         }
 
+        // 3.19.5: the sky is light now (the shader-alpha fix), so the HUD sits on dark pills.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x990A1420);
+        c.drawRoundRect(w / 2f - dp(90f), h * 0.15f - dp(40f), w / 2f + dp(90f), h * 0.15f + dp(28f), dp(14f), dp(14f), paint);
+        c.drawRoundRect(dp(6f), h * 0.15f - dp(28f), dp(190f), h * 0.15f + dp(24f), dp(12f), dp(12f), paint);
+        c.drawRoundRect(w - dp(120f), h * 0.15f - dp(28f), w - dp(6f), h * 0.15f + dp(24f), dp(12f), dp(12f), paint);
         bold(c, String.valueOf(score), w / 2f, h * 0.15f, 44f, ACCENT, Paint.Align.CENTER);
         label(c, !started ? "TAKE A STROKE TO START" : over ? "TIME - TAP TO PLAY AGAIN"
                 : "POINTS  ·  " + clock(GAME_LENGTH - gameSeconds) + " LEFT",
-                w / 2f, h * 0.15f + dp(20f), 10f, FAINT, Paint.Align.CENTER);
+                w / 2f, h * 0.15f + dp(20f), 10f, DIM, Paint.Align.CENTER);
         bold(c, String.format(java.util.Locale.US, "%.1f m/s", speed), dp(16f), h * 0.15f, 22f,
                 inLane >= 0 ? ACCENT : DIM, Paint.Align.LEFT);
         label(c, inLane >= 0 ? NAMES[inLane] + " LANE" : "TOO SLOW FOR A LANE", dp(16f),
-                h * 0.15f + dp(16f), 9f, FAINT, Paint.Align.LEFT);
+                h * 0.15f + dp(16f), 9f, DIM, Paint.Align.LEFT);
         bold(c, String.valueOf(missed), w - dp(16f), h * 0.15f, 22f, DIM, Paint.Align.RIGHT);
-        label(c, "MISSED", w - dp(16f), h * 0.15f + dp(16f), 9f, FAINT, Paint.Align.RIGHT);
+        label(c, "MISSED", w - dp(16f), h * 0.15f + dp(16f), 9f, DIM, Paint.Align.RIGHT);
 
         float fy = h - dp(14f);
         float col = w / 3f;
+        // The footer sits on bright grass since the sky/shore pass: give it a dark band to read on.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x990A1420);
+        c.drawRect(0, fy - dp(34f), w, h, paint);
         stat(c, col * 0.5f, fy, status == null ? "0" : String.valueOf(status.strokeRate), "SPM");
         stat(c, col * 1.5f, fy, status == null ? "0" : String.valueOf(status.watts), "WATTS");
         stat(c, col * 2.5f, fy, bests.has("collector.score")
@@ -323,6 +333,7 @@ final class CollectorGame extends GameView {
                     android.graphics.Shader.TileMode.CLAMP);
         }
         paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
         c.drawRect(0, 0, w, bottom, paint);
         paint.setShader(null);

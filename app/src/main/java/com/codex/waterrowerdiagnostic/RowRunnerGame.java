@@ -387,6 +387,7 @@ final class RowRunnerGame extends GameView {
 
     private void drawWorld(Canvas c, float w, float h, float groundY, float ppm, float youX, float metre) {
         float camX = (float) x;
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new android.graphics.LinearGradient(0, 0, 0, groundY, 0xFF3C8EE0, 0xFF9CD1F7,
                 android.graphics.Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, groundY, paint);

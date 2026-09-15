@@ -156,6 +156,7 @@ final class RegattaGame extends GameView {
                     android.graphics.Shader.TileMode.CLAMP);
         }
         paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
         c.drawRect(0, 0, w, bankTop, paint);
         paint.setShader(null);

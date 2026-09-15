@@ -174,6 +174,7 @@ final class WaveRiderGame extends GameView {
         c.save();
         c.translate(shake.dx, shake.dy);
         // Sunset sky.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, horizon, 0xFF2B3F70, 0xFFF3A469,
                 Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, horizon + dp(2f), paint);
@@ -198,6 +199,7 @@ final class WaveRiderGame extends GameView {
         }
 
         // Open ocean beyond the wave.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, horizon, 0, h, 0xFF1E5C86, 0xFF0A2A44,
                 Shader.TileMode.CLAMP));
         c.drawRect(0, horizon, w, h, paint);
@@ -234,6 +236,7 @@ final class WaveRiderGame extends GameView {
         path.lineTo(lipX - faceRun, h);
         path.lineTo(w, h);
         path.close();
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(lipX - faceRun, crestY, lipX, troughY,
                 0xFF1B6FA8, 0xFF0D3C5E, Shader.TileMode.CLAMP));
         c.drawPath(path, paint);

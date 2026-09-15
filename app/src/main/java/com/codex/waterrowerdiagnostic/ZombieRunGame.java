@@ -297,6 +297,7 @@ final class ZombieRunGame extends GameView {
 
         // Sky reddens as they close in.
         int skyTop = blend(0xFF1B2A44, 0xFF5A1010, danger);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, h * 0.7f, skyTop, 0xFF0A0E14, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, h, paint);
         paint.setShader(null);
@@ -541,11 +542,12 @@ final class ZombieRunGame extends GameView {
                             boolean zombie) {
         float s = dp(FIGURE_SCALE);
         float legSwing = speed > 0.2f ? (float) Math.sin(phaseIn) * 8f * s : 0f;
-        paint.setColor(color);
-        // Legs.
+        // Legs: dark trousers on the runner, so the figure reads as a person, not a block.
+        paint.setColor(zombie ? color : 0xFF2A2F3A);
         c.drawRect(x - 5 * s + legSwing, groundY - 14 * s, x - 1 * s + legSwing, groundY, paint);
         c.drawRect(x + 1 * s - legSwing, groundY - 14 * s, x + 5 * s - legSwing, groundY, paint);
         // Body, leaning into the run.
+        paint.setColor(color);
         float lean = zombie ? 4 * s : Math.min(1f, speed / 4f) * 5 * s;
         c.drawRect(x - 6 * s + lean, groundY - 34 * s, x + 6 * s + lean, groundY - 14 * s, paint);
         // Arms: zombies reach forward.
@@ -555,9 +557,28 @@ final class ZombieRunGame extends GameView {
             float arm = (float) Math.sin(phaseIn) * 6f * s;
             c.drawRect(x + 6 * s + lean, groundY - 30 * s + arm, x + 12 * s + lean, groundY - 26 * s + arm, paint);
         }
-        // Head.
-        paint.setColor(zombie ? 0xFF7FB37A : 0xFFE6EDF7);
-        c.drawRect(x - 5 * s + lean, groundY - 46 * s, x + 5 * s + lean, groundY - 36 * s, paint);
+        // Head: round with a face (3.19.5 - on the emulator it was a plain white square).
+        float hx = x + lean;
+        float hy = groundY - 41 * s;
+        paint.setColor(zombie ? 0xFF7FB37A : 0xFFF1C27D);
+        c.drawCircle(hx, hy, 6 * s, paint);
+        if (zombie) {
+            paint.setColor(0xFFFF3B3B);
+            c.drawCircle(hx + 2.5f * s, hy - 1 * s, 1.3f * s, paint);
+            c.drawCircle(hx - 1.5f * s, hy - 1 * s, 1.1f * s, paint);
+            paint.setColor(0xFF2A1A1A);
+            c.drawRect(hx - 1 * s, hy + 2.5f * s, hx + 4 * s, hy + 4.5f * s, paint);
+            paint.setColor(0xFF5E8A5A);
+            c.drawRect(hx - 6 * s, hy - 6 * s, hx - 2 * s, hy - 4.5f * s, paint);
+        } else {
+            paint.setColor(0xFF3A2A1A);
+            c.drawArc(hx - 6 * s, hy - 7 * s, hx + 6 * s, hy + 3 * s, 180, 180, true, paint);
+            paint.setColor(ACCENT);
+            c.drawRect(hx - 6.2f * s, hy - 3.2f * s, hx + 6.2f * s, hy - 1.6f * s, paint);
+            c.drawRect(hx - 9 * s, hy - 3.2f * s, hx - 6 * s, hy - 2.2f * s, paint);
+            paint.setColor(0xFF1A1A1A);
+            c.drawCircle(hx + 3 * s, hy + 0.5f * s, 1.1f * s, paint);
+        }
     }
 
     private static int blend(int a, int b, float t) {

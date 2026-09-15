@@ -225,6 +225,7 @@ final class MegaPullGame extends GameView {
             skyShader = new android.graphics.LinearGradient(0, 0, 0, h, 0xFF2A1040, 0xFF0A0E14,
                     android.graphics.Shader.TileMode.CLAMP);
         }
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
         c.drawRect(-dp(30f), -dp(30f), w + dp(30f), h + dp(30f), paint);
         paint.setShader(null);

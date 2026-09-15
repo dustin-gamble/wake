@@ -198,7 +198,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.19.4-debug
+3.19.5-debug
 ```
 
 ## Self-testing on an emulator (3.19.4)
@@ -220,6 +220,41 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
 - **Screenshot:** `adb exec-out screencap -p > shot.png` after ~30-50 s of demo rowing (the surge
   runs 40-52 s). This captures everything, Coast Flight's WebGL included.
 - The emulator shows Android's navigation bar and has no kiosk; the tablet does not.
+
+## A shader draws at the paint's alpha (found on the emulator, 3.19.5)
+
+Canyon's sunset sky rendered dark grey, and Collector's blue sky came out navy. Cause: games share
+one `Paint`, and `setShader(gradient)` still multiplies by the paint's **alpha**. Whatever colour the
+last frame left on the paint - a 20%-white "lost life" dot, say - dimmed the whole sky. Every
+`X.setShader(...)` fill in the games is now preceded by `X.setColor(0xFFFFFFFF)`. **Do the same in
+anything new**, or give gradients their own paint. No amount of reading the code found this; one
+screenshot did.
+
+## The 3.19.4 - 3.19.5 visual scrub
+
+Every game was screenshotted on the emulator with the demo rower, the emptiest fixed first:
+- `RiverScenery` (shared): far bank with a crowd that cheers when `cheer` is up, lane buoys,
+  distance boards, a chequered finish line. Used by Head Race, Regatta, Race (PaceBoatGame),
+  Collector and Tug of War.
+- Head Race, Regatta, Race: sky, bank, buoys, 250 m boards, finish line, catch splashes, lead-change
+  callouts, leader glow, confetti.
+- Collector: sky and reeds, spinning coin / gem / star prizes, catch bursts, combo bonus every five
+  in a row (+5, so `collector.score` runs a little higher than before 3.19.4), ducks, jumping fish.
+- Tug of War: sunset field, mud pit, two teams of three that heave per stroke and fall in the mud.
+  The rope travels only 20% of the width each way so both teams stay on screen.
+- Mega Pull: night fairground - tents, bulb strings, spotlights, crowd, tower bulbs behind the puck.
+- Canyon (FLY): little plane pitched by the climb, sun, clouds, birds, rings drawn in two halves so
+  you fly through them, streak counter.
+- Skyline, Night Grid, River Explorer: skies that move - clouds, planes, birds, searchlights,
+  shooting stars, a lit night train, fireflies, a hot-air balloon.
+- Rocket Launch: puffy clouds, smoke trail, launch tower, tumbling spent booster, jet, weather
+  balloon, and the moon and satellites in space.
+- Zombie Run: round heads with faces (the runner was a white square).
+- Daily Row: progress ring and medal, sparkles, "DAY WON" stamp and confetti, calendar ticks, streak flame.
+- **Coast Flight wings now beat on the drive and glide on the recovery** (the rower's original ask).
+  `CoastFlightGame.trackDrive` calls the paddle "driven" while `meter.paddleRate` is 3% above its
+  0.6 s average and sends it as `d` (0..1) in the feed; `fly.js` scales the flap by it and holds the
+  wings raised in a glide otherwise. Hovering keeps the old continuous flap.
 
 ## Warning: ~/Documents is on iCloud Drive
 

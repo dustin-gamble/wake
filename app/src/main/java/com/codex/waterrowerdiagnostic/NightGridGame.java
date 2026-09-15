@@ -101,6 +101,74 @@ final class NightGridGame extends GameView {
         return (float) (profile.typicalWatts() * 0.6 * (1 + 0.1 * Math.sin(sessionSeconds / 45.0)));
     }
 
+    /** 3.19.5: shooting stars and a slow cloud over the moon, so the big sky moves. */
+    private void drawNightSky(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        double star = (t % 7) / 7;
+        if (star < 0.1) {
+            float f = (float) (star / 0.1);
+            float sx = w * (0.15f + 0.4f * (float) ((Math.floor(t / 7) * 0.37) % 1.0)) + f * w * 0.25f;
+            float sy = h * 0.05f + f * h * 0.12f;
+            paint.setStrokeWidth(dp(2.2f));
+            paint.setColor(((int) (255 * (1 - f)) << 24) | 0xFFFFFF);
+            c.drawLine(sx - dp(70f), sy - dp(26f), sx, sy, paint);
+        }
+        float span = w + dp(500f);
+        for (int i = 0; i < 3; i++) {
+            float cx = (float) (((i * 613) + t * dp(8f + i * 3f)) % span) - dp(250f);
+            float cy = h * (0.12f + i * 0.07f);
+            paint.setColor(0x55223350);
+            c.drawOval(cx - dp(110f), cy - dp(14f), cx + dp(110f), cy + dp(14f), paint);
+            c.drawOval(cx - dp(50f), cy - dp(30f), cx + dp(56f), cy + dp(6f), paint);
+        }
+    }
+
+    /** A night train along the hills, every window lit - more lights to power in spirit. */
+    private void drawTrain(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        float span = w + dp(900f);
+        float head = (float) ((t * dp(70f)) % span) - dp(450f);
+        for (int car = 0; car < 6; car++) {
+            float x0 = head - car * dp(62f);
+            if (x0 < -dp(70f) || x0 > w + dp(70f)) {
+                continue;
+            }
+            // On the hillside below the power line, not riding on it.
+            float ground = h * 0.50f + (float) Math.sin((x0 + dp(28f)) / dp(160f)) * dp(26f) + dp(46f);
+            paint.setColor(0xFF1B2638);
+            c.drawRoundRect(x0, ground - dp(22f), x0 + dp(56f), ground - dp(4f), dp(4f), dp(4f), paint);
+            paint.setColor(0xFFFFD27A);
+            for (int win = 0; win < 4; win++) {
+                c.drawRect(x0 + dp(6f) + win * dp(12f), ground - dp(18f), x0 + dp(13f) + win * dp(12f), ground - dp(11f), paint);
+            }
+            if (car == 0) {
+                Fx.glow(c, x0 + dp(60f), ground - dp(12f), dp(40f), 0x66FFF1B0);
+            }
+        }
+    }
+
+    /** Fireflies over the bank and the moon broken up in the river. */
+    private void drawRiverLife(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        for (int i = 0; i < 8; i++) {
+            float ry = h * 0.915f + (i % 4) * dp(5f);
+            float len = dp(30f) + (float) Math.abs(Math.sin(t * 1.5 + i)) * dp(30f);
+            float rx = w * 0.82f + (float) Math.sin(t * 0.8 + i * 1.3) * dp(12f);
+            paint.setColor(0x66E9EEF5);
+            c.drawRect(rx - len / 2f, ry, rx + len / 2f, ry + dp(1.5f), paint);
+        }
+        for (int i = 0; i < 14; i++) {
+            float fx = (float) ((i * 0.13 + Math.sin(t * 0.3 + i) * 0.03) % 1.0) * w;
+            float fy = h * 0.84f + (float) Math.sin(t * 0.9 + i * 2) * dp(18f);
+            float glow = 0.5f + 0.5f * (float) Math.sin(t * 3 + i * 1.7);
+            if (glow > 0.3f) {
+                Fx.glow(c, fx, fy, dp(10f), ((int) (glow * 150) << 24) | 0xDFFF7A);
+                paint.setColor(0xFFF4FFB0);
+                c.drawCircle(fx, fy, dp(1.8f), paint);
+            }
+        }
+    }
+
     @Override
     protected void render(Canvas c, float dt) {
         float w = getWidth();
@@ -136,6 +204,7 @@ final class NightGridGame extends GameView {
         flow += (supply / 40f) * dt;
 
         // Night sky, moon and stars.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, h, 0xFF050B1E, 0xFF14213D, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, h, paint);
         paint.setShader(null);
@@ -149,6 +218,7 @@ final class NightGridGame extends GameView {
         Fx.glow(c, w * 0.82f, h * 0.14f, dp(80f), 0x44E9EEF5);
         paint.setColor(0xFFE9EEF5);
         c.drawCircle(w * 0.82f, h * 0.14f, dp(26f), paint);
+        drawNightSky(c, w, h);
 
         // Hills.
         paint.setColor(0xFF0B1426);
@@ -161,10 +231,12 @@ final class NightGridGame extends GameView {
         path.lineTo(0, h);
         path.close();
         c.drawPath(path, paint);
+        drawTrain(c, w, h);
 
         // River and the water wheel generator.
         paint.setColor(0xFF12304A);
         c.drawRect(0, h * 0.90f, w, h, paint);
+        drawRiverLife(c, w, h);
         float wx = w * 0.12f;
         float wy = h * 0.84f;
         float wr = dp(40f);

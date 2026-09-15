@@ -164,6 +164,7 @@ final class CanyonChaseGame extends GameView {
         c.rotate(-bank * 0.35f, w / 2f, h * 0.8f);
 
         // Sky and haze.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, horizon, 0xFF243E63, 0xFFE9A15C, Shader.TileMode.CLAMP));
         c.drawRect(-w, -h, w * 2, horizon, paint);
         paint.setShader(null);

@@ -16,6 +16,12 @@ import android.view.MotionEvent;
  * longer drops you; rings are 60% taller and pull you toward their centre in the last 30 m; the
  * altitude scale spans the rower's own range; and each ring is placed around the speed you have
  * actually been holding, rather than on a fixed random walk.
+ *
+ * <p>3.19.5, from the emulator: the sunset sky was being drawn at the alpha of whatever colour the
+ * HUD set last (a lost-life dot is 20% white), so the whole game looked dark grey. Also a proper
+ * little plane that pitches with the climb, a sun, drifting clouds, a flock of birds, rings that
+ * look like rings (front and back halves around the plane, a lit core), "+1" popups and a streak
+ * counter that glows.
  */
 final class CanyonFlightGame extends GameView {
 
@@ -60,6 +66,13 @@ final class CanyonFlightGame extends GameView {
     private float recentSpeed;
     private float nextGateAt;
     private final java.util.Random rng = new java.util.Random();
+    private android.graphics.LinearGradient skyShader;
+    private float skyHeight;
+    private int streak;
+    private double popupUntil;
+    private float popupY;
+    private float lastYouY;
+    private float pitch;
 
     CanyonFlightGame(Context context, PersonalBests bests) {
         super(context);
@@ -70,6 +83,7 @@ final class CanyonFlightGame extends GameView {
     protected void onStart() {
         started = false;
         over = false;
+        streak = 0;
         lives = LIVES;
         passed = 0;
         x = 0;
@@ -122,6 +136,116 @@ final class CanyonFlightGame extends GameView {
             return true;
         }
         return super.onTouchEvent(e);
+    }
+
+    /** Half of every ring on screen: back halves before the plane, front halves after it. */
+    private void drawGates(Canvas c, float w, float youX, float ppm, float skyTop, float skyBottom, float band, boolean front) {
+        for (Gate g : gates) {
+            float gx = youX + (g.at - (float) x) * ppm;
+            if (gx < -dp(60f) || gx > w + dp(60f)) {
+                continue;
+            }
+            float gy = skyBottom - (skyBottom - skyTop) * altFor(g.speed);
+            int col = g.resolved ? (g.passed ? ACCENT : BAD) : 0xFFF5C518;
+            float rx = dp(22f);
+            if (!front) {
+                if (!g.resolved) {
+                    Fx.glow(c, gx, gy, band * 1.4f, 0x55F5C518);
+                }
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(7f));
+                paint.setColor((col & 0x00FFFFFF) | 0x99000000);
+                c.drawArc(gx - rx, gy - band, gx + rx, gy + band, 90, 180, false, paint);
+                paint.setStyle(Paint.Style.FILL);
+            } else {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(8f));
+                paint.setColor(col);
+                c.drawArc(gx - rx, gy - band, gx + rx, gy + band, -90, 180, false, paint);
+                paint.setStrokeWidth(dp(2.5f));
+                paint.setColor(0xCCFFFFFF);
+                c.drawArc(gx - rx + dp(3f), gy - band + dp(3f), gx + rx - dp(3f), gy + band - dp(3f), -80, 160, false, paint);
+                paint.setStyle(Paint.Style.FILL);
+                // Pennants top and bottom.
+                paint.setColor(col);
+                c.drawRect(gx - dp(1.5f), gy - band - dp(22f), gx + dp(1.5f), gy - band, paint);
+                float flap = (float) Math.sin(sessionSeconds * 6 + g.at) * dp(3f);
+                path.reset();
+                path.moveTo(gx + dp(1.5f), gy - band - dp(22f));
+                path.lineTo(gx + dp(20f), gy - band - dp(17f) + flap);
+                path.lineTo(gx + dp(1.5f), gy - band - dp(12f));
+                path.close();
+                c.drawPath(path, paint);
+                if (!g.resolved) {
+                    bold(c, String.format(java.util.Locale.US, "%.1f m/s", g.speed), gx, gy - band - dp(28f),
+                            11f, TEXT, Paint.Align.CENTER);
+                }
+            }
+        }
+    }
+
+    /** A small high-wing plane pointing right, pitched with the climb, prop spinning. */
+    private void drawPlane(Canvas c, float px, float py, float speed) {
+        c.save();
+        c.rotate((float) Math.toDegrees(-pitch * 0.6f), px, py);
+        float s = dp(1f);
+        paint.setStyle(Paint.Style.FILL);
+        // Fuselage.
+        paint.setColor(0xFFF4F4F4);
+        c.drawRoundRect(px - 34 * s, py - 7 * s, px + 30 * s, py + 7 * s, 7 * s, 7 * s, paint);
+        paint.setColor(ACCENT);
+        c.drawRect(px - 30 * s, py - 1.5f * s, px + 26 * s, py + 2.5f * s, paint);
+        // Tail.
+        path.reset();
+        path.moveTo(px - 30 * s, py - 5 * s);
+        path.lineTo(px - 42 * s, py - 22 * s);
+        path.lineTo(px - 24 * s, py - 6 * s);
+        path.close();
+        c.drawPath(path, paint);
+        // Wing (seen edge-on, slightly below the top) and strut.
+        paint.setColor(0xFFDDE6EE);
+        c.drawRoundRect(px - 12 * s, py - 12 * s, px + 14 * s, py - 6 * s, 3 * s, 3 * s, paint);
+        // Cockpit.
+        paint.setColor(0xFF6FB8E8);
+        c.drawRoundRect(px + 8 * s, py - 6 * s, px + 20 * s, py - 1 * s, 3 * s, 3 * s, paint);
+        // Propeller blur.
+        paint.setColor(0x88FFFFFF);
+        float blade = (float) Math.abs(Math.sin(sessionSeconds * (20 + speed * 10))) * 14 * s + 4 * s;
+        c.drawOval(px + 30 * s, py - blade, px + 35 * s, py + blade, paint);
+        paint.setColor(0xFF333333);
+        c.drawCircle(px + 32 * s, py, 2.5f * s, paint);
+        c.restore();
+    }
+
+    /** Sun, clouds drifting at a slow parallax, and a flock of birds. */
+    private void drawSkyLife(Canvas c, float w, float h, float ppm) {
+        Fx.glow(c, w * 0.78f, h * 0.42f, dp(160f), 0x88FFD08A);
+        paint.setColor(0xFFFFE2A8);
+        c.drawCircle(w * 0.78f, h * 0.42f, dp(40f), paint);
+        paint.setColor(0xB3FFFFFF);
+        for (int i = 0; i < 6; i++) {
+            float span = w + dp(400f);
+            float cx = (float) (((i * 377 + 90) - x * ppm * (0.05 + i * 0.02)) % span);
+            if (cx < -dp(200f)) {
+                cx += span;
+            }
+            float cy = h * (0.12f + (i % 3) * 0.1f);
+            float sc = 0.7f + (i % 3) * 0.25f;
+            c.drawOval(cx - dp(70f) * sc, cy - dp(12f) * sc, cx + dp(70f) * sc, cy + dp(12f) * sc, paint);
+            c.drawOval(cx - dp(34f) * sc, cy - dp(26f) * sc, cx + dp(36f) * sc, cy + dp(4f) * sc, paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xCC2A1A2A);
+        float flockX = (float) (w - ((x * ppm * 0.3 + sessionSeconds * dp(30f)) % (w + dp(300f))));
+        for (int b = 0; b < 5; b++) {
+            float bx = flockX + b * dp(26f);
+            float by = h * 0.28f + (b % 2) * dp(12f) + (float) Math.sin(sessionSeconds * 1.3 + b) * dp(4f);
+            float flap = (float) Math.sin(sessionSeconds * 9 + b) * dp(5f);
+            c.drawLine(bx - dp(8f), by - flap, bx, by, paint);
+            c.drawLine(bx, by, bx + dp(8f), by - flap, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private float altFor(float speed) {
@@ -185,9 +309,13 @@ final class CanyonFlightGame extends GameView {
                 if (Math.abs(youY - gy) <= band) {
                     g.passed = true;
                     passed++;
+                    streak++;
+                    popupUntil = sessionSeconds + 1.0;
+                    popupY = youY;
                     fx.burst(youX, youY, 18, dp(120f), 0.5f, dp(3f), 0xFF35D0BA, false);
                 } else {
                     lives--;
+                    streak = 0;
                     hurtUntil = sessionSeconds + 1.2;
                     shake.kick(dp(10f));
                     fx.burst(youX, youY, 24, dp(160f), 0.6f, dp(3.5f), 0xFFF0655D, false);
@@ -201,10 +329,18 @@ final class CanyonFlightGame extends GameView {
 
         c.save();
         c.translate(shake.dx, shake.dy);
-        paint.setShader(new android.graphics.LinearGradient(0, 0, 0, h, 0xFF1B3358, 0xFFE07A3F,
-                android.graphics.Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, h, paint);
+        if (skyShader == null || skyHeight != h) {
+            skyHeight = h;
+            skyShader = new android.graphics.LinearGradient(0, 0, 0, h, 0xFF1B3358, 0xFFE07A3F,
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        // Opaque first: a shader is drawn at the paint's alpha, and the HUD leaves it at 20%.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(skyShader);
+        c.drawRect(-dp(20f), -dp(20f), w + dp(20f), h + dp(20f), paint);
         paint.setShader(null);
+        drawSkyLife(c, w, h, ppm);
         // Canyon walls: jagged silhouettes scrolling, one far, one near.
         for (int layer = 0; layer < 2; layer++) {
             float speedMul = layer == 0 ? 0.25f : 0.6f;
@@ -231,41 +367,34 @@ final class CanyonFlightGame extends GameView {
             label(c, String.format(java.util.Locale.US, "%.1f", sp), dp(6f), ly - dp(3f), 8f, 0x66FFFFFF,
                     Paint.Align.LEFT);
         }
-        // Gates.
-        for (Gate g : gates) {
-            float gx = youX + (g.at - (float) x) * ppm;
-            if (gx < -dp(60f) || gx > w + dp(60f)) {
-                continue;
-            }
-            float gy = skyBottom - (skyBottom - skyTop) * altFor(g.speed);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(5f));
-            paint.setColor(g.resolved ? (g.passed ? ACCENT : BAD) : 0xFFF5C518);
-            c.drawOval(gx - dp(14f), gy - band, gx + dp(14f), gy + band, paint);
-            paint.setStyle(Paint.Style.FILL);
-            if (!g.resolved) {
-                Fx.glow(c, gx, gy, band * 1.3f, 0x44F5C518);
-                label(c, String.format(java.util.Locale.US, "%.1f m/s", g.speed), gx, gy - band - dp(6f),
-                        8.5f, TEXT, Paint.Align.CENTER);
-            }
+        // Gates: the back half of each ring now, the front half after the plane, so you fly through.
+        drawGates(c, w, youX, ppm, skyTop, skyBottom, band, false);
+        // You: a little plane, pitched by the climb, with a contrail and prop blur.
+        float climb = dt > 0 && lastYouY != 0f ? (lastYouY - youY) / dt : 0f;
+        lastYouY = youY;
+        pitch += (Math.max(-0.5f, Math.min(0.5f, climb / dp(160f))) - pitch) * Math.min(1f, 4f * dt);
+        Fx.glow(c, youX, youY, dp(60f), streak >= 3 ? 0x66F5C518 : 0x4035D0BA);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        for (int k = 0; k < 3; k++) {
+            paint.setColor(k == 0 ? 0x88FFFFFF : k == 1 ? 0x55FFFFFF : 0x33FFFFFF);
+            paint.setStrokeWidth(dp(4f - k));
+            float tx = youX - dp(40f) - k * speed * dp(14f);
+            c.drawLine(youX - dp(30f), youY + pitch * dp(20f), tx - speed * dp(10f), youY + pitch * dp(20f) + k * dp(3f), paint);
         }
-        // You: a small wing with a contrail.
-        Fx.glow(c, youX, youY, dp(40f), 0x4035D0BA);
-        paint.setColor(0x66BFE3FF);
-        paint.setStrokeWidth(dp(3f));
-        c.drawLine(youX - dp(18f), youY, youX - dp(18f) - speed * dp(20f), youY + dp(2f), paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
         boolean hurt = sessionSeconds < hurtUntil;
         if (!hurt || ((int) (sessionSeconds * 10) % 2 == 0)) {
-            paint.setColor(ACCENT);
-            path.reset();
-            path.moveTo(youX + dp(20f), youY);
-            path.lineTo(youX - dp(14f), youY - dp(9f));
-            path.lineTo(youX - dp(6f), youY);
-            path.lineTo(youX - dp(14f), youY + dp(9f));
-            path.close();
-            c.drawPath(path, paint);
+            drawPlane(c, youX, youY, speed);
         }
+        drawGates(c, w, youX, ppm, skyTop, skyBottom, band, true);
         fx.draw(c);
+        if (sessionSeconds < popupUntil) {
+            float rise = (float) (1.0 - (popupUntil - sessionSeconds)) * dp(50f);
+            bold(c, streak >= 3 ? "+1  STREAK x" + streak : "+1", youX + dp(40f), popupY - dp(30f) - rise, 20f,
+                    0xFFF5C518, Paint.Align.LEFT);
+        }
         c.restore();
         Fx.speedLines(c, paint, w, h, speed, sessionSeconds, dp(1f));
         if (hurt) {
@@ -278,7 +407,8 @@ final class CanyonFlightGame extends GameView {
             c.drawCircle(dp(18f) + i * dp(18f), dp(20f), dp(6f), paint);
         }
         bold(c, String.valueOf(passed), w / 2f, dp(30f), 24f, TEXT, Paint.Align.CENTER);
-        label(c, "GATES", w / 2f, dp(44f), 8.5f, FAINT, Paint.Align.CENTER);
+        label(c, streak >= 2 ? "GATES  ·  STREAK x" + streak : "GATES", w / 2f, dp(44f), 8.5f,
+                streak >= 3 ? 0xFFF5C518 : FAINT, Paint.Align.CENTER);
         bold(c, String.format(java.util.Locale.US, "%.1f m/s", speed), w - dp(16f), dp(30f), 18f, ACCENT,
                 Paint.Align.RIGHT);
         Gate next = null;

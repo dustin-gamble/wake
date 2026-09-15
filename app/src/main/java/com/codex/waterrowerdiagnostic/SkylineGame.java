@@ -223,6 +223,7 @@ final class SkylineGame extends GameView {
         float tod = (float) ((Math.sin(activeSeconds / 150.0 - Math.PI / 2) + 1) / 2);   // 0 night..1 day
         c.save();
         c.translate(shake.dx, shake.dy);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new LinearGradient(0, 0, 0, h,
                 blend(0xFF0B1430, 0xFF2E6FB0, tod), blend(0xFF2A1C38, 0xFFBFD9EE, tod),
                 Shader.TileMode.CLAMP));
@@ -242,6 +243,7 @@ final class SkylineGame extends GameView {
         Fx.glow(c, sunX, sunY, dp(60f), tod > 0.5f ? 0x66FFE8A8 : 0x55BFD9EE);
         paint.setColor(tod > 0.5f ? 0xFFFFE8A8 : 0xFFE9EEF5);
         c.drawCircle(sunX, sunY, dp(20f), paint);
+        drawSkyTraffic(c, w, h, tod);
 
         // Ground plate.
         path.reset();
@@ -328,6 +330,83 @@ final class SkylineGame extends GameView {
     }
 
     /** The crane and its hopper, top left: every drive pours concrete in. */
+    /**
+     * 3.19.5: the sky was empty. Clouds drift by day, a plane crosses with blinking lights and a
+     * contrail, a flock passes, and at night searchlights sweep and the odd shooting star falls.
+     */
+    private void drawSkyTraffic(Canvas c, float w, float h, float tod) {
+        double t = sessionSeconds;
+        int cloudAlpha = (int) (60 + 150 * tod);
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 5; i++) {
+            float span = w + dp(400f);
+            float cx = (float) (((i * 431 + 60) + t * dp(6f + i * 2f)) % span) - dp(200f);
+            float cy = h * (0.10f + (i % 3) * 0.08f);
+            float sc = 0.7f + (i % 2) * 0.4f;
+            paint.setColor((cloudAlpha << 24) | 0xFFFFFF);
+            c.drawOval(cx - dp(80f) * sc, cy - dp(12f) * sc, cx + dp(80f) * sc, cy + dp(12f) * sc, paint);
+            c.drawOval(cx - dp(38f) * sc, cy - dp(28f) * sc, cx + dp(40f) * sc, cy + dp(4f) * sc, paint);
+        }
+        // A plane every 24 s, left to right, high up.
+        double lap = (t % 24) / 24;
+        float px = (float) (-dp(80f) + (w + dp(160f)) * lap);
+        float py = h * 0.08f + (float) lap * h * 0.04f;
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x55FFFFFF);
+        c.drawLine(px - dp(160f), py + dp(3f), px - dp(20f), py, paint);
+        paint.setColor(tod > 0.4f ? 0xFFE9EEF5 : 0xFF3A4660);
+        c.drawRoundRect(px - dp(18f), py - dp(3f), px + dp(18f), py + dp(3f), dp(3f), dp(3f), paint);
+        c.drawRect(px - dp(4f), py - dp(10f), px + dp(4f), py + dp(10f), paint);
+        if (((int) (t * 2)) % 2 == 0) {
+            paint.setColor(0xFFFF4A4A);
+            c.drawCircle(px - dp(1f), py - dp(10f), dp(2.5f), paint);
+            paint.setColor(0xFF4AFF7A);
+            c.drawCircle(px - dp(1f), py + dp(10f), dp(2.5f), paint);
+        }
+        if (tod > 0.3f) {
+            // Birds by day.
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setColor(0xAA1A2230);
+            float fx = (float) (w - ((t * dp(40f)) % (w + dp(300f))));
+            for (int b = 0; b < 6; b++) {
+                float bx = fx + b * dp(22f) + (b % 2) * dp(8f);
+                float by = h * 0.22f + (b % 3) * dp(9f);
+                float flap = (float) Math.sin(t * 8 + b) * dp(4f);
+                c.drawLine(bx - dp(7f), by - flap, bx, by, paint);
+                c.drawLine(bx, by, bx + dp(7f), by - flap, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        } else {
+            // Searchlights from the city, and a shooting star now and then.
+            for (int k = 0; k < 2; k++) {
+                double a = -Math.PI / 2 + Math.sin(t * 0.5 + k * 2.2) * 0.5;
+                float ox = w * (k == 0 ? 0.38f : 0.62f);
+                float oy = h * 0.72f;
+                float len = h * 0.9f;
+                float tx = ox + (float) Math.cos(a) * len;
+                float ty = oy + (float) Math.sin(a) * len;
+                float nx = (float) -Math.sin(a) * dp(40f);
+                float ny = (float) Math.cos(a) * dp(40f);
+                path.reset();
+                path.moveTo(ox, oy);
+                path.lineTo(tx + nx, ty + ny);
+                path.lineTo(tx - nx, ty - ny);
+                path.close();
+                paint.setColor(0x1ADFEBFF);
+                c.drawPath(path, paint);
+            }
+            double star = (t % 9) / 9;
+            if (star < 0.12) {
+                float f = (float) (star / 0.12);
+                float sx = w * 0.2f + f * w * 0.35f;
+                float sy = h * 0.06f + f * h * 0.14f;
+                paint.setStrokeWidth(dp(2f));
+                paint.setColor(((int) (255 * (1 - f)) << 24) | 0xFFFFFF);
+                c.drawLine(sx - dp(60f), sy - dp(24f), sx, sy, paint);
+            }
+        }
+    }
+
     private void drawCrane(Canvas c, float w, float h) {
         float baseX = dp(40f);
         float baseY = h * 0.62f;

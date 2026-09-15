@@ -205,6 +205,7 @@ class CoastFlightGame extends GameView {
      */
     @Override
     protected void render(Canvas canvas, float dt) {
+        trackDrive(dt);
         long now = System.currentTimeMillis();
         if (now - lastPushMs >= PUSH_INTERVAL_MS) {
             lastPushMs = now;
@@ -219,6 +220,22 @@ class CoastFlightGame extends GameView {
         label(canvas, notice, cx, cy + dp(14), 13, DIM, Paint.Align.CENTER);
     }
 
+    /** 0..1, how much the paddle is being driven right now (it is accelerating). */
+    private float drive;
+    private double slowRate;
+
+    /**
+     * The drive phase from the pulse meter, for wings that beat on the drive and glide on the
+     * recovery (the rower's ask). The paddle rate rises only while the handle is being pulled, so
+     * "clearly above its recent average" is the drive; the stroke counter would be a second late.
+     */
+    private void trackDrive(float dt) {
+        double rate = status != null ? status.meter.paddleRate : 0;
+        slowRate += (rate - slowRate) * Math.min(1.0, dt / 0.6);
+        float target = rate > 40 && rate > slowRate * 1.03 ? 1f : 0f;
+        drive += (target - drive) * Math.min(1f, dt * (target > drive ? 14f : 5f));
+    }
+
     private void pushFeed() {
         if (!pageReady) {
             return;
@@ -231,8 +248,8 @@ class CoastFlightGame extends GameView {
         // this project keeps making.
         // `p` is the rower's typical power: level flight is set from it, not from a fixed 60 W.
         String js = String.format(Locale.US,
-                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d,p:%.0f});",
-                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes, profile.typicalWatts());
+                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d,p:%.0f,d:%.2f});",
+                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes, profile.typicalWatts(), drive);
         web.evaluateJavascript(js, null);
     }
 

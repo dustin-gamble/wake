@@ -228,6 +228,7 @@ final class HeadRaceGame extends GameView {
                     android.graphics.Shader.TileMode.CLAMP);
         }
         panel.setStyle(Paint.Style.FILL);
+        panel.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         panel.setShader(skyShader);
         c.drawRect(0, 0, w, bankTop, panel);
         panel.setShader(null);
