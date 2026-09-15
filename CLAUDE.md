@@ -220,6 +220,14 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
 - **Screenshot:** `adb exec-out screencap -p > shot.png` after ~30-50 s of demo rowing (the surge
   runs 40-52 s). This captures everything, Coast Flight's WebGL included.
 - The emulator shows Android's navigation bar and has no kiosk; the tablet does not.
+- **Reading live state inside Coast Flight's WebView.** Screenshots cannot show timing (a 2.2 Hz
+  wingbeat aliases against a ~0.7 s screencap). The debug build's WebView exposes Chrome DevTools:
+  `adb shell pidof com.codex.waterrowerdiagnostic.debug`, find `webview_devtools_remote_<pid>` in
+  `adb shell cat /proc/net/unix`, `adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>`,
+  then `GET http://127.0.0.1:9333/json` for the fly.html page's `webSocketDebuggerUrl` and send
+  `Runtime.evaluate` (Node 22+ has a global `WebSocket`). Sampling `state.drive` / `state.driveShown`
+  at 10 Hz is how the drive-phase wings were verified: drive jumps to 1 at each catch, holds about a
+  second, and the flap eases to ~0.02 through the recovery. Remove the forward afterwards.
 
 ## A shader draws at the paint's alpha (found on the emulator, 3.19.5)
 
