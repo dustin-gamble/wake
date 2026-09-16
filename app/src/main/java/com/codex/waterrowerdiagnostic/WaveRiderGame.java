@@ -42,6 +42,14 @@ final class WaveRiderGame extends GameView {
     private float sprayAccum;
     /* Life around the wave. */
     private final float[] gullX = {0.2f, 0.55f, 0.8f};
+    /**
+     * The open ocean between the horizon and the wave is the one band on this screen that was
+     * genuinely empty: over a 10-frame mid-ride burst it showed 13 changed pixels, against 147
+     * for the gulls and 1171 for the wave face. (The gulls, sailboats and glitter all animate
+     * already - thin sparse sprites just do not move a cell average.)
+     */
+    private float swellPhase;
+    private float dolphinT = -6f;
     private double dolphinAt = 8;
     private boolean wasPocket;
     private final Fx.Particles wash = new Fx.Particles();
@@ -236,6 +244,8 @@ final class WaveRiderGame extends GameView {
                 c.drawRect(gx - dp(5f), gy, gx + dp(5f), gy + dp(1.6f), paint);
             }
         }
+
+        drawOpenOcean(c, w, horizon, crestY, dt);
 
         // The wave face: a curve from the lip down-left into the trough.
         path.reset();
@@ -494,6 +504,78 @@ final class WaveRiderGame extends GameView {
 
     /** Height of the wave face at a given x. Exponent shapes the concave face. */
     /** Spray and a carve trail behind the board: the face now shows where you have been. */
+    /**
+     * Swell on the open ocean: SHORT DASHES, not lines. A first attempt drew six full-width
+     * strokes with only a few dp of amplitude and squared their spacing, which bunched them into
+     * one band of straight horizontal streaks across the sea - scan-lines, not water. This uses
+     * the shape that works in RiverScenery.drawWaterLife: scattered dashes, spread linearly.
+     */
+    private void drawOpenOcean(Canvas c, float w, float horizon, float crestY, float dt) {
+        // 0.06 was too slow to read as movement: measured 0.05 in this band against 0.11 for
+        // the empty water it replaced - texture, not travel. Swell should visibly march in.
+        swellPhase += dt * 0.55f;
+        if (swellPhase > 1f) {
+            swellPhase -= 1f;
+        }
+        float top = horizon + dp(10f);
+        float span = Math.max(dp(40f), crestY - top);
+        float right = w * 0.60f;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        for (int row = 0; row < 7; row++) {
+            float f = (row + 0.5f) / 7f;                  // linear: spread, not bunched at the top
+            float y = top + span * f;
+            float depth = 0.25f + f * 0.75f;
+            paint.setStrokeWidth(dp(0.9f) + depth * dp(1.1f));
+            paint.setColor((Math.round(34 + 66 * depth) << 24) | 0x00BFE3FF);
+            float step = dp(96f) + depth * dp(54f);
+            float off = (swellPhase * step * (1f + row * 0.35f)) % step;
+            for (float x = -off; x < right; x += step) {
+                float len = dp(14f) + depth * dp(22f);
+                float bob = (float) Math.sin(x / dp(70f) + swellPhase * 6.3 + row) * dp(1.8f);
+                c.drawLine(x, y + bob, x + len, y + bob, paint);
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 5; i++) {                      // a few distant whitecaps
+            float f = ((i * 0.19f) + swellPhase * (0.8f + (i % 3) * 0.15f)) % 1f;
+            float y = top + span * (0.2f + 0.7f * f);
+            float x = (float) (right * (0.08f + 0.8f * Math.abs(Math.sin(i * 12.9898))));
+            paint.setColor((Math.round(30 + 70 * f) << 24) | 0x00E8F4FF);
+            c.drawRoundRect(x, y - dp(1.2f), x + dp(7f) + f * dp(9f), y + dp(1.2f), dp(1.2f), dp(1.2f), paint);
+        }
+        // A dolphin arcs out of the swell every few seconds - something living, not just texture.
+        dolphinT += dt;
+        if (dolphinT > 9f) {
+            dolphinT = -2f - (float) Math.random() * 3f;
+        }
+        if (dolphinT > 0f && dolphinT < 1.6f) {
+            float p = dolphinT / 1.6f;
+            float arc = (float) Math.sin(p * Math.PI);
+            float dx = w * 0.16f + p * w * 0.12f;
+            float dy = top + span * 0.78f - arc * dp(30f);
+            c.save();
+            c.rotate((p - 0.5f) * 44f, dx, dy);
+            paint.setColor(0xFF1B3E5E);
+            c.drawOval(dx - dp(15f), dy - dp(5f), dx + dp(15f), dy + dp(5f), paint);
+            path.reset();
+            path.moveTo(dx - dp(13f), dy);
+            path.lineTo(dx - dp(24f), dy - dp(8f));
+            path.lineTo(dx - dp(21f), dy + dp(2f));
+            path.close();
+            c.drawPath(path, paint);
+            path.reset();
+            path.moveTo(dx - dp(2f), dy - dp(4f));
+            path.lineTo(dx + dp(2f), dy - dp(13f));
+            path.lineTo(dx + dp(6f), dy - dp(3f));
+            path.close();
+            c.drawPath(path, paint);
+            c.restore();
+            paint.setColor(0x55E8F4FF);
+            c.drawOval(dx - dp(18f), dy + dp(5f), dx + dp(18f), dy + dp(10f), paint);
+        }
+    }
+
     private void drawBoardWash(Canvas c, float lipX, float crestY, float troughY, float faceRun, float dt) {
         float t0 = (position + 1f) / 2f;
         float sx0 = lipX - dp(26f) - t0 * faceRun * 0.82f;
