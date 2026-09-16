@@ -186,11 +186,20 @@ final class RiverRenderer {
         boolean water = stroke > 0.03f && stroke < 0.97f;
         float shaft = length * 0.46f;
         // Direction in boat space: +x toward the bow, +y outboard. Mirrored per side below.
+        // The 0.55 is foreshortening: the water is seen at a shallow angle, so travel across the
+        // boat covers less screen than travel along it. It must be applied AFTER normalising.
+        // Dividing by hypot() when uy has already been compressed simply restores it to full
+        // length, so at the perpendicular part of the sweep the 0.55 was cancelled outright and
+        // both oars drew as one vertical mast through the hull - measured at 73 px past the hull
+        // edge, a span 5.3x the hull depth. Applied in the right order that becomes 41 px / 3.4x,
+        // while the blade still swings the full arc (-59 px at the catch to +46 px at the finish).
+        // This is the same mistake as 3.19.6's cancelled mirroring, in the surviving half.
         float ux = (float) Math.sin(angle);
-        float uy = (float) Math.cos(angle) * 0.55f;
+        float uy = (float) Math.cos(angle);
         float ulen = (float) Math.hypot(ux, uy);
         ux /= ulen;
         uy /= ulen;
+        uy *= 0.55f;
         for (int side = -1; side <= 1; side += 2) {
             float pivotY = cy + side * beam * 1.1f;
             float tipX = riggerX + ux * shaft;

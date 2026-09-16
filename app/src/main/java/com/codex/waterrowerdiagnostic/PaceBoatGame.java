@@ -256,7 +256,8 @@ class PaceBoatGame extends GameView {
         if (paceBoatX == 0f) {
             paceBoatX = clampedX;
         }
-        river.setStrokePhase(strokePhase());
+        // The pace boat rows to its own rhythm, not yours.
+        river.setStrokePhase((float) (0.5 + 0.5 * Math.sin(sessionSeconds * 2.5 + 1.3)));
         river.drawBoat(c, paceBoatX, lanePace, boatLen, BLUE, opponentSpeed(), true);
         if (targetX != clampedX) {
             // Off the edge: an arrow says which way and how far.
@@ -266,6 +267,8 @@ class PaceBoatGame extends GameView {
                     BLUE, targetX > clampedX ? Paint.Align.RIGHT : Paint.Align.LEFT);
         }
         river.bowSpray(yourX + boatLen / 2f, laneYou, speed, dt);
+        // Your own oars follow your own stroke, set here rather than inherited.
+        river.setStrokePhase(strokePhase());
         river.drawBoat(c, yourX, laneYou, boatLen, ACCENT, speed, false);
         river.drawSpray(c);
         Fx.glow(c, yourX, laneYou, dp(50f), 0x2A35D0BA);

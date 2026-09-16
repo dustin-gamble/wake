@@ -184,11 +184,15 @@ final class RegattaGame extends GameView {
                 rivalX[i] = target;
             }
             float ly = waterTop + laneH * (i + 0.5f);
-            river.setStrokePhase(strokePhase());
-        river.drawBoat(c, rivalX[i], ly, dp(150f), COLORS[i], phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
+            // The opponent rows to its own rhythm: sharing your phase drew both boats at the catch on
+            // the same frame, and your own boat then inherited the rival's phase instead of yours.
+            river.setStrokePhase((float) (0.5 + 0.5 * Math.sin(sessionSeconds * (2.4 + i * 0.18)
+                    + i * 1.9)));
+            river.drawBoat(c, rivalX[i], ly, dp(150f), COLORS[i],
+                    phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
             label(c, PLANS[i] + String.format(java.util.Locale.US, "  %+.0f m", d - you),
                     Math.max(dp(70f), Math.min(w - dp(70f), rivalX[i])),
-                    ly - dp(22f), 11f, COLORS[i], Paint.Align.CENTER);
+                    ly - dp(40f), 11f, COLORS[i], Paint.Align.CENTER);
         }
         if (phase == Phase.RACING) {
             if (lastAhead >= 0 && ahead != lastAhead) {
@@ -210,9 +214,11 @@ final class RegattaGame extends GameView {
             Fx.glow(c, yourX, yourY, dp(90f), 0x44F5C518);
         }
         river.bowSpray(yourX + dp(54f), yourY, speed, dt);
+        // Your own oars follow your own stroke, set here rather than inherited.
+        river.setStrokePhase(strokePhase());
         river.drawBoat(c, yourX, yourY, dp(156f), ACCENT, speed, false);
         river.drawSpray(c);
-        bold(c, "YOU", yourX, yourY + dp(34f), 11f, ACCENT, Paint.Align.CENTER);
+        bold(c, "YOU", yourX, yourY + dp(48f), 11f, ACCENT, Paint.Align.CENTER);
         if (sessionSeconds < confettiUntil && Math.random() < 0.7) {
             int[] colors = {0xFFF5C518, 0xFFF0655D, 0xFF35D0BA, 0xFF6F8CFF, 0xFFFFFFFF};
             fx.spawn((float) Math.random() * w, waterTop - dp(40f), (float) (Math.random() - 0.5) * dp(80f),
