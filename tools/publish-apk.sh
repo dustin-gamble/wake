@@ -31,9 +31,11 @@ cp app/build/outputs/apk/debug/app-debug.apk "$WORK/../outputs/ergatta-row-diagn
 
 echo "==> public build $NAME ($CODE)"
 "$GRADLE" $GRADLE_FLAGS -q assembleDebug
+# One stable filename, deliberately: the link used to carry the version, so every publish left
+# cached pages pointing at a file that had just been deleted. Only the label carries the version now.
 rm -f docs/downloads/wake-*.apk
-cp app/build/outputs/apk/debug/app-debug.apk "docs/downloads/wake-$NAME-debug.apk"
-sed -i '' "s/wake-[0-9][0-9.]*-debug\.apk/wake-$NAME-debug.apk/g; s/Download APK · [0-9][0-9.]*/Download APK · $NAME/" docs/index.html
+cp app/build/outputs/apk/debug/app-debug.apk "docs/downloads/wake-latest-debug.apk"
+sed -i '' "s/wake-[0-9][0-9.]*-debug\.apk/wake-latest-debug.apk/g; s/Download APK · [0-9][0-9.]*/Download APK · $NAME/" docs/index.html
 
 BYTES=$(wc -c < server/public/downloads/ergatta-row-diagnostic-debug.apk | tr -d ' ')
 cat > server/public/downloads/version.json <<JSON
@@ -46,4 +48,4 @@ cat > server/public/downloads/version.json <<JSON
 JSON
 
 echo "==> published $NAME ($CODE), $BYTES bytes"
-grep -o "wake-[0-9.]*-debug.apk" docs/index.html | sort -u
+grep -o "wake-[A-Za-z0-9.]*-debug.apk" docs/index.html | sort -u
