@@ -281,6 +281,35 @@ Every game was screenshotted on the emulator with the demo rower, the emptiest f
   0.6 s average and sends it as `d` (0..1) in the feed; `fly.js` scales the flap by it and holds the
   wings raised in a glide otherwise. Hovering keeps the old continuous flap.
 
+## Warning: the Xcode license gate breaks every shimmed binary (2026-09-16)
+
+`/usr/bin/git`, `/usr/bin/strings` and the rest of `/usr/bin` are stubs that forward to the active
+developer directory. After an Xcode update every one of them refuses with:
+
+```text
+You have not agreed to the Xcode license agreements.
+```
+
+`xcode-select -p` pointed at `/Applications/Xcode.app/Contents/Developer`, and there is no Homebrew
+git on this machine, so this stopped commits dead in the middle of a session.
+
+**The fix needs no password and changes no system setting:**
+
+```sh
+export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+```
+
+The Command Line Tools ship their own git (2.54.0) and are not behind the Xcode licence.
+`sudo xcode-select -s /Library/Developer/CommandLineTools` would fix it globally, but that is the
+user's call, not something to do for them.
+
+**The trap is worse than the outage.** A shimmed tool prints that refusal on stderr and exits
+non-zero, so a pipeline like `strings classes.dex | grep -c drawMesas` reports a clean, plausible,
+entirely false **0**. That produced a "the mesa code never reached the APK" scare on 3.19.9 which
+cost several minutes of chasing a build problem that did not exist. If a count comes back
+suspiciously zero, prove the tool runs at all before believing it, and prefer Python's `zipfile` or
+the SDK's own `dexdump` over anything in `/usr/bin`.
+
 ## Warning: ~/Documents is on iCloud Drive
 
 On 2026-09-15, with the disk 98% full, macOS offloaded almost every project file to iCloud and the
@@ -843,12 +872,28 @@ in a gallery that cannot be opened. So the app photographs itself:
   hardware screenshot for that one.
 - **Never automatic.** There is no timer and no capture on entering a screen; it fires only on a
   deliberate long-press or button, one image per action.
-- **Compiled out of the published build** via `BuildConfig.SCREENSHOT_UPLOAD`. Verified on the
-  dex: the public APK has zero `setOnLongClickListener` calls, so no trigger survives, and the
-  method body is inside `if (BuildConfig.SCREENSHOT_UPLOAD)` so a false constant empties it.
-  Dead lambda bodies do linger in the string pool - javac desugars lambdas before it drops
-  constant-false blocks, and a debug APK is not minified - so grepping the dex for
-  `X-Shot-Name` is not a useful test. Reachability is.
+- **Compiled out of the published build** via `BuildConfig.SCREENSHOT_UPLOAD`: the trigger bodies
+  sit inside `if (BuildConfig.SCREENSHOT_UPLOAD)`, so a false constant empties them.
+  **Do not try to confirm this by counting symbols in the dex.** Measured on 3.19.9, the public and
+  local APKs carry *identical* counts - `setOnLongClickListener` 1, `X-Shot-Name` 1, `DemoRower` 8,
+  and `DemoRower` even appears as a real class definition with its `$Sink`, a desugared lambda and
+  ten `invoke` instructions. That is expected: javac desugars lambdas before it drops constant-false
+  blocks, and a debug APK is not minified, so D8 keeps the class even though nothing reachable calls
+  it. An earlier note here claimed the public dex had zero `setOnLongClickListener` calls; it has
+  one, and that was never the thing worth measuring.
+- **Reachability is the test, and it is easy to run.** Install the *public* APK on the emulator and
+  try to drive it with the automation extras:
+
+  ```sh
+  adb install -r docs/downloads/wake-latest-debug.apk
+  adb shell am start -S -n com.codex.waterrowerdiagnostic.debug/com.codex.waterrowerdiagnostic.MainActivity \
+    --ez demo true --es game "'CANYON'"
+  ```
+
+  A public build ignores both extras: no demo rowing, no game opened, and **the first-run HELP tour
+  still showing** - that tour is skipped whenever `applyAutomation` runs, so its presence is the
+  positive signal that the automation path is dead. Reinstall the local APK afterwards; the
+  uninstall clears app data, so records and progress reset on the emulator.
 
 ## Can this tablet take a Bluetooth sensor? (3.7.1)
 
