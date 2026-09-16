@@ -250,7 +250,10 @@ final class DailyRowGame extends GameView {
         paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
         boolean won = phase == Phase.DONE && success;
-        Fx.glow(c, rcx, rcy, rr * (1.2f + 0.3f * ringShown), won ? 0x88F5C518 : ((int) (40 + 60 * ringShown) << 24) | 0x35D0BA);
+        // The halo follows the outcome too: a teal glow around a dulled medal read as a win.
+        int haloTint = (phase == Phase.DONE && !success ? WARN : ACCENT) & 0x00FFFFFF;
+        Fx.glow(c, rcx, rcy, rr * (1.2f + 0.3f * ringShown),
+                won ? 0x88F5C518 : ((int) (40 + 60 * ringShown) << 24) | haloTint);
         boolean lost = phase == Phase.DONE && !success;
         paint.setColor(won ? 0xFFF5C518 : lost ? 0xFF4A3F36 : blend(0xFF2A3648, 0xFFB8890B, ringShown));
         c.drawCircle(rcx, rcy, rr * 0.55f, paint);
@@ -275,7 +278,8 @@ final class DailyRowGame extends GameView {
         float barR = w * 0.86f;
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(barL, barY, barR, barY + dp(18f), dp(9f), dp(9f), paint);
-        paint.setColor(ACCENT);
+        // Same rule as the ring: a miss must not be drawn in the colour of a win.
+        paint.setColor(lost ? WARN : ACCENT);
         c.drawRoundRect(barL, barY, barL + (barR - barL) * progress, barY + dp(18f), dp(9f), dp(9f), paint);
         if (progress > 0.02f) {
             float sheen = barL + (barR - barL) * progress * (float) ((sessionSeconds * 0.6) % 1.0);
