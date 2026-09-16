@@ -444,18 +444,60 @@ function serveStatic(req, res, pathname) {
 
   fs.readFile(resolved, (error, data) => {
     if (error) {
+      logDownload(req, pathname, 404, 0);
       res.writeHead(404);
       res.end('not found');
       return;
     }
 
-    res.writeHead(200, {
+    // Content-Length and Accept-Ranges matter for the rower tablet: Android's download manager on
+    // Chrome 70 wants a size it can show and a download it can resume, and fails quietly without
+    // them. Node would otherwise send this chunked, with no length at all.
+    const headers = {
       'Content-Type': contentType(resolved),
       'Cache-Control': resolved.endsWith('.apk') ? 'no-store' : 'no-cache',
       'Access-Control-Allow-Origin': '*',
-    });
+      'Accept-Ranges': 'bytes',
+    };
+
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    if (range && (range[1] !== '' || range[2] !== '')) {
+      const last = data.length - 1;
+      let start = range[1] === '' ? last - Number(range[2]) + 1 : Number(range[1]);
+      let end = range[2] === '' ? last : Number(range[2]);
+      start = Math.max(0, start);
+      end = Math.min(last, end);
+      if (start > end) {
+        logDownload(req, pathname, 416, 0);
+        res.writeHead(416, { 'Content-Range': `bytes */${data.length}` });
+        res.end();
+        return;
+      }
+      const slice = data.subarray(start, end + 1);
+      headers['Content-Length'] = slice.length;
+      headers['Content-Range'] = `bytes ${start}-${end}/${data.length}`;
+      logDownload(req, pathname, 206, slice.length);
+      res.writeHead(206, headers);
+      res.end(slice);
+      return;
+    }
+
+    headers['Content-Length'] = data.length;
+    logDownload(req, pathname, 200, data.length);
+    res.writeHead(200, headers);
     res.end(data);
   });
+}
+
+/**
+ * Logs downloads (the APK and version.json), so a tap on the tablet's Install button is visible
+ * here. Nothing else is logged per request; this is for diagnosing "the link did nothing".
+ */
+function logDownload(req, pathname, status, bytes) {
+  if (!pathname.startsWith('/downloads/')) return;
+  const agent = (req.headers['user-agent'] || 'unknown').slice(0, 80);
+  const range = req.headers.range ? ` range=${req.headers.range}` : '';
+  console.log(`download ${status} ${pathname} ${bytes}B${range} from ${req.socket.remoteAddress} "${agent}"`);
 }
 
 function contentType(filePath) {
