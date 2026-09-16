@@ -30,6 +30,18 @@ final class CrewBoatGame extends GameView {
     private final android.graphics.Path path = new android.graphics.Path();
     private final Fx.Particles fx = new Fx.Particles();
     private final float[] seatLag = new float[SEATS];
+    /**
+     * Oar puddles. Each blade leaves one where it came out of the water, and it drifts astern and
+     * spreads as it fades - which is what a crew actually leaves behind, and it lands in the band
+     * below the eight that the dead-space survey found emptiest. Drawn with real contrast on
+     * purpose: the shared chop sits at alpha 20-50 and is too quiet to carry this much water.
+     */
+    private static final int PUDDLES = 48;
+    private final float[] puddleX = new float[PUDDLES];
+    private final float[] puddleY = new float[PUDDLES];
+    private final float[] puddleAge = new float[PUDDLES];
+    private final boolean[] bladeWasIn = new boolean[SEATS];
+    private int puddleHead;
     /** Named `course`, not `scenery`: that name is already taken here by the scrolled metres. */
     private final RiverScenery course;
 
@@ -194,6 +206,7 @@ final class CrewBoatGame extends GameView {
             }
             Fx.glow(c, w * 0.5f, eightY, w * 0.35f, 0x2235D0BA);
         }
+        drawPuddles(c, dt, ppm, moving);
         drawEight(c, w, eightY, sinceStroke);
         fx.draw(c);
         if (swing >= 6) {
@@ -334,6 +347,31 @@ final class CrewBoatGame extends GameView {
     }
 
     /** The eight, side on: rowers lean and slide, oars sweep and dip - in time or not. */
+    /** Puddles drift astern with the boat's own speed, widening and fading over about 3 s. */
+    private void drawPuddles(Canvas c, float dt, float ppm, float moving) {
+        for (int i = 0; i < PUDDLES; i++) {
+            if (puddleAge[i] >= 3f || (puddleX[i] == 0f && puddleY[i] == 0f)) {
+                continue;
+            }
+            puddleAge[i] += dt;
+            puddleX[i] -= moving * ppm * dt;
+            float k = puddleAge[i] / 3f;
+            float rx = dp(9f) + k * dp(22f);
+            float ry = dp(3.5f) + k * dp(7f);
+            int a = (int) (135 * (1f - k));
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.6f));
+            paint.setColor(0xFFDCEBF7);
+            paint.setAlpha(a);
+            c.drawOval(puddleX[i] - rx, puddleY[i] - ry, puddleX[i] + rx, puddleY[i] + ry, paint);
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            paint.setAlpha((int) (a * 0.45f));
+            c.drawOval(puddleX[i] - rx * 0.5f, puddleY[i] - ry * 0.5f,
+                    puddleX[i] + rx * 0.5f, puddleY[i] + ry * 0.5f, paint);
+            paint.setAlpha(255);
+        }
+    }
+
     private void drawEight(Canvas c, float w, float waterY, double sinceStroke) {
         float len = w * 0.62f;
         float cx = w * 0.5f;
@@ -359,6 +397,13 @@ final class CrewBoatGame extends GameView {
             float bladeX = seatX + (drive - 0.5f) * spacing * 0.9f;
             boolean inWater = phaseT < 0.35f;
             float bladeY = waterY + (inWater ? dp(14f) : -dp(8f));
+            if (bladeWasIn[i] && !inWater) {
+                puddleX[puddleHead] = bladeX;
+                puddleY[puddleHead] = waterY + dp(14f);
+                puddleAge[puddleHead] = 0f;
+                puddleHead = (puddleHead + 1) % PUDDLES;
+            }
+            bladeWasIn[i] = inWater;
             paint.setColor(0xFFCBB38A);
             paint.setStrokeWidth(dp(3f));
             c.drawLine(seatX, waterY - beam - dp(8f), bladeX, bladeY, paint);
