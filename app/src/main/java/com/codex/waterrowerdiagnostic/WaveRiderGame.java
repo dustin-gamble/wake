@@ -245,7 +245,7 @@ final class WaveRiderGame extends GameView {
             }
         }
 
-        drawOpenOcean(c, w, horizon, crestY, dt);
+        drawOpenOcean(c, w, horizon, h * 0.62f, dt);
 
         // The wave face: a curve from the lip down-left into the trough.
         path.reset();
@@ -510,7 +510,7 @@ final class WaveRiderGame extends GameView {
      * one band of straight horizontal streaks across the sea - scan-lines, not water. This uses
      * the shape that works in RiverScenery.drawWaterLife: scattered dashes, spread linearly.
      */
-    private void drawOpenOcean(Canvas c, float w, float horizon, float crestY, float dt) {
+    private void drawOpenOcean(Canvas c, float w, float horizon, float seaBottom, float dt) {
         // 0.06 was too slow to read as movement: measured 0.05 in this band against 0.11 for
         // the empty water it replaced - texture, not travel. Swell should visibly march in.
         swellPhase += dt * 0.55f;
@@ -518,7 +518,11 @@ final class WaveRiderGame extends GameView {
             swellPhase -= 1f;
         }
         float top = horizon + dp(10f);
-        float span = Math.max(dp(40f), crestY - top);
+        // The crest sits at h*0.30 and the horizon at h*0.26, so that gap is only ~24 px and
+        // clamped to the dp(40) floor: the swell compressed into a 60 px strip under the
+        // horizon while the open ocean below it stayed as empty as before. The sea runs from
+        // the horizon down to where the face meets it, so anchor the span there instead.
+        float span = Math.max(dp(40f), seaBottom - top);
         float right = w * 0.60f;
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
