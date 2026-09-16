@@ -222,6 +222,19 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
 - **Screenshot:** `adb exec-out screencap -p > shot.png` after ~30-50 s of demo rowing (the surge
   runs 40-52 s). This captures everything, Coast Flight's WebGL included.
 - The emulator shows Android's navigation bar and has no kiosk; the tablet does not.
+- **Rank screens by MOTION, not emptiness, when the ask is "more movement".** A dead-space metric
+  (how much flat colour a screen has) found Crew Boat correctly and then gave three false positives
+  in a row: Daily Row is a state screen, Mega Pull's flat cells are the insides of the tent
+  doorways, River Explorer's are open water in a first-person view. Dark is not lifeless. Measuring
+  frame-to-frame change instead put Tug of War last at 0.92 against Collector's 4.13, which was
+  correct - its rope was a fixed curve that could not move.
+- **Sample longer than the event you are looking for.** A 3-frame burst spans ~2 s, and a per-stroke
+  animation is a sub-second event inside a 2.4 s cycle at 25 spm, so three frames routinely miss
+  every peak. That reported Tug of War's new heave as 0.92 -> 1.00, "no change", and the working
+  change was nearly reverted on it. Ten frames over ~9 s showed the rope band swinging 3.17 to 16.68
+  between quiet and heave frames. A frozen clock in the vitals strip is NOT evidence of frozen
+  frames either - it ticks once a second, and sub-second captures share a value even on screens
+  whose whole-frame delta is 12.
 - **Frame timing on the emulator is only good for ranking.** `adb shell dumpsys gfxinfo
   com.codex.waterrowerdiagnostic.debug reset`, row 20 s, then `dumpsys gfxinfo` for percentiles. The
   emulator draws in software (swiftshader), so nearly every full-screen game reads ~97% "janky" at a
