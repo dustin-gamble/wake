@@ -248,6 +248,34 @@ final class CanyonFlightGame extends GameView {
         paint.setStyle(Paint.Style.FILL);
     }
 
+    /**
+     * Mesas between the far wall and the near one. Flat-topped on purpose: the walls either side
+     * are jagged, so repeating that shape a third time reads as one wall, not as distance. Hazed
+     * toward the sky colour and scrolled at 0.4 - between the far 0.25 and the near 0.6.
+     */
+    private void drawMesas(Canvas c, float w, float h, float ppm) {
+        float step = dp(210f);
+        float off = (float) ((x * ppm * 0.4) % step);
+        int base = (int) ((x * ppm * 0.4) / step);
+        for (int k = -1; k * step - off <= w + step; k++) {
+            float px = k * step - off;
+            int seed = base + k;
+            float top = h * (0.44f + ((seed * 6421) & 3) * 0.05f);
+            float wide = step * (0.46f + ((seed * 3571) & 3) * 0.1f);
+            paint.setColor(((seed & 1) == 0) ? 0xFF3E2329 : 0xFF452830);
+            path.reset();
+            path.moveTo(px, h);
+            path.lineTo(px + step * 0.1f, top);
+            path.lineTo(px + wide, top);
+            path.lineTo(px + wide + step * 0.13f, h);
+            path.close();
+            c.drawPath(path, paint);
+            // A lit rim on the sunward side, so the flat top is not a silhouette slab.
+            paint.setColor(0x33FFD9A8);
+            c.drawRect(px + step * 0.1f, top, px + wide, top + dp(3f), paint);
+        }
+    }
+
     private float altFor(float speed) {
         return Math.max(0f, Math.min(1f, (speed - minSpeed) / (maxSpeed - minSpeed)));
     }
@@ -358,6 +386,10 @@ final class CanyonFlightGame extends GameView {
             path.lineTo(w + step, h);
             path.close();
             c.drawPath(path, paint);
+            if (layer == 0) {
+                // Between the two walls, so the canyon has a middle distance.
+                drawMesas(c, w, h, ppm);
+            }
         }
         // Speed lanes on the left as a subtle altitude scale.
         for (float sp = (float) Math.ceil(minSpeed * 2f) / 2f; sp <= maxSpeed; sp += 0.5f) {
