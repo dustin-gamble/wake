@@ -229,9 +229,13 @@ final class TugOfWarGame extends GameView {
             }
             lastStrokes = status.strokes;
         }
-        heave = Math.max(0f, heave - dt * 1.6f);
+        heave = Math.max(0f, heave - dt * 1.1f);
+        // Snap profile: the pull lands hard and lets go slowly, so a stroke reads as a heave
+        // rather than a nudge. A flat decay spent three quarters of every stroke at zero.
+        float snap = heave * heave * (3f - 2f * heave);
         double typical = Math.max(1.0, profile.typicalWatts());
-        float yourLean = 0.35f + 0.35f * (float) Math.min(1.2, watts / typical) + heave * 0.2f;
+        float yourLean = 0.35f + 0.35f * (float) Math.min(1.2, watts / typical) + snap * 0.55f
+                + 0.10f * (float) Math.abs(Math.sin(sessionSeconds * 2.2));
         float theirLean = 0.35f + 0.35f * (float) Math.min(1.2, them / typical)
                 + 0.12f * (float) Math.abs(Math.sin(sessionSeconds * 2.6));
 
@@ -247,10 +251,16 @@ final class TugOfWarGame extends GameView {
         // Rope: hands on each side, sagging a little between the teams.
         float yourHands = mx + dp(90f);
         float theirHands = mx - dp(90f);
+        // The rope answers the pull: slack between strokes, snapping taut on the heave, with a
+        // shudder running along it. A rope that never moves is what made this the stillest
+        // screen measured - 0.92 motion against 4.13 for Collector.
+        float sag = dp(10f) - snap * dp(9f);
+        float shudder = snap * dp(3.5f) * (float) Math.sin(sessionSeconds * 34);
         rope.rewind();
-        rope.moveTo(theirHands - dp(260f), ropeY + dp(2f));
-        rope.quadTo((theirHands + mx) / 2f, ropeY + dp(6f), mx, ropeY);
-        rope.quadTo((yourHands + mx) / 2f, ropeY + dp(6f), yourHands + dp(260f), ropeY + dp(2f));
+        rope.moveTo(theirHands - dp(260f), ropeY + dp(2f) - shudder);
+        rope.quadTo((theirHands + mx) / 2f, ropeY + sag + shudder, mx, ropeY - snap * dp(2f));
+        rope.quadTo((yourHands + mx) / 2f, ropeY + sag - shudder,
+                yourHands + dp(260f), ropeY + dp(2f) + shudder);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(5f));
         paint.setColor(0xFFB89A62);
@@ -264,6 +274,15 @@ final class TugOfWarGame extends GameView {
             drawPuller(c, yx, ground, 1, yourLean * (1 - fall) - fall * 0.9f, ACCENT, k, fall);
             fall = phase == Phase.WON ? (float) Math.min(1, sinceEnd * 2) : 0f;
             drawPuller(c, tx, ground, -1, theirLean * (1 - fall) - fall * 0.9f, BAD, k + 3, fall);
+        }
+        // Dust kicked up by the heave itself, under your own team's feet.
+        if (phase == Phase.PULLING && snap > 0.45f) {
+            for (int k = 0; k < 3; k++) {
+                float fx0 = yourHands + dp(27f) + k * dp(78f);
+                fx.spawn(fx0 + (float) (Math.random() - 0.5) * dp(26f), ground,
+                        (float) (Math.random() - 0.2) * dp(70f), -dp(20f) - (float) Math.random() * dp(40f),
+                        0.5f, dp(4f), 0x99C8A878, false);
+            }
         }
         // Dust from the feet of whoever is being dragged.
         if (phase == Phase.PULLING && Math.random() < 0.5) {
