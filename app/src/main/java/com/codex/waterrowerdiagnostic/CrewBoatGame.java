@@ -30,6 +30,8 @@ final class CrewBoatGame extends GameView {
     private final android.graphics.Path path = new android.graphics.Path();
     private final Fx.Particles fx = new Fx.Particles();
     private final float[] seatLag = new float[SEATS];
+    /** Named `course`, not `scenery`: that name is already taken here by the scrolled metres. */
+    private final RiverScenery course;
 
     private Phase phase = Phase.READY;
     private double raceStart;
@@ -56,6 +58,7 @@ final class CrewBoatGame extends GameView {
         super(context);
         this.bests = bests;
         this.river = new RiverRenderer(getResources().getDisplayMetrics().density);
+        this.course = new RiverScenery(getResources().getDisplayMetrics().density);
         java.util.Random r = new java.util.Random(8);
         for (int i = 1; i < SEATS; i++) {
             seatLag[i] = (r.nextFloat() - 0.5f) * 2f;
@@ -171,6 +174,8 @@ final class CrewBoatGame extends GameView {
         river.advance(moving, dt, ppm);
         river.drawWater(c, waterTop, waterBottom, w);
         drawBuoys(c, w, waterTop, waterBottom, ppm);
+        // The water below the eight was the emptiest band on any screen surveyed.
+        course.drawWaterLife(c, w, waterTop, waterBottom, scenery, ppm, sessionSeconds);
 
         // The rival crew in the far lane, placed by the gap.
         double gap = yourMeters - rivalMeters;

@@ -201,6 +201,7 @@ class PaceBoatGame extends GameView {
         double you = raceDistance();
         scenery.drawBank(c, w, bankTop, waterTop, you, ppm, sessionSeconds, cheer);
         scenery.drawBuoys(c, w, waterTop + (waterBottom - waterTop) * 0.48f, you, ppm, sessionSeconds, 10f);
+        scenery.drawWaterLife(c, w, waterTop, waterBottom, you, ppm, sessionSeconds);
         // Near shore: grass and reeds, scrolling fastest.
         scenePaint.setColor(0xFF2F5E33);
         c.drawRect(0, waterBottom, w, waterBottom + dp(26f), scenePaint);
