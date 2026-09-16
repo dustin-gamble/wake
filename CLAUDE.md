@@ -211,6 +211,17 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
   downstream runs unchanged. A 90 s script: steady ~130 W at 25 spm, a surge (~220 W, 31 spm),
   easy strokes, an 8 s stop. `DemoRowerTest` checks it decodes to this machine's envelope.
   Verified compiled out of the public APK (`demoWatts` absent from its dex).
+- **DemoRower is a poor oracle for anything gated on sustained pace.** Its script is
+  `1.0 + 0.08 sin` to 40 s, then **1.7x from 40-52 s** (~220 W - above this rower's p90 of 162 W,
+  near their 205 W max), then 0.65, then a stop. Wave Rider's ride ended at 0:44 every time and it
+  looked like a tuning fault; it was the surge, and a 220 W surge *should* outrun the wave. Check
+  `intensityAt()` before concluding a game is mistuned from a demo run.
+- **Simulate against the scripted profile, not a constant mean.** Modelling Wave Rider at a flat
+  3.85 m/s predicted a 115 s ride; the real one lasted 44 s. Two things the flat model missed:
+  `boat.value()` is the *coasted* speed, which dips hard between strokes, and the demo surges.
+  Driving the same model with `intensityAt()` and a per-stroke coast predicted 41.9 s ending at the
+  shoulder at session t=45 s, against 44 s observed - close enough to trust. The flat model is what
+  produced a wrong number in the 3.21.0 commit message.
 - **Launch extras:** `adb shell am start -S -n com.codex.waterrowerdiagnostic.debug/com.codex.waterrowerdiagnostic.MainActivity --ez demo true --es game "'HEAD RACE'"`.
   `game` is a home card title; `demoWatts` sets the base power. The help tour is skipped.
   Screens that are not home cards open with `--es screen RECORDS|HELP|CALIBRATE|CANYON_DRIVE|SESSION_ART`
