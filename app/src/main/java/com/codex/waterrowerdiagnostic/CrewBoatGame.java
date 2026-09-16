@@ -185,6 +185,7 @@ final class CrewBoatGame extends GameView {
         drawBank(c, w, h, waterTop, ppm);
         river.advance(moving, dt, ppm);
         river.drawWater(c, waterTop, waterBottom, w);
+        drawNearShore(c, w, h, waterBottom, ppm);
         drawBuoys(c, w, waterTop, waterBottom, ppm);
         // The water below the eight was the emptiest band on any screen surveyed.
         course.drawWaterLife(c, w, waterTop, waterBottom, scenery, ppm, sessionSeconds);
@@ -316,6 +317,31 @@ final class CrewBoatGame extends GameView {
     }
 
     /** Lane buoys every 25 m, red and white, bobbing past. */
+    /**
+     * The near bank, below the water. The eight sits at 0.62 of a band that runs to 0.88, so the
+     * bottom third was empty by construction - puddles could not reach it and chop was too quiet
+     * to carry it. Grass and reeds scroll fastest of anything on screen, which is what sells the
+     * speed at this distance. Drawn before the buoys: the near lane is at waterBottom itself.
+     */
+    private void drawNearShore(Canvas c, float w, float h, float waterBottom, float ppm) {
+        paint.setStyle(android.graphics.Paint.Style.FILL);
+        paint.setColor(0xFF2F5E33);
+        c.drawRect(0, waterBottom, w, h, paint);
+        float gap = dp(22f);
+        double scroll = scenery * ppm * 1.2;
+        float off = (float) (scroll % gap);
+        paint.setStrokeWidth(dp(3f));
+        for (float rx = -off - gap; rx < w + gap; rx += gap) {
+            int k = (int) Math.floor((rx + scroll) / gap + 0.5);
+            float tall = dp(14f) + (Math.abs(k * 7) % 4) * dp(5f);
+            float sway = (float) Math.sin(sessionSeconds * 2 + k) * dp(3f);
+            paint.setColor((k & 1) == 0 ? 0xFF4E8F4F : 0xFF6BAA5C);
+            c.drawLine(rx, waterBottom + dp(8f), rx + sway, waterBottom + dp(8f) - tall, paint);
+        }
+        paint.setColor(0xFF24491F);
+        c.drawRect(0, waterBottom + dp(9f), w, waterBottom + dp(12f), paint);
+    }
+
     private void drawBuoys(Canvas c, float w, float waterTop, float waterBottom, float ppm) {
         float gapPx = 25f * ppm;
         float off = (float) ((yourMeters * ppm) % gapPx);
