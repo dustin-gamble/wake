@@ -103,7 +103,11 @@ final class WaveRiderGame extends GameView {
     private float waveSpeed() {
         double t = sessionSeconds;
         float typical = (float) profile.typicalSpeed();
-        float base = typical * 0.65f;
+        // 0.65 put the wave permanently 35% slower than the rower's own typical pace, so anyone
+        // rowing at or above the median ran onto the shoulder within seconds. Simulated across
+        // this machine's envelope (p10 3.00, median 3.85, p90 4.06 m/s): at 0.65 the ride lasted
+        // 7.5 s at the median and 6.7 s at the top, always to the shoulder.
+        float base = typical * 0.90f;
         float drift = (float) Math.sin(t / 11.0) * typical * 0.12f;
         float set = (float) Math.sin(t / 37.0) * typical * 0.14f;
         return base + drift + set + (inBarrel() ? typical * 0.09f : 0f);
@@ -134,6 +138,12 @@ final class WaveRiderGame extends GameView {
             // wiped out after five seconds - and the drift is gentler than it first shipped (0.42).
             float gain = rideSeconds < 6 ? 0.08f : 0.3f;
             position += (speed - wave) * dt * gain;
+            // The wave holds you in the pocket. Without this, position is a pure integral of the
+            // speed difference: ANY standing mismatch saturates to +/-1 eventually, so a stable
+            // pocket was impossible and the ride length was just "time until the integral ran
+            // out" - raising the wave speed alone only changed which side you fell off. With the
+            // restoring term the drift and set are what threaten you, which is the intended game.
+            position -= position * 0.12f * dt;
             // With the handle sensor, leaning carves along the face - a small correction, not a
             // substitute for matching the wave's pace.
             if (hasSteering()) {
