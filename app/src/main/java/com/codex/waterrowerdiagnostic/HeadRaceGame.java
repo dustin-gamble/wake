@@ -252,7 +252,7 @@ final class HeadRaceGame extends GameView {
         for (int lane = 1; lane < 4; lane++) {
             scenery.drawBuoys(c, w, waterTop + laneH * lane, you, ppm, sessionSeconds, 10f);
         }
-        drawWaterLife(c, w, waterTop, waterBottom, you, ppm, sessionSeconds);
+        scenery.drawWaterLife(c, w, waterTop, waterBottom, you, ppm, sessionSeconds);
         for (int mark = 250; mark < raceMeters; mark += 250) {
             float mx = yourX + (float) (mark - you) * ppm;
             if (mx > -dp(40f) && mx < w + dp(40f)) {
@@ -360,63 +360,6 @@ final class HeadRaceGame extends GameView {
         float panelBottom = h - dp(8f);
         drawGapGraph(c, dp(10f), panelTop, w * 0.5f - dp(6f), panelBottom);
         drawStrokeBars(c, w * 0.5f + dp(6f), panelTop, w - dp(10f), panelBottom);
-    }
-
-    /**
-     * Life on the water itself. The hulls already carry their own wake from RiverRenderer, so this
-     * adds none: what the middle of the course was missing is surface texture and something moving
-     * that is not a competitor. Chop at four depths, drifting foam, and a pair of ducks working
-     * down the course - all scrolling with your metres, all kept out of the four racing lanes.
-     */
-    private void drawWaterLife(Canvas c, float w, float waterTop, float waterBottom, double you,
-                               float ppm, double time) {
-        float span = waterBottom - waterTop;
-        panel.setStyle(Paint.Style.STROKE);
-        panel.setStrokeCap(Paint.Cap.ROUND);
-        // Chop: short strokes on the lane boundaries and the open water between them. Nearer rows
-        // scroll faster, which is what gives the flat navy field any sense of depth at all.
-        for (int row = 0; row < 8; row++) {
-            float y = waterTop + span * (0.05f + row * 0.125f);
-            float depth = 0.3f + row * 0.1f;
-            float step = dp(150f);
-            float off = (float) ((you * ppm * depth * 0.6) % step);
-            panel.setStrokeWidth(dp(1.2f) + depth * dp(0.8f));
-            panel.setColor((Math.round(20 + 30 * depth) << 24) | 0x00BFE3FF);
-            for (float x = -off; x < w + step; x += step) {
-                float bob = (float) Math.sin(time * 1.5 + x * 0.015 + row) * dp(2.5f);
-                c.drawLine(x, y + bob, x + dp(30f) * depth, y + bob, panel);
-                c.drawLine(x + dp(62f), y + bob + dp(6f), x + dp(62f) + dp(20f) * depth,
-                        y + bob + dp(6f), panel);
-            }
-        }
-        panel.setStyle(Paint.Style.FILL);
-        // Foam and drift carried down the course.
-        float driftStep = dp(260f);
-        float driftOff = (float) ((you * ppm * 0.85) % driftStep);
-        for (int k = -1; k < (int) (w / driftStep) + 2; k++) {
-            float x = k * driftStep - driftOff;
-            float y = waterTop + span * (0.2f + ((k * 5081) & 3) * 0.2f);
-            panel.setColor(0x26DCEBF7);
-            c.drawOval(x, y, x + dp(34f), y + dp(7f), panel);
-            c.drawOval(x + dp(40f), y + dp(9f), x + dp(58f), y + dp(14f), panel);
-        }
-        // Two ducks in the clear strip above the first lane, bobbing as they paddle.
-        float duckStep = dp(520f);
-        float duckOff = (float) ((you * ppm * 0.95) % duckStep);
-        for (int k = -1; k < (int) (w / duckStep) + 2; k++) {
-            float dx = k * duckStep - duckOff + dp(60f);
-            for (int n = 0; n < 2; n++) {
-                float x = dx + n * dp(26f);
-                float y = waterTop + span * 0.035f + (float) Math.sin(time * 2.1 + k + n) * dp(1.8f);
-                panel.setColor(0xFF2B3A46);
-                c.drawOval(x, y, x + dp(15f), y + dp(8f), panel);          // body
-                c.drawOval(x + dp(10f), y - dp(6f), x + dp(17f), y + dp(2f), panel);  // head
-                panel.setColor(0xFFF0B132);
-                c.drawRect(x + dp(16f), y - dp(3f), x + dp(19f), y - dp(1.5f), panel); // bill
-                panel.setColor(0x33DCEBF7);
-                c.drawOval(x - dp(5f), y + dp(6f), x + dp(15f), y + dp(10f), panel);   // its ripple
-            }
-        }
     }
 
     /** Every crew's progress on one strip above the water, with metres to go. */

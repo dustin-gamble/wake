@@ -168,6 +168,7 @@ final class RegattaGame extends GameView {
         for (int lane = 1; lane < 4; lane++) {
             scenery.drawBuoys(c, w, waterTop + laneH * lane, you, ppm, sessionSeconds, 10f);
         }
+        scenery.drawWaterLife(c, w, waterTop, waterBottom, you, ppm, sessionSeconds);
         float finishX = yourX + dp(66f) + (float) (RACE_METERS - you) * ppm;
         if (finishX < w + dp(40f)) {
             scenery.drawFinishLine(c, finishX, waterTop, waterBottom, sessionSeconds);

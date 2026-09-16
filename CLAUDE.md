@@ -853,6 +853,24 @@ It also writes `server/public/downloads/version.json`, which the dashboard reads
 build the Install button is handing out and whether the connected tablet is behind it. Build by
 hand and that line goes stale, which is the whole reason the script exists.
 
+**Gate anything that follows the build on its exit code.** The script is `set -e` and returns
+non-zero correctly, but a chain like
+
+```sh
+./tools/publish-apk.sh > build.log 2>&1; echo "exit $?"      # WRONG: exit is printed, not checked
+cp server/public/downloads/*.apk /tmp/x.apk && adb install -r /tmp/x.apk && adb shell am start ...
+```
+
+installs **the previous build's APK** when the compile fails, and the screenshots that follow look
+entirely normal while showing the old code. That happened on 3.20.4: a `RiverScenery` compile error
+left the frames showing 3.20.3, and the empty water in them was nearly read as "the shared method
+does not work" when the method had simply never been built. Write it as
+`./tools/publish-apk.sh > build.log 2>&1 || exit 1` and only then install and screenshot.
+
+A failed run publishes nothing, so the tree stays consistent: `set -e` stops before the `cp`, the
+public build and the `sed`, leaving `docs/index.html` and `version.json` on the last good version.
+Only `app/build.gradle` is ahead, because the version bump happens first.
+
 ## Screenshots from the tablet (3.7.0, gated in 3.7.1)
 
 The tablet is kiosk-locked: no file manager, no app switcher, and Android's own screenshot lands
