@@ -147,6 +147,85 @@ final class NightGridGame extends GameView {
         }
     }
 
+    /**
+     * Turbines that turn with your stroke rate, a lit road across the valley, and an aurora that
+     * comes out once the whole town is lit - the right half of the screen had nothing in it.
+     */
+    private void drawValleyLife(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        float share = houses > 0 ? lit / houses : 0f;
+        // Aurora above the hills once the town is lit.
+        if (share > 0.6f) {
+            paint.setStyle(Paint.Style.STROKE);
+            for (int i = 0; i < 3; i++) {
+                // Wide and faint: hard ribbons looked pasted over the stars on the tablet.
+                paint.setStrokeWidth(dp(26f + i * 18f));
+                paint.setColor((((int) (14 * (share - 0.6f) / 0.4f)) << 24) | (i == 1 ? 0x7FE6C8 : 0x6FD8FF));
+                path.reset();
+                for (float x = -dp(40f); x <= w + dp(40f); x += dp(60f)) {
+                    float y = h * (0.22f + i * 0.04f) + (float) Math.sin(x / dp(220f) + t * 0.4 + i) * dp(26f);
+                    if (x <= -dp(40f)) {
+                        path.moveTo(x, y);
+                    } else {
+                        path.lineTo(x, y);
+                    }
+                }
+                c.drawPath(path, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+        // Wind farm on the ridge to the right: blades turn with the rate you are pulling.
+        float spin = (float) (t * (status == null ? 6 : 6 + status.strokeRate * 1.2));
+        for (int i = 0; i < 3; i++) {
+            float tx = w * (0.62f + i * 0.13f);
+            float base = h * 0.50f + (float) Math.sin(tx / dp(160f)) * dp(26f) + dp(30f);
+            float hubY = base - dp(64f) - i * dp(8f);
+            paint.setColor(0xFF2A3446);
+            c.drawRect(tx - dp(2.5f), hubY, tx + dp(2.5f), base, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(0xFF3E4A60);
+            for (int b = 0; b < 3; b++) {
+                double a = spin * 0.6 + b * Math.PI * 2 / 3 + i;
+                c.drawLine(tx, hubY, tx + (float) Math.cos(a) * dp(26f), hubY + (float) Math.sin(a) * dp(26f), paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFFFF4A4A);
+            if (((int) (t * 1.5 + i)) % 2 == 0) {
+                c.drawCircle(tx, hubY - dp(3f), dp(2f), paint);
+            }
+        }
+        // A road along the valley with a car's headlights sweeping across.
+        float roadY = h * 0.80f;
+        paint.setColor(0xFF1B2433);
+        path.reset();
+        path.moveTo(-dp(4f), roadY + dp(18f));
+        path.lineTo(w + dp(4f), roadY - dp(8f));
+        path.lineTo(w + dp(4f), roadY + dp(8f));
+        path.lineTo(-dp(4f), roadY + dp(34f));
+        path.close();
+        c.drawPath(path, paint);
+        // Centre line, dashed, following the same slope.
+        paint.setColor(0x33FFF1B0);
+        for (float rx = -dp(20f); rx < w; rx += dp(70f)) {
+            float ry = roadY + dp(26f) - (rx / w) * dp(26f);
+            c.drawRect(rx, ry - dp(1.5f), rx + dp(30f), ry + dp(1.5f), paint);
+        }
+        float carX = (float) ((t * dp(70f)) % (w + dp(200f))) - dp(100f);
+        float carY = roadY + dp(22f) - (carX / w) * dp(26f);
+        Fx.glow(c, carX + dp(26f), carY, dp(40f), 0x66FFF1B0);
+        paint.setColor(0xFFE8EDF5);
+        c.drawRoundRect(carX - dp(14f), carY - dp(7f), carX + dp(14f), carY + dp(3f), dp(3f), dp(3f), paint);
+        c.drawRoundRect(carX - dp(7f), carY - dp(13f), carX + dp(7f), carY - dp(5f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFF1B2433);
+        c.drawCircle(carX - dp(8f), carY + dp(3f), dp(3f), paint);
+        c.drawCircle(carX + dp(8f), carY + dp(3f), dp(3f), paint);
+        paint.setColor(0xFFFFF1B0);
+        c.drawRect(carX + dp(11f), carY - dp(4f), carX + dp(15f), carY - dp(1f), paint);
+        paint.setColor(0xFFFF6B6B);
+        c.drawRect(carX - dp(12f), carY - dp(4f), carX - dp(9f), carY - dp(1f), paint);
+    }
+
     /** Fireflies over the bank and the moon broken up in the river. */
     private void drawRiverLife(Canvas c, float w, float h) {
         double t = sessionSeconds;
@@ -232,6 +311,9 @@ final class NightGridGame extends GameView {
         path.close();
         c.drawPath(path, paint);
         drawTrain(c, w, h);
+        // 3.19.6: the right half of the tablet screen was bare. A wind farm turning with your rate,
+        // a road with headlights, and an aurora when the town is fully lit.
+        drawValleyLife(c, w, h);
 
         // River and the water wheel generator.
         paint.setColor(0xFF12304A);

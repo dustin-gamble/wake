@@ -44,6 +44,7 @@ final class WaveRiderGame extends GameView {
     private final float[] gullX = {0.2f, 0.55f, 0.8f};
     private double dolphinAt = 8;
     private boolean wasPocket;
+    private final Fx.Particles wash = new Fx.Particles();
     private String popup = "";
     private double popupUntil;
     private int lastScoreMark;
@@ -241,6 +242,45 @@ final class WaveRiderGame extends GameView {
                 0xFF1B6FA8, 0xFF0D3C5E, Shader.TileMode.CLAMP));
         c.drawPath(path, paint);
         paint.setShader(null);
+        // 3.19.6: the face was one flat triangle on the tablet. Chop lines run down it, sun glitter
+        // rides the upper face, and the base churns - so the wave is visibly moving under the board.
+        c.save();
+        c.clipPath(path);
+        // Short chop that follows the face rather than long streaks across it.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        for (int i = 0; i < 40; i++) {
+            float phase = (float) ((i * 0.061 + sessionSeconds * 0.30) % 1.0);
+            float px0 = lipX - faceRun * phase;
+            float down = dp(18f) + (i % 5) * dp(26f);
+            float py0 = faceY(px0, lipX, crestY, troughY, faceRun) + down;
+            float len = dp(12f) + (i % 3) * dp(8f);
+            paint.setStrokeWidth(dp(1.4f) + (i % 3) * dp(0.5f));
+            int a = 30 + (int) (35 * (1 + Math.sin(i * 1.7 + sessionSeconds * 3)));
+            paint.setColor((a << 24) | 0xFFFFFF);
+            float py1 = faceY(px0 - len, lipX, crestY, troughY, faceRun) + down + dp(2f);
+            c.drawLine(px0, py0, px0 - len, py1, paint);
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 18; i++) {
+            float phase = (float) ((i * 0.09 + sessionSeconds * 0.5) % 1.0);
+            float gx0 = lipX - faceRun * phase;
+            float gy0 = faceY(gx0, lipX, crestY, troughY, faceRun) + dp(16f) + (i % 5) * dp(12f);
+            float tw = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6 + i * 1.3);
+            paint.setColor(((int) (70 * tw) << 24) | 0xFFF1C8);
+            c.drawOval(gx0 - dp(14f), gy0 - dp(2f), gx0 + dp(14f), gy0 + dp(2f), paint);
+        }
+        // Churn where the face meets the trough: it rides the face itself, not open water.
+        paint.setColor(0x55FFFFFF);
+        for (int i = 0; i < 26; i++) {
+            float phase = (float) ((i * 0.038 + sessionSeconds * 0.22) % 1.0);
+            float bx0 = lipX - faceRun * (0.55f + 0.45f * phase);
+            float by0 = faceY(bx0, lipX, crestY, troughY, faceRun) + dp(26f)
+                    + (float) Math.sin(i * 2.1 + sessionSeconds * 7) * dp(5f);
+            c.drawCircle(bx0, by0, dp(4f) + (i % 3) * dp(3f), paint);
+        }
+        c.restore();
 
         // Lip: the curl, thrown further over during a barrel.
         float throwOver = inBarrel() ? w * 0.30f : w * 0.10f;
@@ -260,6 +300,9 @@ final class WaveRiderGame extends GameView {
             float fy0 = crestY + dp(20f) + (float) Math.sin(i * 1.7 + sessionSeconds * 8) * dp(7f);
             c.drawCircle(fx0, fy0, dp(7f) + (i % 3) * dp(3f), paint);
         }
+
+        // Spray thrown off the board's rail, and a wake up the face behind it.
+        drawBoardWash(c, lipX, crestY, troughY, faceRun, dt);
 
         // Surfer: position maps along the face, pocket sitting just left of the curl.
         float t = (position + 1f) / 2f;                 // 0 = in the curl, 1 = far shoulder
@@ -440,6 +483,32 @@ final class WaveRiderGame extends GameView {
     }
 
     /** Height of the wave face at a given x. Exponent shapes the concave face. */
+    /** Spray and a carve trail behind the board: the face now shows where you have been. */
+    private void drawBoardWash(Canvas c, float lipX, float crestY, float troughY, float faceRun, float dt) {
+        float t0 = (position + 1f) / 2f;
+        float sx0 = lipX - dp(26f) - t0 * faceRun * 0.82f;
+        float sy0 = faceY(sx0, lipX, crestY, troughY, faceRun);
+        wash.step(dt, dp(120f));
+        if (rideSeconds > 0 && Math.random() < 0.9) {
+            wash.spawn(sx0 - dp(6f), sy0 + dp(6f), (float) (Math.random() - 0.35) * dp(90f),
+                    -dp(20f) - (float) Math.random() * dp(60f), 0.5f, dp(3f), 0xCCFFFFFF, true);
+        }
+        wash.draw(c);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(3f));
+        paint.setColor(0x66FFFFFF);
+        path.reset();
+        path.moveTo(sx0, sy0 + dp(8f));
+        for (int i = 1; i <= 8; i++) {
+            float px0 = sx0 + i * dp(22f);
+            float py0 = faceY(px0, lipX, crestY, troughY, faceRun) + dp(8f)
+                    + (float) Math.sin(i * 0.9 + sessionSeconds * 4) * dp(4f);
+            path.lineTo(px0, py0);
+        }
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
     private float faceY(float x, float lipX, float crestY, float troughY, float faceRun) {
         float f = Math.max(0f, Math.min(1f, (lipX - x) / faceRun));
         return crestY + (troughY - crestY) * (float) Math.pow(f, 0.72);

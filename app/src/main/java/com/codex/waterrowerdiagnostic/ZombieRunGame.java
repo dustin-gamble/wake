@@ -52,7 +52,8 @@ final class ZombieRunGame extends GameView {
     private boolean caughtFx;
 
     /* Speech bubbles. Which figure speaks: 0-6 a zombie, -1 you. */
-    private static final float FIGURE_SCALE = 2.0f;
+    // 3.19.6: 2.0 left the runner and horde as specks on the tablet's 1920-wide screen.
+    private static final float FIGURE_SCALE = 3.2f;
     private static final String[] LINES_START = {"Is he... rowing?", "Lunch is getting away!", "Walk faster, Gary!", "Fresh legs!"};
     private static final String[] LINES_CHASE = {"BRAAAINS", "Mmm, cardio-flavoured", "We never skip leg day", "Wait up!", "Is that a rowing machine?"};
     private static final String[] LINES_CLOSE = {"Just a little nibble!", "Almost... there...", "I can smell the sweat!", "So close!", "Nom nom nom?"};
@@ -440,13 +441,14 @@ final class ZombieRunGame extends GameView {
             }
         }
         dust.draw(c);
+        drawTorch(c, youX, groundY);
         drawRunner(c, youX, groundY, ACCENT, speed, (float) (scroll * 3.0), false);
 
         // The horde.
         float hordeX = youX - (float) gap * ppm;
         float speakerX = youX;
         for (int i = 0; i < 7; i++) {
-            float zx = hordeX - i * dp(30f) - (i % 3) * dp(9f);
+            float zx = hordeX - i * dp(46f) - (i % 3) * dp(14f);
             if (i == bubbleWho) {
                 speakerX = zx;
             }
@@ -538,6 +540,20 @@ final class ZombieRunGame extends GameView {
     }
 
     /** A chunky figure with legs that swing with distance covered. */
+    /** A torch beam thrown forward along the ground - the night ahead was flat black. */
+    private void drawTorch(Canvas c, float x, float groundY) {
+        float headY = groundY - 40f * FIGURE_SCALE * dp(1f);
+        float flicker = 1f + (float) Math.sin(sessionSeconds * 17) * 0.05f;
+        path.reset();
+        path.moveTo(x + dp(8f), headY);
+        path.lineTo(x + dp(300f) * flicker, groundY - dp(70f));
+        path.lineTo(x + dp(300f) * flicker, groundY + dp(26f));
+        path.close();
+        paint.setColor(0x18FFF3C4);
+        c.drawPath(path, paint);
+        Fx.glow(c, x + dp(120f), groundY - dp(14f), dp(120f), 0x20FFF3C4);
+    }
+
     private void drawRunner(Canvas c, float x, float groundY, int color, float speed, float phaseIn,
                             boolean zombie) {
         float s = dp(FIGURE_SCALE);

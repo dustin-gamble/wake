@@ -224,6 +224,11 @@ final class StrokeCoachGame extends GameView {
     }
 
     // 3.19.5: a little rower in the empty corner, moving with your real drive and recovery.
+    private final float[] trace = new float[300];
+    private int traceHead;
+    private int traceCount;
+    private float traceMax = 1f;
+    private float traceClock;
     private float slide;          // 0 = at the catch, 1 = at the finish
     private double coachSlowRate;
     private float coachDrive;
@@ -355,7 +360,10 @@ final class StrokeCoachGame extends GameView {
                 lastScore >= 80 ? ACCENT : lastScore >= 60 ? WARN : BAD, Paint.Align.LEFT);
         label(c, "STROKE SCORE", rx, dp(110f), 10f, FAINT, Paint.Align.LEFT);
         wrap(c, tip, rx, dp(146f), w - rx - dp(20f), 15f, tipColor);
-        drawRower(c, dp(24f), h * 0.83f, w * 0.36f, h - dp(8f), dt);
+        // 3.19.6: on the tablet the rower was a speck in a big empty panel. It now spans the space
+        // under the chart, and the blank right column carries a live force trace.
+        drawRower(c, dp(24f), h * 0.755f, w * 0.58f, h - dp(10f), dt);
+        drawLiveTrace(c, w * 0.64f, h * 0.70f, w - dp(24f), h - dp(10f), dt);
 
         PulseMeter.Stroke s = status == null ? null : status.meter.lastStroke;
         float gy = h * 0.38f;
@@ -393,6 +401,60 @@ final class StrokeCoachGame extends GameView {
         if (bests.has("coach.score")) {
             label(c, "best session average " + Math.round(bests.get("coach.score", 0f)), w - cl, bt - dp(6f), 9f, FAINT, Paint.Align.RIGHT);
         }
+    }
+
+    /**
+     * A live trace of the paddle through the last few seconds, filling the column that was empty on
+     * the tablet: the line climbs on every drive and falls away on the recovery, so the rhythm of
+     * the piece is visible at a glance.
+     */
+    private void drawLiveTrace(Canvas c, float l, float t, float r, float b, float dt) {
+        traceClock += dt;
+        if (traceClock >= 0.05f) {
+            traceClock = 0f;
+            float v = status == null ? 0f : (float) status.meter.paddleRate;
+            traceMax = Math.max(traceMax * 0.995f, v);
+            trace[traceHead] = v;
+            traceHead = (traceHead + 1) % trace.length;
+            traceCount = Math.min(trace.length, traceCount + 1);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        label(c, "PADDLE  ·  LAST 15 SECONDS", l + dp(14f), t + dp(18f), 9f, FAINT, Paint.Align.LEFT);
+        if (traceCount < 2 || traceMax <= 1f) {
+            return;
+        }
+        float top = t + dp(28f);
+        float bottom = b - dp(14f);
+        float step = (r - l - dp(28f)) / (trace.length - 1f);
+        path.rewind();
+        path.moveTo(l + dp(14f), bottom);
+        for (int i = 0; i < traceCount; i++) {
+            int idx = (traceHead - traceCount + i + trace.length) % trace.length;
+            float x = l + dp(14f) + i * step;
+            path.lineTo(x, bottom - (bottom - top) * Math.min(1f, trace[idx] / traceMax));
+        }
+        path.lineTo(l + dp(14f) + (traceCount - 1) * step, bottom);
+        path.close();
+        paint.setColor(0x3335D0BA);
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2.5f));
+        paint.setColor(ACCENT);
+        path.rewind();
+        for (int i = 0; i < traceCount; i++) {
+            int idx = (traceHead - traceCount + i + trace.length) % trace.length;
+            float x = l + dp(14f) + i * step;
+            float y = bottom - (bottom - top) * Math.min(1f, trace[idx] / traceMax);
+            if (i == 0) {
+                path.moveTo(x, y);
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private void metric(Canvas c, float x, float y, String value, String caption) {

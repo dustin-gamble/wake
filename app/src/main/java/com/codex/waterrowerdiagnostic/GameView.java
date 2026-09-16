@@ -49,6 +49,9 @@ abstract class GameView extends View {
     /** Strokes taken since {@link #start()}. */
     protected int strokesSinceStart;
     private long lastFrameMs;
+    /** 0 at the catch, 1 at the finish: see {@link #strokePhase()}. */
+    private float strokePhase;
+    private double strokeSlowRate;
     private long startedAtMs;
     private boolean running;
 
@@ -240,6 +243,7 @@ abstract class GameView extends View {
             }
         }
 
+        stepStrokePhase(dt);
         render(canvas, dt);
         if (running) {
             postInvalidateOnAnimation();
@@ -247,6 +251,28 @@ abstract class GameView extends View {
     }
 
     protected abstract void render(Canvas canvas, float dt);
+
+    /**
+     * Where you are in the stroke right now: 0 at the catch, 1 at the finish, easing back to 0
+     * through the recovery. Taken from the pulse meter - the paddle only accelerates while the
+     * handle is being pulled - so anything drawn from this moves with the real stroke rather than a
+     * free-running animation. Used for the sweeping oars in the boat games (3.19.6).
+     */
+    protected float strokePhase() {
+        return strokePhase;
+    }
+
+    private void stepStrokePhase(float dt) {
+        if (dt <= 0) {
+            return;
+        }
+        double rate = status != null ? status.meter.paddleRate : 0;
+        strokeSlowRate += (rate - strokeSlowRate) * Math.min(1.0, dt / 0.6);
+        boolean driveNow = rate > 40 && rate > strokeSlowRate * 1.03;
+        // A drive takes about 0.8 s and the recovery about twice that: the 1:2 ratio the coach aims at.
+        strokePhase += driveNow ? dt / 0.8f : -dt / 1.6f;
+        strokePhase = Math.max(0f, Math.min(1f, strokePhase));
+    }
 
     /* ---------- helpers ---------- */
 
