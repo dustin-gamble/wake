@@ -239,6 +239,21 @@ The rower asked for "launch it, test with mock rowing, screenshot it, then revie
   doorways, River Explorer's are open water in a first-person view. Dark is not lifeless. Measuring
   frame-to-frame change instead put Tug of War last at 0.92 against Collector's 4.13, which was
   correct - its rope was a fixed curve that could not move.
+- **A per-stroke spike is not contamination - check reproducibility before discarding a burst.**
+  I gated bursts on `peak > 4x median`, built to catch DemoRower's sky stepping from pre-dawn to
+  sunset mid-capture (which reads 170 in an untouched band and swamps everything). It works for
+  that, but it also flags games whose content legitimately updates once per stroke: Stroke Coach
+  redraws its drive curve, 30-bar history and paddle trace together, giving median 1.95 with a
+  peak of 8.4. The tell is reproducibility - a lighting step lands at a random point in the 90 s
+  cycle and will NOT repeat, while Stroke Coach reproduced 1.96/8.33 and 1.95/8.46 across separate
+  runs. Re-run before believing a burst is void.
+- **Most "this screen is static" hunches were wrong this session, and only the draw code settled
+  them.** Wave Rider's sailboats, gulls and sun glitter all animate (thin sparse sprites just do
+  not move a cell average); Rocket Launch's flame scales with thrust and its smoke recycles through
+  a 40-slot ring, and it measures 0.75 only because the camera tracks the rocket while the world
+  scrolls past. Mega Pull's flat cells are the insides of the tent doorways, River Explorer's are
+  open water seen head-on, Daily Row is a state screen and Zone Row is an instrument by design. The
+  metric ranks how much a screen changes, which is not how much it should change.
 - **Sample longer than the event you are looking for.** A 3-frame burst spans ~2 s, and a per-stroke
   animation is a sub-second event inside a 2.4 s cycle at 25 spm, so three frames routinely miss
   every peak. That reported Tug of War's new heave as 0.92 -> 1.00, "no change", and the working
