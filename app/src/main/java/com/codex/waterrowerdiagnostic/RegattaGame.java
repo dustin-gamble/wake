@@ -184,7 +184,8 @@ final class RegattaGame extends GameView {
                 rivalX[i] = target;
             }
             float ly = waterTop + laneH * (i + 0.5f);
-            river.drawBoat(c, rivalX[i], ly, dp(150f), COLORS[i], phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
+            river.setStrokePhase(strokePhase());
+        river.drawBoat(c, rivalX[i], ly, dp(150f), COLORS[i], phase == Phase.RACING ? (float) (RACE_METERS / finishTimes[i]) : 0f, true);
             label(c, PLANS[i] + String.format(java.util.Locale.US, "  %+.0f m", d - you),
                     Math.max(dp(70f), Math.min(w - dp(70f), rivalX[i])),
                     ly - dp(22f), 11f, COLORS[i], Paint.Align.CENTER);

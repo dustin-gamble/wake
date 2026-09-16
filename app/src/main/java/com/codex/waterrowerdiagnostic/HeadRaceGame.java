@@ -276,7 +276,8 @@ final class HeadRaceGame extends GameView {
                 rivalX[i] = target;
             }
             float ly = waterTop + laneH * (i + 0.5f);
-            river.drawBoat(c, rivalX[i], ly, dp(150f), r.color,
+            river.setStrokePhase(strokePhase());
+        river.drawBoat(c, rivalX[i], ly, dp(150f), r.color,
                     phase == Phase.RACING ? r.speedAt(t) * (raceMeters / (float) r.finishTime) : 0f, true);
             label(c, r.name + String.format(java.util.Locale.US, "  %+.0f m", d - you), rivalX[i],
                     ly - dp(22f), 11f, d > you ? r.color : DIM, Paint.Align.CENTER);

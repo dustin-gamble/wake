@@ -234,6 +234,7 @@ final class CollectorGame extends GameView {
         if (combo >= 3) {
             Fx.glow(c, boatX, boatY, dp(70f + Math.min(combo, 20) * 3f), 0x40F5C518);
         }
+        river.setStrokePhase(strokePhase());
         river.bowSpray(boatX + dp(56f), boatY, speed, dt);
         river.drawBoat(c, boatX, boatY, dp(116f), ACCENT, speed, false);
         river.drawSpray(c);

@@ -256,6 +256,7 @@ class PaceBoatGame extends GameView {
         if (paceBoatX == 0f) {
             paceBoatX = clampedX;
         }
+        river.setStrokePhase(strokePhase());
         river.drawBoat(c, paceBoatX, lanePace, boatLen, BLUE, opponentSpeed(), true);
         if (targetX != clampedX) {
             // Off the edge: an arrow says which way and how far.

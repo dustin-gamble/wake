@@ -244,6 +244,7 @@ final class SkylineGame extends GameView {
         paint.setColor(tod > 0.5f ? 0xFFFFE8A8 : 0xFFE9EEF5);
         c.drawCircle(sunX, sunY, dp(20f), paint);
         drawSkyTraffic(c, w, h, tod);
+        drawSiteLife(c, w, h, tod);
 
         // Ground plate.
         path.reset();
@@ -405,6 +406,73 @@ final class SkylineGame extends GameView {
                 c.drawLine(sx - dp(60f), sy - dp(24f), sx, sy, paint);
             }
         }
+    }
+
+    /**
+     * 3.19.7: the left third of the tablet screen was bare beside the crane. A site fence with a
+     * gate, a parked truck and a site hut fill it, a foreman walks the line, and floodlights wash
+     * the ground at night - the building site the crane obviously belongs to.
+     */
+    private void drawSiteLife(Canvas c, float w, float h, float tod) {
+        double t = activeSeconds;
+        float ground = h * 0.86f;
+        float left = w * 0.02f;
+        float right = w * 0.30f;
+        // Floodlights after dark.
+        if (tod < 0.5f) {
+            for (int i = 0; i < 2; i++) {
+                float lx = left + dp(40f) + i * dp(120f);
+                Fx.glow(c, lx, ground - dp(10f), dp(90f), 0x33FFE6A8);
+                paint.setColor(0xFF2A3446);
+                c.drawRect(lx - dp(2f), ground - dp(70f), lx + dp(2f), ground, paint);
+                paint.setColor(0xFFFFE6A8);
+                c.drawRect(lx - dp(9f), ground - dp(78f), lx + dp(9f), dp(6f) + ground - dp(78f), paint);
+            }
+        }
+        // Site hut.
+        paint.setColor(0xFF6E7684);
+        c.drawRect(left, ground - dp(46f), left + dp(86f), ground, paint);
+        paint.setColor(0xFF4C535E);
+        c.drawRect(left, ground - dp(52f), left + dp(86f), ground - dp(44f), paint);
+        paint.setColor(tod < 0.5f ? 0xFFFFE6A8 : 0xFF2A3446);
+        c.drawRect(left + dp(12f), ground - dp(36f), left + dp(30f), ground - dp(20f), paint);
+        paint.setColor(0xFF35404E);
+        c.drawRect(left + dp(52f), ground - dp(34f), left + dp(72f), ground, paint);
+        // Fence with a gap for the gate.
+        paint.setColor(0xFF5A6472);
+        for (float fx0 = left + dp(96f); fx0 < right; fx0 += dp(18f)) {
+            if (fx0 > left + dp(150f) && fx0 < left + dp(196f)) {
+                continue;
+            }
+            c.drawRect(fx0, ground - dp(30f), fx0 + dp(3f), ground, paint);
+        }
+        c.drawRect(left + dp(96f), ground - dp(30f), right, ground - dp(27f), paint);
+        // Parked truck with a tipper bed.
+        float tx = right - dp(74f);
+        paint.setColor(0xFFE0582E);
+        c.drawRoundRect(tx, ground - dp(30f), tx + dp(34f), ground - dp(8f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFF9AA5B1);
+        c.drawRect(tx + dp(34f), ground - dp(24f), tx + dp(72f), ground - dp(8f), paint);
+        paint.setColor(0xFF2A3446);
+        c.drawCircle(tx + dp(12f), ground - dp(6f), dp(6f), paint);
+        c.drawCircle(tx + dp(56f), ground - dp(6f), dp(6f), paint);
+        // Foreman pacing the fence line, turning at each end.
+        float span = right - left - dp(130f);
+        float walk = (float) ((t * dp(26f)) % (span * 2));
+        float fxp = left + dp(104f) + (walk < span ? walk : span * 2 - walk);
+        boolean facing = walk < span;
+        float step = (float) Math.sin(t * 6) * dp(4f);
+        paint.setColor(0xFFF5C518);
+        c.drawRect(fxp - dp(5f), ground - dp(26f), fxp + dp(5f), ground - dp(12f), paint);
+        paint.setColor(0xFF2A2F3A);
+        c.drawRect(fxp - dp(4f) + step, ground - dp(12f), fxp - dp(1f) + step, ground, paint);
+        c.drawRect(fxp + dp(1f) - step, ground - dp(12f), fxp + dp(4f) - step, ground, paint);
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(fxp, ground - dp(31f), dp(5f), paint);
+        paint.setColor(0xFFF5C518);
+        c.drawArc(fxp - dp(6f), ground - dp(39f), fxp + dp(6f), ground - dp(27f), 180, 180, true, paint);
+        paint.setColor(0xFF2A2F3A);
+        c.drawCircle(fxp + (facing ? dp(2f) : -dp(2f)), ground - dp(31f), dp(1.2f), paint);
     }
 
     private void drawCrane(Canvas c, float w, float h) {
