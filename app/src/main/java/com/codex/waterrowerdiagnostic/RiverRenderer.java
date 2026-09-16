@@ -20,6 +20,8 @@ final class RiverRenderer {
     private final Paint ripplePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hullPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hullEdge = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint oarPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint bladePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint wakePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint rowerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path hull = new Path();
@@ -39,6 +41,9 @@ final class RiverRenderer {
         wakePaint.setStyle(Paint.Style.STROKE);
         wakePaint.setStrokeCap(Paint.Cap.ROUND);
         rowerPaint.setColor(Color.parseColor("#E6EDF7"));
+        oarPaint.setStyle(Paint.Style.STROKE);
+        oarPaint.setStrokeCap(Paint.Cap.ROUND);
+        oarPaint.setColor(Color.parseColor("#E8E3D3"));
     }
 
     private float dp(float v) {
@@ -115,6 +120,16 @@ final class RiverRenderer {
      * @param speed  m/s, drives wake length and rower lean
      * @param ghost  draw translucent
      */
+    /**
+     * 0 at the catch, 1 at the finish. Games set this from the pulse meter each frame so the oars
+     * sweep with the actual drive instead of a free-running animation.
+     */
+    private float stroke;
+
+    void setStrokePhase(float phase) {
+        stroke = Math.max(0f, Math.min(1f, phase));
+    }
+
     void drawBoat(Canvas c, float cx, float cy, float length, int color, float speed,
                   boolean ghost) {
         float half = length / 2f;
@@ -163,9 +178,51 @@ final class RiverRenderer {
         hullEdge.setAlpha(alpha);
         c.drawPath(hull, hullEdge);
 
-        // Rower: a dot that leans forward with speed. Enough to read as a person.
-        float lean = Math.min(1f, speed / 4f) * beam * 0.8f;
+        // Oars: one shaft per side, mirrored about the hull. The blade is the far end of the same
+        // shaft so it cannot detach. 3.19.6 normalised the direction vector *after* folding the side
+        // into it, which cancelled the mirroring and put both oars on the same side of the boat.
+        float riggerX = cx - half * 0.05f;
+        double angle = Math.toRadians(-55 + 95 * stroke);   // bow-side at the catch, stern-side at the finish
+        boolean water = stroke > 0.03f && stroke < 0.97f;
+        float shaft = length * 0.46f;
+        // Direction in boat space: +x toward the bow, +y outboard. Mirrored per side below.
+        float ux = (float) Math.sin(angle);
+        float uy = (float) Math.cos(angle) * 0.55f;
+        float ulen = (float) Math.hypot(ux, uy);
+        ux /= ulen;
+        uy /= ulen;
+        for (int side = -1; side <= 1; side += 2) {
+            float pivotY = cy + side * beam * 1.1f;
+            float tipX = riggerX + ux * shaft;
+            float tipY = pivotY + side * uy * shaft;
+            float neckX = riggerX + ux * shaft * 0.72f;
+            float neckY = pivotY + side * uy * shaft * 0.72f;
+            // Rigger stub, hull out to the pivot.
+            oarPaint.setAlpha(alpha);
+            oarPaint.setStrokeWidth(Math.max(dp(1f), beam * 0.16f));
+            c.drawLine(riggerX, cy + side * beam * 0.45f, riggerX, pivotY, oarPaint);
+            // Shaft, pivot out to the blade neck.
+            oarPaint.setStrokeWidth(Math.max(dp(1.5f), beam * 0.2f));
+            c.drawLine(riggerX, pivotY, neckX, neckY, oarPaint);
+            // Blade: a thick stroke continuing the same line.
+            bladePaint.setStyle(Paint.Style.STROKE);
+            bladePaint.setStrokeCap(Paint.Cap.ROUND);
+            bladePaint.setColor(color);
+            bladePaint.setAlpha(alpha);
+            bladePaint.setStrokeWidth(beam * (water ? 0.85f : 0.3f));
+            c.drawLine(neckX, neckY, tipX, tipY, bladePaint);
+            if (water) {
+                wakePaint.setColor(0xFFDCEBF7);
+                wakePaint.setAlpha((int) (120 * (1f - Math.abs(0.5f - stroke) * 1.5f)) * alpha / 255);
+                wakePaint.setStrokeWidth(beam * 0.45f);
+                c.drawLine(tipX - beam * 0.45f, tipY, tipX + beam * 0.45f, tipY, wakePaint);
+            }
+        }
+
+        // Rower: leans back through the drive and forward again on the recovery.
+        float body = (float) Math.sin(Math.PI * stroke);
         rowerPaint.setAlpha(alpha);
-        c.drawCircle(cx - half * 0.15f + lean, cy - beam * 0.15f, beam * 0.55f, rowerPaint);
+        c.drawCircle(cx - half * 0.15f + beam * (0.9f - 1.6f * stroke), cy - beam * (0.15f + 0.25f * body),
+                beam * 0.55f, rowerPaint);
     }
 }

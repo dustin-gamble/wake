@@ -46,6 +46,24 @@ For each: **does it look busy and alive, and is anything hard to read or slow?**
 - [ ] **Stroke Coach** — a small rower in the bottom-left that moves with your drive and recovery.
 - [ ] **Crew Boat** — the sync % and caption now sit on dark pills so they read on the sky.
 
+## 3b. What changed in 3.19.6 (from your own tablet screenshots)
+
+You said "more movement, things on the screen, visual animation for rowing". These are the answers:
+
+- [ ] **Oars that row** — in **Race**, **Head Race**, **Regatta** and **Collector** the boats now have
+      riggers, shafts and blades that sweep from catch to finish **off your real drive**, leave puddles
+      where the blade works, and feather on the recovery. The rower leans back through the drive.
+      Does the sweep line up with your own stroke, or does it lag?
+- [ ] **Wave Rider** — chop running down the face, sun glitter, churn at the base, spray off the rail,
+      a carve trail behind the board. The face used to be one flat triangle.
+- [ ] **Row Runner** — the underground is soil layers with buried rocks, roots, coins and fossils, and
+      grass tufts along the surface.
+- [ ] **Night Grid** — a wind farm whose blades turn with your stroke rate, a road with a car, and an
+      aurora once the town is fully lit.
+- [ ] **Stroke Coach** — a properly sized rower that slides with your drive and recovery, and a live
+      paddle trace filling what used to be an empty column.
+- [ ] **Zombie Run** — bigger figures and a torch beam lighting the road ahead.
+
 ## 4. Quick checks
 
 - [ ] **Records** — Crew Boat's fastest 1000 m shows as a time (e.g. 4:45), not seconds.

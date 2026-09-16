@@ -385,12 +385,15 @@ final class RowRunnerGame extends GameView {
 
     /* ---------- drawing ---------- */
 
+    /** The world is drawn through the screen shake, so everything full-width bleeds past the edges. */
+    private static final float OVERSCAN = 26f;
+
     private void drawWorld(Canvas c, float w, float h, float groundY, float ppm, float youX, float metre) {
         float camX = (float) x;
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(new android.graphics.LinearGradient(0, 0, 0, groundY, 0xFF3C8EE0, 0xFF9CD1F7,
                 android.graphics.Shader.TileMode.CLAMP));
-        c.drawRect(0, 0, w, groundY, paint);
+        c.drawRect(-dp(OVERSCAN), -dp(OVERSCAN), w + dp(OVERSCAN), groundY, paint);
         paint.setShader(null);
         Fx.glow(c, w * 0.85f, h * 0.14f, dp(60f), 0x66FFE28A);
         paint.setColor(0xFFFFE28A);
@@ -415,15 +418,18 @@ final class RowRunnerGame extends GameView {
             c.drawRect(cx - dp(16f), cy - dp(10f), cx + dp(16f), cy + dp(14f), paint);
         }
         paint.setColor(0xFF6BBF59);
-        c.drawRect(0, groundY, w, groundY + dp(14f), paint);
+        c.drawRect(-dp(OVERSCAN), groundY, w + dp(OVERSCAN), groundY + dp(14f), paint);
         paint.setColor(0xFF8B5A2B);
-        c.drawRect(0, groundY + dp(14f), w, h, paint);
+        c.drawRect(-dp(OVERSCAN), groundY + dp(14f), w + dp(OVERSCAN), h + dp(OVERSCAN), paint);
         paint.setColor(0xFF74461F);
         float block = dp(28f);
         float off = (camX * ppm) % block;
         for (float bx = -off; bx < w; bx += block) {
             c.drawRect(bx, groundY + dp(14f), bx + dp(2f), h, paint);
         }
+        // 3.19.6: underground was a third of the tablet screen and empty. Soil layers, buried rocks,
+        // roots and the odd fossil scroll past; grass tufts run along the surface in front.
+        drawUnderground(c, w, h, groundY, ppm, camX);
 
         for (Thing t : things) {
             float sx = youX + (t.at - camX) * ppm;
@@ -432,9 +438,11 @@ final class RowRunnerGame extends GameView {
             }
             switch (t.kind) {
                 case PIT: {
+                    // Clamped to the screen: the loop keeps things up to 240dp off the left edge, and
+                    // a pit straddling the viewport painted its near-black fill as a bar at the edge.
                     float ex = sx + t.size * ppm;
                     paint.setColor(0xFF10171F);
-                    c.drawRect(sx, groundY, ex, h, paint);
+                    c.drawRect(Math.max(0f, sx), groundY, Math.min(w, ex), h, paint);
                     break;
                 }
                 case BLOCK: {
@@ -567,6 +575,67 @@ final class RowRunnerGame extends GameView {
             c.drawRect(ax - dp(70f), ay - dp(12f), ax - dp(62f), ay + dp(12f), paint);
         } else {
             c.drawRect(ax - dp(70f), ay - dp(4f), ax - dp(62f), ay + dp(4f), paint);
+        }
+    }
+
+    /** Soil bands, rocks, roots and grass tufts - the ground is no longer a brown slab. */
+    private void drawUnderground(Canvas c, float w, float h, float groundY, float ppm, float camX) {
+        float px = dp(6f);
+        // Soil bands, each a slightly different brown, with a pebbly seam.
+        int bands = 4;
+        for (int b = 0; b < bands; b++) {
+            float y0 = groundY + dp(14f) + (h - groundY - dp(14f)) * b / bands;
+            float y1 = groundY + dp(14f) + (h - groundY - dp(14f)) * (b + 1) / bands;
+            paint.setColor(b % 2 == 0 ? 0xFF7E5127 : 0xFF6E461F);
+            c.drawRect(-dp(OVERSCAN), y0, w + dp(OVERSCAN), y1 + dp(1f), paint);
+            paint.setColor(0x33000000);
+            c.drawRect(-dp(OVERSCAN), y0, w + dp(OVERSCAN), y0 + px * 0.5f, paint);
+        }
+        float scroll = camX * ppm;
+        float gap = dp(90f);
+        float o = scroll % gap;
+        for (float x = -o - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5f);
+            int kind = Math.abs(k * 7919) % 4;
+            float depth = groundY + dp(40f) + (Math.abs(k * 131) % 5) * dp(34f);
+            if (depth > h - dp(20f)) {
+                continue;
+            }
+            if (kind == 0) {
+                // Rock.
+                paint.setColor(0xFF5A4636);
+                c.drawRect(x - px * 3, depth - px * 2, x + px * 3, depth + px * 2, paint);
+                paint.setColor(0x44FFFFFF);
+                c.drawRect(x - px * 2, depth - px * 2, x, depth - px, paint);
+            } else if (kind == 1) {
+                // Root reaching down from the grass.
+                paint.setColor(0xFF5E3E1C);
+                c.drawRect(x, groundY + dp(14f), x + px, depth, paint);
+                c.drawRect(x - px * 2, depth - px * 3, x + px, depth - px * 2, paint);
+                c.drawRect(x + px, depth - px * 6, x + px * 3, depth - px * 5, paint);
+            } else if (kind == 2) {
+                // Buried coin, a wink of gold.
+                paint.setColor(0xFFC9A227);
+                c.drawOval(x - px, depth - px, x + px, depth + px, paint);
+            } else {
+                // Fossil: three little bones.
+                paint.setColor(0xFFCFC3A8);
+                for (int i = 0; i < 3; i++) {
+                    c.drawRect(x - px * 2 + i * px * 2, depth, x - px + i * px * 2, depth + px, paint);
+                }
+            }
+        }
+        // Grass tufts along the surface, scrolling at full speed in front of the runner.
+        float tuft = dp(26f);
+        float to = scroll % tuft;
+        paint.setColor(0xFF6BBF59);
+        c.drawRect(-dp(OVERSCAN), groundY, w + dp(OVERSCAN), groundY + dp(14f), paint);
+        for (float x = -to - tuft; x < w + tuft; x += tuft) {
+            int k = (int) Math.floor((x + scroll) / tuft + 0.5f);
+            float tall = dp(6f) + (Math.abs(k * 17) % 3) * dp(4f);
+            paint.setColor((k & 1) == 0 ? 0xFF4E9E4A : 0xFF83D06A);
+            c.drawRect(x, groundY - tall, x + px * 0.6f, groundY, paint);
+            c.drawRect(x + px, groundY - tall * 0.6f, x + px * 1.6f, groundY, paint);
         }
     }
 
