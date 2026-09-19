@@ -66,6 +66,45 @@
       #trip { display: inline-block; }
       #reset { float: right; color: var(--faint); text-decoration: underline; }
 
+      /* 3.20: the flock, ridge lift, fog, postcards and the ghost. Plain positioning only. */
+      #deck { left: 0; right: 0; bottom: 0; height: 55%; opacity: 0;
+        background: linear-gradient(0deg, rgba(236,240,244,0.95), rgba(236,240,244,0.55) 55%, rgba(236,240,244,0)); }
+      #fog { top: 0; right: 0; bottom: 0; left: 0; opacity: 0;
+        background: radial-gradient(ellipse at 50% 55%, rgba(226,231,236,0.96), rgba(206,213,220,0.9) 70%, rgba(180,190,200,0.88)); }
+      #lift, #flock { top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; }
+      #banner { top: 92px; left: 50%; width: 760px; margin-left: -380px; text-align: center; }
+      #banner .b { display: inline-block; padding: 8px 18px; border-radius: 999px;
+        background: var(--panel); border: 1px solid rgba(255,255,255,0.14); font-size: 16px;
+        font-weight: 650; letter-spacing: 0.02em; }
+      #banner.hidden, #toast.hidden { display: none; }
+      #banner.lift .b { color: var(--warn); border-color: rgba(240,177,50,0.6); }
+      #banner.fog .b { color: #dfe7ef; border-color: rgba(223,231,239,0.6); }
+      #banner.card .b { color: var(--accent); border-color: rgba(53,208,186,0.7); }
+      #banner.good .b { background: rgba(53,208,186,0.28); }
+      #toast { top: 140px; left: 50%; width: 600px; margin-left: -300px; text-align: center;
+        font-size: 22px; font-weight: 800; letter-spacing: 0.06em; color: #fff;
+        text-shadow: 0 2px 6px rgba(0,0,0,0.85); }
+      #ghostBehind { left: 50%; bottom: 96px; margin-left: -120px; width: 240px; text-align: center;
+        font-size: 13px; color: #bfd3ff; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+      #postcard { left: 50%; top: 50%; width: 600px; margin-left: -300px; margin-top: -230px;
+        background: #f6f1e6; color: #2b2620; padding: 14px 14px 12px; border-radius: 4px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+        -webkit-transform: rotate(-3deg) translateY(0); transform: rotate(-3deg) translateY(0);
+        -webkit-transition: opacity 0.6s, -webkit-transform 0.6s; transition: opacity 0.6s, transform 0.6s; }
+      #postcard.hidden { opacity: 0; -webkit-transform: rotate(4deg) translateY(700px);
+        transform: rotate(4deg) translateY(700px); }
+      #postcard canvas { display: block; width: 572px; height: 322px; background: #9fb4c4; }
+      #pcTitle { font-family: Georgia, 'Times New Roman', serif; font-size: 24px; font-style: italic;
+        margin-top: 10px; }
+      #pcStars { position: absolute; right: 18px; bottom: 16px; font-size: 30px; color: #d99a12;
+        letter-spacing: 2px; }
+      #pcLine { font-size: 12px; color: #6d655a; margin-top: 3px; }
+      #pcStamp { position: absolute; right: 26px; top: 26px; width: 84px; height: 96px;
+        border: 3px dashed #b3392f; background: rgba(246,241,230,0.9); color: #b3392f;
+        text-align: center; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; padding-top: 16px;
+        -webkit-transform: rotate(8deg); transform: rotate(8deg); }
+      #pcStamp .big2 { font-size: 26px; line-height: 1.1; }
+
       #splash { position: absolute; top: 0; right: 0; bottom: 0; left: 0;
         background: rgba(3, 8, 15, 0.9); text-align: center; padding: 28px;
         display: -webkit-box; display: flex;
@@ -83,6 +122,14 @@
   <body>
     <div id="globe"></div>
 
+    <div id="deck" class="overlay"></div>
+    <svg id="lift" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
+      <g id="liftWisps" fill="none" stroke="rgba(255,226,160,0.9)" stroke-width="3" stroke-linecap="round"></g>
+    </svg>
+    <svg id="flock" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
+      <g id="flockG" fill="none" stroke="#1d1a17" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"></g>
+    </svg>
+    <div id="fog" class="overlay"></div>
     <svg id="wings" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
       <path id="wingL" d="" fill="rgba(30,22,17,0.92)"/>
       <path id="wingR" d="" fill="rgba(30,22,17,0.92)"/>
@@ -102,6 +149,12 @@
         <div class="cap">Map &middot; tap to change</div>
       </div>
       <div class="card">
+        <div class="stat"><div class="v" id="flockN">0/6</div><div class="cap">Flock</div></div>
+        <div class="stat"><div class="v" id="ghostGap">&mdash;</div><div class="cap" id="ghostCap">Ghost</div></div>
+        <div class="stat"><div class="v" id="liftM">0</div><div class="cap">Lift (m)</div></div>
+        <div class="stat"><div class="v" id="stars">0</div><div class="cap">Postcards &#9733;</div></div>
+      </div>
+      <div class="card">
         <div class="stat"><div class="v" id="watts">0</div><div class="cap">Watts</div></div>
         <div class="stat"><div class="v" id="spm">0</div><div class="cap">Rate</div></div>
         <div class="stat"><div class="v" id="dist">0</div><div class="cap">km flown</div></div>
@@ -113,6 +166,17 @@
       <div id="climbFill"></div>
       <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(255,255,255,0.35)"></div>
       <div class="cap" style="position:absolute;left:0;right:0;bottom:-16px;text-align:center">Climb</div>
+    </div>
+
+    <div id="banner" class="overlay hidden"><span class="b" id="bannerText"></span></div>
+    <div id="toast" class="overlay hidden"></div>
+    <div id="ghostBehind" class="overlay"></div>
+    <div id="postcard" class="overlay hidden">
+      <canvas id="pcCanvas" width="572" height="322"></canvas>
+      <div id="pcTitle">Greetings from</div>
+      <div id="pcLine"></div>
+      <div id="pcStars"></div>
+      <div id="pcStamp"><div>WAKE</div><div class="big2">CA</div><div>AIR MAIL</div></div>
     </div>
 
     <div id="foot" class="overlay">
@@ -130,6 +194,9 @@
         <h1>COAST FLIGHT</h1>
         <p>Row to climb. Power is lift, boat speed is airspeed, and the course flies itself
            down the California coast.</p>
+        <p>Row solidly and a flock joins your V. Ease off and you sink into the fog. Pull through
+           the rising air over the cliffs, frame the postcards at the Golden Gate and Big Sur, and
+           race the ghost of your last flight.</p>
         <p id="splashState" class="pill">Loading the globe&hellip;</p>
         <div id="engine"></div>
       </div>

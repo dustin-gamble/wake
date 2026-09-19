@@ -8,33 +8,25 @@ import android.graphics.Path;
 import android.view.View;
 
 /**
- * The shape of each stroke, from the pulse meter: the last four drives overlaid, newest brightest,
- * and one bar per stroke underneath.
+ * The shape of each stroke, from the pulse meter: the last four drives overlaid, newest brightest.
+ * Per-stroke power moved to its own full-width strip ({@link GaugePowerStripView}) and the
+ * drive-to-recovery ratio to its own dial ({@link GaugeRatioDialView}), so the shapes get the height.
  *
  * <p>Drives are stretched to the same width so their shapes compare directly - a stroke whose
  * peak arrives late, or that dumps speed at the finish, stands out against the ones before it.
- * Bars show measured average power once energy is available, paddle peak rate until then.
  */
 final class StrokeShapeView extends View {
 
     private static final int SHAPES = 4;
-    private static final int BARS = 24;
 
     private final PulseMeter.Stroke[] shapes = new PulseMeter.Stroke[SHAPES];
     private int shapeCount;
-    private final float[] bars = new float[BARS];
-    private int barCount;
-    private int barHead;
-    private boolean barsArePower;
     private PulseMeter.Stroke lastSeen;
 
     private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private final int accent = Color.parseColor("#35D0BA");
-    private final int blue = Color.parseColor("#6F8CFF");
-    private final int warn = Color.parseColor("#F0B132");
 
     StrokeShapeView(Context context) {
         super(context);
@@ -53,14 +45,6 @@ final class StrokeShapeView extends View {
         System.arraycopy(shapes, 0, shapes, 1, SHAPES - 1);
         shapes[0] = s;
         shapeCount = Math.min(SHAPES, shapeCount + 1);
-        boolean power = !Double.isNaN(s.averagePowerW);
-        if (power != barsArePower) {
-            barCount = 0;
-            barsArePower = power;
-        }
-        bars[barHead] = (float) (power ? s.averagePowerW : s.peakRate);
-        barHead = (barHead + 1) % BARS;
-        barCount = Math.min(BARS, barCount + 1);
         postInvalidateOnAnimation();
     }
 
@@ -77,7 +61,7 @@ final class StrokeShapeView extends View {
             return;
         }
         text.setTextSize(dp(9f));
-        float shapeBottom = h * 0.62f;
+        float shapeBottom = h - dp(16f);
         if (shapeCount == 0) {
             c.drawText("Take a few strokes", dp(4f), shapeBottom / 2f, text);
             return;
@@ -110,31 +94,9 @@ final class StrokeShapeView extends View {
             c.drawPath(path, line);
         }
         PulseMeter.Stroke now = shapes[0];
-        String caption = String.format(java.util.Locale.US, "drive %.1f s  ·  ratio 1:%.1f",
-                now.driveSeconds, now.driveSeconds > 0 ? now.recoverySeconds / now.driveSeconds : 0);
+        String caption = Double.isNaN(now.driveLengthM) || now.driveLengthM <= 0
+                ? String.format(java.util.Locale.US, "drive %.1f s", now.driveSeconds)
+                : String.format(java.util.Locale.US, "drive %.1f s  \u00b7  %.2f m", now.driveSeconds, now.driveLengthM);
         c.drawText(caption, dp(4f), shapeBottom + dp(12f), text);
-
-        float barTop = shapeBottom + dp(18f);
-        float barBottom = h - dp(2f);
-        if (barCount == 0 || barBottom - barTop < dp(10f)) {
-            return;
-        }
-        float barMax = 1f;
-        float sum = 0f;
-        for (int i = 0; i < barCount; i++) {
-            barMax = Math.max(barMax, bars[i]);
-            sum += bars[i];
-        }
-        float avg = sum / barCount;
-        float slot = w / BARS;
-        for (int i = 0; i < barCount; i++) {
-            int idx = (barHead - barCount + i + BARS) % BARS;
-            float v = bars[idx];
-            float x = w - (barCount - i) * slot;
-            fill.setColor(v >= avg * 1.03f ? accent : v <= avg * 0.93f ? warn : blue);
-            c.drawRect(x + slot * 0.15f, barBottom - (barBottom - barTop) * v / barMax, x + slot * 0.85f, barBottom, fill);
-        }
-        String label = barsArePower ? Math.round(avg) + " W avg per stroke" : "paddle peak per stroke";
-        c.drawText(label, w - text.measureText(label) - dp(2f), barTop - dp(2f), text);
     }
 }

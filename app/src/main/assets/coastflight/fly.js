@@ -179,8 +179,13 @@ function saveTrip() {
   } catch (e) { /* progress is a nicety, not worth failing the frame over */ }
 }
 
-// The activity calls this on the way out, so a trip is never lost by leaving the screen.
-window.wakeSave = saveTrip;
+// The activity calls this on the way out, so a trip is never lost by leaving the screen. The ghost
+// and the lift record are banked on the way out too (see the flight extras below).
+window.wakeSave = function () {
+  saveTrip();
+  saveGhost();
+  saveLift();
+};
 
 /* ---------------- geo helpers ---------------- */
 
@@ -386,6 +391,9 @@ window.wakeFeed = function (d) {
   var strokes = Number(d.k) || 0;
   if (state.strokesAtStart < 0) {
     state.strokesAtStart = strokes;
+    // The ghost race runs on this page's own share of the rowing clock, so a page that loads
+    // mid-session (a map change) still races from zero.
+    race.clockAtStart = state.clock;
   }
   if (state.strokes >= 0 && strokes > state.strokes) {
     state.flapPhase = 0;          // a stroke is a big wingbeat
@@ -449,10 +457,21 @@ function frame(now) {
     // Hold 90% of your typical power and you hold your height; more climbs, less sinks.
     climb = ((state.smoothWatts - typical * LEVEL_SHARE) / typical) * CLIMB_SCALE;
     climb = Math.max(-14, Math.min(9, climb));
-    state.agl = Math.max(MIN_AGL, Math.min(MAX_AGL, state.agl + climb * dt));
-    var targetAir = BASE_AIRSPEED + boat * AIRSPEED_PER_MPS;
+    // Ridge lift over the cliffs: a small free climb, and a big one if you pull through it.
+    // A steady rower sits at the 700 m ceiling, so lift is also the only way above it: up to
+    // LIFT_CEILING more, where the wind aloft is worth airspeed, settling back once out of the lift.
+    climb += updateLift(dt, typical, watts);
+    if (state.agl > MAX_AGL && lifting.strength < 0.05) {
+      climb = Math.min(climb, -ALOFT_SETTLE);
+    }
+    var ceiling = state.agl > MAX_AGL || lifting.strength > 0.05 ? MAX_AGL + LIFT_CEILING : MAX_AGL;
+    state.agl = Math.max(MIN_AGL, Math.min(ceiling, state.agl + climb * dt));
+    // The flock drafts you along (+1.5% a bird in the V); the fog's damp air drags you back.
+    var targetAir = (BASE_AIRSPEED + boat * AIRSPEED_PER_MPS)
+      * (1 + FLOCK_DRAFT * flock.inSlot + ALOFT_BONUS * aloft()) * (1 - FOG_DRAG * state.fog);
     state.airspeed += (targetAir - state.airspeed) * Math.min(1, 1.5 * dt);
     state.along += state.airspeed * dt;
+    race.flown += state.airspeed * dt;
     // The swing across the route quickens with stroke rate: the flight moves with the row.
     state.weavePhase += dt * (0.18 + Math.min(40, state.spm) * 0.012);
   } else {
@@ -492,17 +511,33 @@ function frame(now) {
 
   // ~30Hz camera on the old engine: each setView is a full scene traversal, and the flight is
   // smooth long before 60. Stamp the clock only when a frame actually goes through.
+  var camHeading = here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6);
+  var camPitch = -8 - Math.min(16, state.agl / 60);
+  var camRoll = state.bank;
+  // A postcard stop turns the head toward the landmark for the picture, then back.
+  var look = postcardLook(now, here, altitude);
+  if (look) {
+    var dh = ((look.heading - camHeading + 540) % 360) - 180;
+    camHeading += dh * look.w;
+    camPitch += (look.pitch - camPitch) * look.w;
+    camRoll *= 1 - look.w;
+  }
   if (viewer && (!LEGACY || now - lastCameraMs >= 28)) {
     lastCameraMs = now;
     viewer.camera.setView({
       destination: Cesium.Cartesian3.fromDegrees(here.lon, here.lat, altitude),
       orientation: {
-        heading: Cesium.Math.toRadians(here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6)),
-        pitch: Cesium.Math.toRadians(-8 - Math.min(16, state.agl / 60)),
-        roll: Cesium.Math.toRadians(state.bank)
+        heading: Cesium.Math.toRadians(camHeading),
+        pitch: Cesium.Math.toRadians(camPitch),
+        roll: Cesium.Math.toRadians(camRoll)
       }
     });
   }
+  updateFog(dt, fresh);
+  updateFlock(dt, now, fresh);
+  updatePostcards(now);
+  updateGhost(dt, here, altitude);
+  drawLift(now);
 
   adaptQuality(dt);
   if (now - lastPreloadMs > 700) {
@@ -516,6 +551,7 @@ function frame(now) {
   }
   drawWings(dt, fresh);
   updateHud(fresh, climb);
+  updateBanner(now);
   if (Math.floor(now / 1000) % 10 === 0) {
     saveTrip();
   }
@@ -744,7 +780,7 @@ function updateHud(fresh, climb) {
   if (frac >= 0) {
     fill.style.top = (half - frac * half) + 'px';
     fill.style.height = (frac * half) + 'px';
-    fill.style.background = 'var(--accent)';
+    fill.style.background = lifting.strength > 0.05 ? 'var(--warn)' : 'var(--accent)';
   } else {
     fill.style.top = half + 'px';
     fill.style.height = (-frac * half) + 'px';
@@ -779,6 +815,804 @@ function updateHud(fresh, climb) {
     + (Math.floor(state.along / routeLength) + 1);
 }
 
+/* ---------------- flight extras: flock, ridge lift, fog, postcards, ghost ----------------
+
+   The rower's five: a flock that flies with you, rising air over the cliffs, postcard stops at
+   Big Sur and the Golden Gate, fog banks you sink into when you ease off, and a ghost of your last
+   flight to race. Each one puts something at stake in the next few seconds:
+     - the flock joins while you row solidly and drops back when you ease off; every bird in the V
+       is +1.5% airspeed (drafting),
+     - a ridge-lift column over a cliff gives a small free climb, and a big one if you pull
+       through it,
+     - fog banks lie low over the sea; ease off, sink into one, and you lose the view, 20% of
+       your airspeed and your flock,
+     - a postcard stop grades the picture on your height in a window and the flock in the shot,
+     - the ghost is last session's flight on the same rowing clock, drawn in the sky ahead.
+   Everything is drawn here or by Cesium from data already on the page: nothing new is fetched. */
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function ease(x) { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); }
+function mod(m) { return ((m % routeLength) + routeLength) % routeLength; }
+
+/** Metres along the route nearest a point. Boot only: it samples the whole route. */
+function alongOf(lat, lon) {
+  var target = { lat: lat, lon: lon };
+  var best = 0;
+  var bestD = Infinity;
+  var m;
+  for (m = 0; m < routeLength; m += 500) {
+    var d = haversine(atDistance(m), target);
+    if (d < bestD) { bestD = d; best = m; }
+  }
+  var base = best;
+  for (m = Math.max(0, base - 500); m <= Math.min(routeLength - 1, base + 500); m += 25) {
+    var d2 = haversine(atDistance(m), target);
+    if (d2 < bestD) { bestD = d2; best = m; }
+  }
+  return best;
+}
+
+/* Text writes only when the text changes: the HUD is rewritten every frame otherwise. */
+var shownText = {};
+function setText(id, text) {
+  if (shownText[id] !== text) {
+    shownText[id] = text;
+    el(id).textContent = text;
+  }
+}
+
+var toastUntil = 0;
+function showToast(text, ms) {
+  el('toast').textContent = text;
+  el('toast').className = 'overlay';
+  toastUntil = Date.now() + (ms || 2600);
+}
+
+/* ---- 1. the flock ---- */
+
+var FLOCK_MAX = 6;
+var FLOCK_DRAFT = 0.015;        // +1.5% airspeed for each bird holding its place in the V
+var FLOCK_JOIN_SHARE = 0.8;     // smoothed power, as a share of typical, that draws birds in
+var FLOCK_JOIN_S = 3;
+var FLOCK_LEAVE_S = 4;          // a short dive for a postcard costs a bird or two, not the flock
+var FLOCK_FOG_LEAVE_S = 1.2;
+/* V formation off the right wing, over the sea. viewBox 1000x640, bottom-anchored slice: at the
+   tablet's aspect the visible band is roughly y 145..640. Trailing birds are nearer, so lower and
+   larger. */
+var FLOCK_SLOTS = [
+  [700, 250, 1.0], [645, 272, 1.1], [755, 272, 1.1], [590, 294, 1.2], [810, 294, 1.2], [535, 316, 1.3]
+];
+var FLOCK_ENTRY = [1150, 760, 3.2];  // birds arrive from behind the camera, and drop back to it
+
+var flock = { birds: [], want: 0, inSlot: 0, timer: 0, fullToasted: false, rotShown: '', opShown: '' };
+
+function initFlock() {
+  var g = el('flockG');
+  for (var i = 0; i < FLOCK_MAX; i++) {
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', '');
+    g.appendChild(path);
+    flock.birds.push({ el: path, pres: 0, phase: i * 1.3, visible: false });
+  }
+}
+
+function updateFlock(dt, now, fresh) {
+  var typical = Math.max(40, state.typicalWatts);
+  var flying = !state.hovering;
+  var strong = flying && fresh && state.smoothWatts >= typical * FLOCK_JOIN_SHARE && state.fog < 0.3;
+  var weak = flying && (!fresh || state.smoothWatts < typical * LEVEL_SHARE);
+  // Easing off to drop into a postcard's height window is the point of the approach, not a lapse:
+  // the flock holds while you descend toward it, or the third star (4+ birds) is out of reach.
+  if (weak && fresh && pc.next && pc.nextIn < POSTCARD_APPROACH && state.agl > pc.next.hi) {
+    weak = false;
+  }
+  var fogged = state.fog > 0.5;
+  var before = flock.want;
+  if (fogged || weak) {
+    flock.timer += dt;
+    var every = fogged ? FLOCK_FOG_LEAVE_S : FLOCK_LEAVE_S;
+    if (flock.timer >= every && flock.want > 0) {
+      flock.timer = 0;
+      flock.want--;
+    }
+  } else if (strong) {
+    flock.timer += dt;
+    if (flock.timer >= FLOCK_JOIN_S && flock.want < FLOCK_MAX) {
+      flock.timer = 0;
+      flock.want++;
+    }
+  } else {
+    flock.timer = 0;   // holding level: the flock holds too
+  }
+  if (flock.want < before && before === FLOCK_MAX) {
+    showToast(fogged ? 'THE FLOCK IS SCATTERING IN THE FOG' : 'A BIRD DROPS BACK — PULL TO KEEP THEM');
+  }
+  if (flock.want === FLOCK_MAX && !flock.fullToasted) {
+    flock.fullToasted = true;
+    showToast('FULL FLOCK — +' + Math.round(FLOCK_MAX * FLOCK_DRAFT * 100) + '% DRAFT');
+  } else if (flock.want < FLOCK_MAX - 1) {
+    flock.fullToasted = false;
+  }
+
+  // The birds beat on your drive and glide on your recovery, like your own wings.
+  var beat = state.hovering ? 0 : (state.driveShown || 0);
+  var inSlot = 0;
+  for (var i = 0; i < flock.birds.length; i++) {
+    var b = flock.birds[i];
+    var target = i < flock.want ? 1 : 0;
+    b.pres += (target - b.pres) * Math.min(1, dt / (target > b.pres ? 1.4 : 2.0));
+    if (b.pres > 0.9) {
+      inSlot++;
+    }
+    if (b.pres < 0.01) {
+      if (b.visible) {
+        b.visible = false;
+        b.el.setAttribute('d', '');
+      }
+      continue;
+    }
+    b.visible = true;
+    b.phase += dt * Math.PI * 2 * (0.5 + 1.9 * beat);
+    var flap = Math.sin(b.phase) * (0.25 + 0.75 * beat) + (1 - beat) * 0.35;
+    var tip = (-10 * flap).toFixed(1);
+    var elbow = (-3 - 5 * flap).toFixed(1);
+    b.el.setAttribute('d', 'M -22 ' + tip + ' Q -11 ' + elbow + ' 0 2 Q 11 ' + elbow + ' 22 ' + tip);
+    var slot = FLOCK_SLOTS[i];
+    var k = ease(b.pres);
+    var x = FLOCK_ENTRY[0] + (slot[0] - FLOCK_ENTRY[0]) * k;
+    var y = FLOCK_ENTRY[1] + (slot[1] - FLOCK_ENTRY[1]) * k + Math.sin(now / 700 + i * 1.7) * 3;
+    var s = FLOCK_ENTRY[2] + (slot[2] - FLOCK_ENTRY[2]) * k;
+    b.el.setAttribute('transform', 'translate(' + x.toFixed(1) + ' ' + y.toFixed(1) + ') scale(' + s.toFixed(2) + ')');
+  }
+  flock.inSlot = inSlot;
+  var g = el('flockG');
+  var rot = 'rotate(' + (-state.bank * 0.6).toFixed(1) + ' 500 400)';
+  var op = (1 - 0.85 * state.fog).toFixed(2);
+  if (rot !== flock.rotShown) {
+    flock.rotShown = rot;
+    g.setAttribute('transform', rot);
+  }
+  if (op !== flock.opShown) {
+    flock.opShown = op;
+    g.setAttribute('opacity', op);
+  }
+}
+
+/* ---- 2. ridge lift over the cliffs ---- */
+
+/* Wind off the Pacific rides up the sea cliffs: the classic ridge lift gliders use at Torrey
+   Pines and Big Sur. Stretches of cliff coast, each broken into columns you can see coming. */
+var CLIFFS = [
+  { name: "Devil's Slide", a: [37.600, -122.518], b: [37.545, -122.505] },
+  { name: 'the Davenport cliffs', a: [37.080, -122.270], b: [36.975, -122.100] },
+  { name: 'Big Sur', a: [36.520, -121.960], b: [35.790, -121.350] },
+  { name: 'the Gaviota coast', a: [34.470, -120.380], b: [34.420, -119.900] },
+  { name: 'the Malibu bluffs', a: [34.030, -118.880], b: [34.000, -118.600] },
+  { name: 'Palos Verdes', a: [33.800, -118.420], b: [33.705, -118.330] },
+  { name: 'the Laguna cliffs', a: [33.560, -117.830], b: [33.450, -117.690] },
+  { name: 'Torrey Pines', a: [32.960, -117.270], b: [32.840, -117.280] },
+  { name: 'Point Loma', a: [32.760, -117.270], b: [32.670, -117.262] }
+];
+var UPDRAFT_HALF = 700;         // each column is 1.4 km long, ~28 s at a typical pace
+var UPDRAFT_SPACING = 3500;
+var LIFT_FREE = 1.5;            // m/s of climb just for being there
+var LIFT_PULL = 5.5;            // more, at full, for pulling half your typical power above level
+var LIFT_CEILING = 300;         // lift can carry you this far above the 700 m ceiling
+var ALOFT_SETTLE = 2.5;         // m/s back down toward the ceiling once out of the lift
+var ALOFT_BONUS = 0.15;         // airspeed from the wind aloft at the very top of the lift
+
+/** 0..1, how far above the normal ceiling ridge lift has carried you. */
+function aloft() {
+  return clamp((state.agl - MAX_AGL) / LIFT_CEILING, 0, 1);
+}
+var UPDRAFTS = [];
+
+function buildUpdrafts() {
+  for (var i = 0; i < CLIFFS.length; i++) {
+    var c = CLIFFS[i];
+    var s = alongOf(c.a[0], c.a[1]);
+    var e = alongOf(c.b[0], c.b[1]);
+    if (e < s) { var t = s; s = e; e = t; }
+    if (e - s < UPDRAFT_HALF * 2 + 200) {
+      var mid = (s + e) / 2;
+      UPDRAFTS.push({ start: mid - UPDRAFT_HALF, end: mid + UPDRAFT_HALF, name: c.name });
+    } else {
+      for (var m = s + UPDRAFT_HALF; m <= e - UPDRAFT_HALF; m += UPDRAFT_SPACING) {
+        UPDRAFTS.push({ start: m - UPDRAFT_HALF, end: m + UPDRAFT_HALF, name: c.name });
+      }
+    }
+  }
+  UPDRAFTS.sort(function (x, y) { return x.start - y.start; });
+}
+
+var lifting = { strength: 0, rate: 0, gained: 0, inside: null, next: null, nextIn: Infinity,
+  colGain: 0, quickWatts: 0, preview: 0 };
+
+/** The extra climb (m/s) from ridge lift this frame. Called only while flying. */
+function updateLift(dt, typical, watts) {
+  // Faster than the 3 s height average: a push into the column should pay off inside it.
+  lifting.quickWatts += (watts - lifting.quickWatts) * Math.min(1, dt / 1.2);
+  var m = mod(state.along);
+  var inside = null;
+  var next = null;
+  var nextIn = Infinity;
+  for (var i = 0; i < UPDRAFTS.length; i++) {
+    var u = UPDRAFTS[i];
+    if (m >= u.start && m < u.end) {
+      inside = u;
+    } else if (u.start > m && u.start - m < nextIn) {
+      nextIn = u.start - m;
+      next = u;
+    }
+  }
+  if (!next && UPDRAFTS.length > 0) {
+    next = UPDRAFTS[0];
+    nextIn = UPDRAFTS[0].start + routeLength - m;
+  }
+  if (lifting.inside && inside !== lifting.inside) {
+    if (lifting.colGain >= 10) {
+      showToast('+' + Math.round(lifting.colGain) + ' m OF RIDGE LIFT');
+    }
+    lifting.colGain = 0;
+  }
+  lifting.inside = inside;
+  lifting.next = next;
+  lifting.nextIn = nextIn;
+  var target = inside ? clamp(Math.min(m - inside.start, inside.end - m) / 250, 0, 1) : 0;
+  lifting.strength += (target - lifting.strength) * Math.min(1, dt * 3);
+  var level = typical * LEVEL_SHARE;
+  var effort = clamp((lifting.quickWatts - level) / (typical * 0.5), 0, 1);
+  lifting.rate = lifting.strength * (LIFT_FREE + LIFT_PULL * effort);
+  if (state.agl < MAX_AGL + LIFT_CEILING) {
+    lifting.gained += lifting.rate * dt;
+    lifting.colGain += lifting.rate * dt;
+  }
+  return lifting.rate;
+}
+
+function saveLift() {
+  if (bridge && bridge.saveLift && lifting.gained >= 1) {
+    try {
+      bridge.saveLift(Math.round(lifting.gained));
+    } catch (e) { /* a record is a nicety */ }
+  }
+}
+
+var WISPS = 10;
+var wispEls = [];
+var wispsOn = false;
+
+function initLift() {
+  var g = el('liftWisps');
+  for (var i = 0; i < WISPS; i++) {
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    g.appendChild(path);
+    wispEls.push(path);
+  }
+}
+
+/** Rising air drawn as warm wisps climbing the cliff side (the left, where the land is). */
+function drawLift(now) {
+  var preview = !state.hovering && lifting.nextIn < 600 ? 0.25 * (1 - lifting.nextIn / 600) : 0;
+  var show = Math.max(lifting.strength, preview);
+  if (show < 0.02) {
+    if (wispsOn) {
+      wispsOn = false;
+      el('liftWisps').setAttribute('opacity', '0');
+    }
+    return;
+  }
+  wispsOn = true;
+  el('liftWisps').setAttribute('opacity', show.toFixed(2));
+  var speed = 0.25 + lifting.rate * 0.06;
+  for (var i = 0; i < WISPS; i++) {
+    var frac = ((now / 1000) * speed + i * 0.137) % 1;
+    var x = 70 + ((i * 67) % 290) + Math.sin(now / 500 + i) * 6;
+    var y = 630 - frac * 440;
+    var sway = (6 + (i % 3) * 3).toFixed(0);
+    wispEls[i].setAttribute('d', 'M ' + x.toFixed(0) + ' ' + y.toFixed(0)
+      + ' q ' + sway + ' -14 0 -28 q -' + sway + ' -14 0 -28');
+    wispEls[i].setAttribute('stroke-opacity', (Math.sin(Math.PI * frac) * 0.85).toFixed(2));
+  }
+}
+
+/* ---- 4. fog banks ---- */
+
+var FOG_DRAG = 0.2;             // airspeed lost at full fog
+var FOG_FREE_START = 4500;
+/**
+ * Top of the marine layer (m above the sea) at a distance along the route, or 0 in clear air.
+ * Tall on purpose: rowing at your typical power holds the 700 m ceiling, so a bank tops out a
+ * little below it (~400-650 m) - ten or twenty seconds of easing off and you are in it.
+ */
+function fogTopAt(m) {
+  if (m < FOG_FREE_START) {
+    return 0;   // the Golden Gate is clear for take-off and its postcard
+  }
+  var x = m / 1000;
+  var n = Math.sin(x * 0.29 + 0.7) + 0.6 * Math.sin(x * 0.83 + 2.1) + 0.35 * Math.sin(x * 2.1);
+  if (n < 0.45) {
+    return 0;
+  }
+  var body = clamp((n - 0.45) / 0.25, 0, 1);   // banks thin out at their edges
+  return (560 + 90 * Math.sin(x * 0.11)) * (0.7 + 0.3 * body);
+}
+
+var fogState = { top: 0, inFog: false, aheadIn: Infinity, aheadTop: 0, deck: 0, fogShown: -1, deckShown: -1 };
+
+function updateFog(dt, fresh) {
+  var m = mod(state.along);
+  var top = state.hovering ? 0 : fogTopAt(m);
+  // 10 m of hysteresis: holding level right at a bank's top must not flicker in and out of it
+  // (and toast INTO / BROKE OUT every frame).
+  var inFog = top > 0 && state.agl < (fogState.inFog ? top + 10 : top);
+  var depth = inFog ? clamp((top - state.agl) / 35 + 0.45, 0.3, 1) : 0;
+  state.fog += (depth - state.fog) * Math.min(1, dt * (depth > state.fog ? 1.8 : 1.2));
+  if (inFog && !fogState.inFog) {
+    showToast('INTO THE FOG — PULL TO CLIMB OUT');
+  } else if (!inFog && fogState.inFog && fresh) {
+    showToast('BROKE OUT OF THE FOG');
+  }
+  fogState.inFog = inFog;
+  fogState.top = top;
+  // Above a bank you look down on the marine layer.
+  var deck = top > 0 && !inFog ? clamp(1 - (state.agl - top) / 220, 0, 1) : 0;
+  fogState.deck += (deck - fogState.deck) * Math.min(1, dt * 1.5);
+  // Look ahead for the next bank you would sink into at your current height.
+  fogState.aheadIn = Infinity;
+  if (!inFog && !state.hovering) {
+    for (var d = 250; d <= 2000; d += 250) {
+      var t = fogTopAt(m + d);
+      if (t > 0 && state.agl < t + 25) {
+        fogState.aheadIn = d;
+        fogState.aheadTop = t;
+        break;
+      }
+    }
+  }
+  var fogOp = state.fog * 0.8;   // a whiteout, but the coast still shows through it
+  if (Math.abs(fogOp - fogState.fogShown) > 0.01) {
+    fogState.fogShown = fogOp;
+    el('fog').style.opacity = fogOp.toFixed(3);
+  }
+  var deckOp = fogState.deck * 0.85;
+  if (Math.abs(deckOp - fogState.deckShown) > 0.01) {
+    fogState.deckShown = deckOp;
+    el('deck').style.opacity = deckOp.toFixed(3);
+  }
+}
+
+/* ---- 3. postcard stops ---- */
+
+var POSTCARDS = [
+  // Taken looking back north from 3.2 km out: the bridge is behind you as the trip starts.
+  { id: 'goldengate', name: 'the Golden Gate', lat: 37.8199, lon: -122.4783, h: 150, lo: 250, hi: 500, shotAt: 3200 },
+  { id: 'bixby', name: 'Bixby Bridge, Big Sur', lat: 36.3716, lon: -121.9018, h: 80, lo: 200, hi: 420, shotAt: -1 },
+  { id: 'mcway', name: 'McWay Falls, Big Sur', lat: 36.1580, lon: -121.6721, h: 30, lo: 150, hi: 360, shotAt: -1 }
+];
+var POSTCARD_APPROACH = 3000;   // ~60 s of warning at a typical pace
+var LOOK_IN = 1300;
+var LOOK_HOLD = 1500;
+var LOOK_OUT = 1300;
+var CARD_SHOW_MS = 9000;
+
+var pc = { active: null, t0: 0, captured: false, pending: false, prevAlong: -1, next: null, nextIn: Infinity,
+  stars: 0, total: 0, hideAt: 0, look: { heading: 0, pitch: 0, w: 0 } };
+
+function initPostcards() {
+  for (var i = 0; i < POSTCARDS.length; i++) {
+    if (POSTCARDS[i].shotAt < 0) {
+      // Just before abeam, so the landmark sits ahead and to the left.
+      POSTCARDS[i].shotAt = Math.max(0, alongOf(POSTCARDS[i].lat, POSTCARDS[i].lon) - 500);
+    }
+  }
+  pc.total = storedStars();
+  setText('stars', pc.total + '/' + (POSTCARDS.length * 3));
+}
+
+function storedStars() {
+  if (!bridge || !bridge.cards) {
+    return 0;
+  }
+  var total = 0;
+  try {
+    var parts = String(bridge.cards() || '').split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var n = Number(parts[i].split(':')[1]);
+      if (isFinite(n)) { total += n; }
+    }
+  } catch (e) { /* no cards yet */ }
+  return total;
+}
+
+function updatePostcards(now) {
+  if (pc.hideAt && Date.now() > pc.hideAt) {
+    pc.hideAt = 0;
+    el('postcard').className = 'overlay hidden';
+  }
+  if (pc.active && now - pc.t0 > LOOK_IN + LOOK_HOLD + LOOK_OUT) {
+    pc.active = null;
+  }
+  pc.next = null;
+  pc.nextIn = Infinity;
+  if (state.hovering) {
+    pc.prevAlong = state.along;
+    return;
+  }
+  var lap = Math.floor(state.along / routeLength);
+  for (var i = 0; i < POSTCARDS.length; i++) {
+    var card = POSTCARDS[i];
+    var at = lap * routeLength + card.shotAt;
+    if (!pc.active && pc.prevAlong >= 0 && pc.prevAlong < at && state.along >= at) {
+      takePostcard(card, now);
+    }
+    var ahead = at > state.along ? at - state.along : at + routeLength - state.along;
+    if (ahead < pc.nextIn) {
+      pc.nextIn = ahead;
+      pc.next = card;
+    }
+  }
+  pc.prevAlong = state.along;
+}
+
+function takePostcard(card, now) {
+  var alt = state.agl;
+  var inWindow = alt >= card.lo && alt <= card.hi;
+  var stars = 1;
+  if (state.fog < 0.5) {
+    if (inWindow) { stars++; }
+    if (inWindow && flock.inSlot >= 4) { stars++; }
+  }
+  pc.active = card;
+  pc.t0 = now;
+  pc.captured = false;
+  pc.pending = false;
+  pc.stars = stars;
+  pc.alt = alt;
+  pc.inWindow = inWindow;
+}
+
+/** Where the head turns during a postcard stop, or null. Reuses one object: no per-frame garbage. */
+function postcardLook(now, here, altitude) {
+  if (!pc.active) {
+    return null;
+  }
+  var e = now - pc.t0;
+  var w = e < LOOK_IN ? ease(e / LOOK_IN)
+    : e < LOOK_IN + LOOK_HOLD ? 1
+      : ease(1 - (e - LOOK_IN - LOOK_HOLD) / LOOK_OUT);
+  if (e >= LOOK_IN && !pc.captured && !pc.pending) {
+    pc.pending = true;   // taken in the next postRender, while the frame is still in the buffer
+  }
+  var card = pc.active;
+  var dist = Math.max(200, haversine(here, card));
+  pc.look.heading = bearing(here, card);
+  pc.look.pitch = clamp(-toDeg(Math.atan2(altitude - card.h, dist)), -35, 5);
+  pc.look.w = w;
+  return pc.look;
+}
+
+/** Copies the frame Cesium just drew into the postcard. Runs inside scene.postRender. */
+function capturePostcard() {
+  pc.pending = false;
+  pc.captured = true;
+  var card = pc.active;
+  if (!card) {
+    return;
+  }
+  var cv = el('pcCanvas');
+  var ctx = cv.getContext('2d');
+  try {
+    var src = viewer.scene.canvas;
+    var aspect = cv.width / cv.height;
+    var cw = src.width;
+    var ch = cw / aspect;
+    if (ch > src.height) { ch = src.height; cw = ch * aspect; }
+    ctx.drawImage(src, (src.width - cw) / 2, Math.max(0, (src.height - ch) * 0.45), cw, ch,
+      0, 0, cv.width, cv.height);
+  } catch (e) {
+    var sky = ctx.createLinearGradient(0, 0, 0, cv.height);
+    sky.addColorStop(0, '#8fb3cf');
+    sky.addColorStop(1, '#3f6a86');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  // The flock is in the picture if it is with you.
+  ctx.strokeStyle = '#1d1a17';
+  ctx.lineCap = 'round';
+  for (var i = 0; i < flock.birds.length; i++) {
+    if (flock.birds[i].pres <= 0.9) {
+      continue;
+    }
+    var slot = FLOCK_SLOTS[i];
+    var x = (slot[0] / 1000) * cv.width - 60;
+    var y = ((slot[1] - 145) / 495) * cv.height - 20;
+    var s = slot[2] * 0.6;
+    ctx.lineWidth = 2 * s;
+    ctx.beginPath();
+    ctx.moveTo(x - 22 * s, y - 6 * s);
+    ctx.quadraticCurveTo(x - 11 * s, y - 7 * s, x, y + 2 * s);
+    ctx.quadraticCurveTo(x + 11 * s, y - 7 * s, x + 22 * s, y - 6 * s);
+    ctx.stroke();
+  }
+  if (state.fog > 0.05) {
+    ctx.fillStyle = 'rgba(226,231,236,' + (state.fog * 0.9).toFixed(2) + ')';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+
+  var newBest = false;
+  if (bridge && bridge.saveCard) {
+    try {
+      newBest = !!bridge.saveCard(card.id, pc.stars);
+    } catch (e) { /* the card still shows */ }
+  }
+  pc.total = storedStars();
+  setText('stars', pc.total + '/' + (POSTCARDS.length * 3));
+  el('pcTitle').textContent = 'Greetings from ' + card.name;
+  var starText = '';
+  for (var k = 0; k < 3; k++) {
+    starText += k < pc.stars ? '★' : '☆';
+  }
+  el('pcStars').textContent = starText;
+  el('pcLine').textContent = Math.round(pc.alt) + ' m (window ' + card.lo + '–' + card.hi + ' m) · '
+    + Math.round(state.airspeed * 3.6) + ' km/h · flock ' + flock.inSlot + '/' + FLOCK_MAX
+    + (state.fog >= 0.5 ? ' · lost in the fog' : '')
+    + (newBest ? ' · NEW BEST' : '');
+  el('postcard').className = 'overlay';
+  pc.hideAt = Date.now() + CARD_SHOW_MS;
+}
+
+/* ---- 5. the ghost of your last flight ---- */
+
+var GHOST_MIN_SAMPLES = 30;     // 30 s of rowing before a flight is worth keeping as a ghost
+var GHOST_MAX_SAMPLES = 3600;
+var race = { clockAtStart: -1, lastClock: 0, flown: 0, rec: [], recAgl: [], ghost: null, ghostAgl: null,
+  gap: 0, sign: 0, bb: null, label: null, pos: null, lastBehind: '' };
+
+function parseGhost(text) {
+  var parts = String(text || '').split(';');
+  if (parts.length !== 3 || parts[0] !== 'v1') {
+    return false;
+  }
+  var flown = parts[1].split(',').map(Number);
+  var agl = parts[2].split(',').map(Number);
+  if (flown.length < GHOST_MIN_SAMPLES || agl.length !== flown.length) {
+    return false;
+  }
+  for (var i = 0; i < flown.length; i++) {
+    if (!isFinite(flown[i]) || !isFinite(agl[i])) {
+      return false;
+    }
+  }
+  race.ghost = flown;
+  race.ghostAgl = agl;
+  return true;
+}
+
+function loadGhost() {
+  if (!bridge || !bridge.ghost) {
+    return;
+  }
+  try {
+    parseGhost(bridge.ghost());
+  } catch (e) { /* no ghost this time */ }
+}
+
+function saveGhost() {
+  if (!bridge || !bridge.saveGhost || race.rec.length < GHOST_MIN_SAMPLES) {
+    return;
+  }
+  try {
+    bridge.saveGhost('v1;' + race.rec.join(',') + ';' + race.recAgl.join(','));
+  } catch (e) { /* the next session just races the older ghost */ }
+}
+
+/** The rowing clock went backwards: a new session on the same page. Last one becomes the ghost. */
+function restartRace() {
+  if (race.rec.length >= GHOST_MIN_SAMPLES) {
+    race.ghost = race.rec;
+    race.ghostAgl = race.recAgl;
+    ensureGhostBird();
+  }
+  race.rec = [];
+  race.recAgl = [];
+  race.flown = 0;
+  race.sign = 0;
+  race.clockAtStart = state.clock;
+}
+
+function raceT() {
+  return race.clockAtStart < 0 ? 0 : Math.max(0, state.clock - race.clockAtStart);
+}
+
+/** How far the ghost had flown at this point on the rowing clock; holds at its landing. */
+function ghostAt(series, t) {
+  if (t >= series.length - 1) {
+    return series[series.length - 1];
+  }
+  var i = Math.floor(t);
+  return series[i] + (series[i + 1] - series[i]) * (t - i);
+}
+
+function ghostBird() {
+  var c = document.createElement('canvas');
+  c.width = 96;
+  c.height = 48;
+  var g = c.getContext('2d');
+  var glow = g.createRadialGradient(48, 26, 2, 48, 26, 40);
+  glow.addColorStop(0, 'rgba(170,200,255,0.55)');
+  glow.addColorStop(1, 'rgba(170,200,255,0)');
+  g.fillStyle = glow;
+  g.fillRect(0, 0, 96, 48);
+  g.strokeStyle = 'rgba(225,236,255,0.95)';
+  g.lineWidth = 4;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(10, 18);
+  g.quadraticCurveTo(30, 12, 48, 30);
+  g.quadraticCurveTo(66, 12, 86, 18);
+  g.stroke();
+  return c;
+}
+
+function initGhost() {
+  loadGhost();
+  ensureGhostBird();
+}
+
+/** The ghost's billboard, made once there is a ghost to show (at boot, or when a session ends). */
+function ensureGhostBird() {
+  if (!viewer || !race.ghost || race.bb) {
+    return;
+  }
+  race.pos = new Cesium.Cartesian3();
+  var bbs = viewer.scene.primitives.add(new Cesium.BillboardCollection());
+  race.bb = bbs.add({
+    position: Cesium.Cartesian3.fromDegrees(ROUTE[0].lon, ROUTE[0].lat, 200),
+    image: ghostBird(),
+    show: false,
+    scaleByDistance: new Cesium.NearFarScalar(150, 1.8, 4000, 0.45),
+    disableDepthTestDistance: Number.POSITIVE_INFINITY
+  });
+  var labels = viewer.scene.primitives.add(new Cesium.LabelCollection());
+  race.label = labels.add({
+    position: Cesium.Cartesian3.fromDegrees(ROUTE[0].lon, ROUTE[0].lat, 200),
+    text: 'LAST FLIGHT',
+    font: 'bold 14px sans-serif',
+    fillColor: Cesium.Color.fromCssColorString('#cfe0ff'),
+    style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+    outlineWidth: 3,
+    outlineColor: Cesium.Color.fromCssColorString('#03080f'),
+    pixelOffset: new Cesium.Cartesian2(0, 26),
+    show: false,
+    scaleByDistance: new Cesium.NearFarScalar(150, 1.2, 4000, 0.6),
+    disableDepthTestDistance: Number.POSITIVE_INFINITY
+  });
+}
+
+function updateGhost(dt, here, altitude) {
+  if (!state.started) {
+    return;
+  }
+  if (state.clock + 1 < race.lastClock) {
+    restartRace();
+  }
+  race.lastClock = state.clock;
+  var t = raceT();
+  // Record this flight, one sample per rowing second.
+  var sec = Math.floor(t);
+  while (race.rec.length <= sec && race.rec.length < GHOST_MAX_SAMPLES) {
+    race.rec.push(Math.round(race.flown));
+    race.recAgl.push(Math.round(state.agl));
+  }
+  if (!race.ghost) {
+    setText('ghostGap', '—');
+    setText('ghostCap', 'Ghost next time');
+    return;
+  }
+  var ghostFlown = ghostAt(race.ghost, t);
+  var landed = t >= race.ghost.length - 1;
+  race.gap = race.flown - ghostFlown;
+  setText('ghostGap', (race.gap >= 0 ? '+' : '−') + Math.abs(Math.round(race.gap)) + ' m');
+  setText('ghostCap', landed ? 'Ghost landed' : 'vs ghost');
+  if (!state.hovering && Math.abs(race.gap) > 15) {
+    var sign = race.gap > 0 ? 1 : -1;
+    if (race.sign !== 0 && sign !== race.sign) {
+      showToast(sign > 0 ? 'YOU PASSED YOUR GHOST' : 'YOUR GHOST PASSED YOU');
+    }
+    race.sign = sign;
+  }
+
+  var ahead = -race.gap;
+  var visible = !state.hovering && ahead > 40 && ahead < 4000;
+  if (race.bb) {
+    race.bb.show = visible;
+    race.label.show = visible;
+    if (visible) {
+      var p = offsetPoint(atDistance(state.along + ahead), state.weaveOffset * 0.4 + 60);
+      var agl = ghostAt(race.ghostAgl, t);
+      Cesium.Cartesian3.fromDegrees(p.lon, p.lat,
+        state.ground + agl + Math.sin(Date.now() / 420) * 3, undefined, race.pos);
+      race.bb.position = race.pos;
+      race.label.position = race.pos;
+    }
+  }
+  var note = '';
+  if (!state.hovering) {
+    if (ahead > 4000) {
+      note = 'Ghost ' + (ahead / 1000).toFixed(1) + ' km ahead';
+    } else if (ahead > 40) {
+      note = 'Ghost ' + Math.round(ahead) + ' m ahead — catch it';
+    } else if (ahead < -40) {
+      note = 'Ghost ' + Math.round(-ahead) + ' m behind ▼';
+    }
+  }
+  if (note !== race.lastBehind) {
+    race.lastBehind = note;
+    el('ghostBehind').textContent = note;
+  }
+}
+
+/* ---- the one line that says what matters in the next few seconds ---- */
+
+function updateBanner(now) {
+  if (toastUntil && Date.now() > toastUntil) {
+    toastUntil = 0;
+    el('toast').className = 'overlay hidden';
+  }
+  setText('flockN', flock.inSlot + '/' + FLOCK_MAX);
+  setText('liftM', String(Math.round(lifting.gained)));
+
+  var text = '';
+  var cls = '';
+  if (!state.hovering) {
+    if (pc.active) {
+      text = 'Postcard from ' + pc.active.name + '!';
+      cls = 'card good';
+    } else if (pc.next && pc.nextIn < POSTCARD_APPROACH) {
+      var win = state.agl >= pc.next.lo && state.agl <= pc.next.hi;
+      text = 'POSTCARD · ' + pc.next.name + ' in ' + (pc.nextIn / 1000).toFixed(1) + ' km · frame it at '
+        + pc.next.lo + '–' + pc.next.hi + ' m' + (win ? ' ✔' : state.agl < pc.next.lo ? ' ↑ climb' : ' ↓ ease off');
+      cls = win ? 'card good' : 'card';
+    } else if (lifting.strength > 0.1 && lifting.inside) {
+      text = 'RIDGE LIFT over ' + lifting.inside.name + ' · +' + lifting.rate.toFixed(1) + ' m/s · pull to ride it';
+      cls = 'lift';
+    } else if (fogState.inFog) {
+      text = 'IN THE FOG · climb above ' + Math.round(fogState.top) + ' m to break out';
+      cls = 'fog';
+    } else if (lifting.next && lifting.nextIn < 1200) {
+      text = 'Rising air over ' + lifting.next.name + ' in ' + (lifting.nextIn / 1000).toFixed(1) + ' km — pull through it';
+      cls = 'lift';
+    } else if (fogState.aheadIn < 2000) {
+      text = 'Fog bank ahead in ' + (fogState.aheadIn / 1000).toFixed(1) + ' km — stay above '
+        + Math.round(fogState.aheadTop) + ' m';
+      cls = 'fog';
+    }
+  }
+  setText('bannerText', text);
+  var className = text ? 'overlay ' + cls : 'overlay hidden';
+  if (shownText.__banner !== className) {
+    shownText.__banner = className;
+    el('banner').className = className;
+  }
+}
+
+function initExtras() {
+  state.fog = 0;
+  initFlock();
+  initLift();
+  buildUpdrafts();
+  initPostcards();
+  initGhost();
+  if (viewer) {
+    viewer.scene.postRender.addEventListener(function () {
+      if (pc.pending) {
+        capturePostcard();
+      }
+    });
+  }
+}
+
 /* ---------------- boot ---------------- */
 
 try {
@@ -787,6 +1621,11 @@ try {
 } catch (e) {
   el('splashState').textContent = 'The globe failed to start: ' + (e && e.message);
   report('globe-failed', (e && e.message) + ' cesium=' + CESIUM_VERSION);
+}
+try {
+  initExtras();
+} catch (e) {
+  report('extras-failed', e && e.message);
 }
 
 // Landmark ticks along the progress bar.

@@ -54,6 +54,15 @@ class CoastFlightGame extends GameView {
     private static final String PAGE = "file:///android_asset/coastflight/fly.html";
     static final String TRIP_KEY = "flight.along";
     private static final String MAP_KEY = "flight.map";
+    /** Last session's flight, one sample per rowing second, raced as a ghost bird. Not a record. */
+    static final String GHOST_KEY = "flight.ghost";
+    /** Best stars per postcard stop, "id:stars,id:stars". Not a record; the total is. */
+    static final String CARDS_KEY = "flight.cards";
+    /** Records: the best stars summed over every postcard stop, and the most ridge lift in a session. */
+    static final String POSTCARDS_KEY = "coast.postcards";
+    static final String LIFT_KEY = "coast.lift";
+    /** A ghost is at most an hour of per-second samples; anything larger is refused, not trimmed. */
+    private static final int MAX_GHOST_CHARS = 120000;
     /** ~12Hz. The page eases between samples, so pushing every frame would only burn CPU. */
     private static final long PUSH_INTERVAL_MS = 80;
     private static final int MAX_CONSOLE_REPORTS = 12;
@@ -289,6 +298,93 @@ class CoastFlightGame extends GameView {
         public String mapMode() {
             String m = flight.bests.getString(MAP_KEY);
             return m == null ? "" : m;
+        }
+
+        /** Last session's flight, or empty when there is none yet. */
+        @JavascriptInterface
+        public String ghost() {
+            String g = flight.bests.getString(GHOST_KEY);
+            return g == null ? "" : g;
+        }
+
+        /**
+         * This session's flight, kept for the next one to race. The page only calls this with
+         * 30+ seconds of rowing recorded, so a quick look at the screen never wipes a good ghost.
+         */
+        @JavascriptInterface
+        public void saveGhost(String samples) {
+            if (samples == null || samples.isEmpty() || samples.length() > MAX_GHOST_CHARS) {
+                return;
+            }
+            for (int i = 0; i < samples.length(); i++) {
+                char ch = samples.charAt(i);
+                if ((ch < '0' || ch > '9') && ch != ',' && ch != ';' && ch != 'v' && ch != '-') {
+                    return;
+                }
+            }
+            flight.bests.putString(GHOST_KEY, samples);
+        }
+
+        /** Best stars per postcard so far, "id:stars,...". */
+        @JavascriptInterface
+        public String cards() {
+            String c = flight.bests.getString(CARDS_KEY);
+            return c == null ? "" : c;
+        }
+
+        /**
+         * A postcard was taken. Keeps the best stars per stop and records their sum.
+         *
+         * @return true when this beat the stop's previous best
+         */
+        @JavascriptInterface
+        public boolean saveCard(String id, int stars) {
+            if (id == null || !id.matches("[a-z]{1,24}") || stars < 0 || stars > 3) {
+                return false;
+            }
+            synchronized (flight.bests) {
+                java.util.LinkedHashMap<String, Integer> best = new java.util.LinkedHashMap<>();
+                String stored = flight.bests.getString(CARDS_KEY);
+                if (stored != null) {
+                    for (String part : stored.split(",")) {
+                        int colon = part.indexOf(':');
+                        if (colon > 0) {
+                            try {
+                                best.put(part.substring(0, colon),
+                                        Integer.parseInt(part.substring(colon + 1)));
+                            } catch (NumberFormatException ignored) {
+                                // a damaged entry is dropped and rewritten below
+                            }
+                        }
+                    }
+                }
+                Integer previous = best.get(id);
+                if (previous != null && previous >= stars) {
+                    return false;
+                }
+                best.put(id, stars);
+                StringBuilder out = new StringBuilder();
+                int total = 0;
+                for (java.util.Map.Entry<String, Integer> e : best.entrySet()) {
+                    if (out.length() > 0) {
+                        out.append(',');
+                    }
+                    out.append(e.getKey()).append(':').append(e.getValue());
+                    total += e.getValue();
+                }
+                flight.bests.putString(CARDS_KEY, out.toString());
+                flight.bests.recordHighest(POSTCARDS_KEY, total);
+                return true;
+            }
+        }
+
+        /** Ridge lift caught this session, in metres; kept when it is the most ever. */
+        @JavascriptInterface
+        public boolean saveLift(double metres) {
+            if (metres < 1 || metres > 1.0e6) {
+                return false;
+            }
+            return flight.bests.recordHighest(LIFT_KEY, (float) Math.round(metres));
         }
 
         @JavascriptInterface

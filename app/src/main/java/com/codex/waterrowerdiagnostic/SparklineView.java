@@ -53,6 +53,23 @@ final class SparklineView extends View {
     private final Path fillPath = new Path();
     private float shaderHeight = -1f;
 
+    /*
+     * Best glide: the speed trace of the session's best stroke - catch to catch - drawn faintly
+     * from the latest catch, so each stroke's run is laid over the best one while it happens.
+     * "Best" is the highest mean speed across the whole cycle: a big peak that dies at once scores
+     * below a smaller one that holds its run.
+     */
+    private static final int GLIDE_MAX = 40;        // 8 s at 5Hz; longer than that is a rest
+    private static final int GLIDE_MIN = 5;         // 1 s; shorter is a mis-detected stroke
+    private final float[] bestGlide = new float[GLIDE_MAX];
+    private int bestGlideLen;
+    private float bestGlideMean;
+    /** Samples ever added, and the running count at the latest and previous catch. */
+    private long samplesTotal;
+    private long markAt = -1;
+    private final Paint ghostPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path ghostPath = new Path();
+
     private final int speedColor = Color.parseColor("#35D0BA");
     private final int powerColor = Color.parseColor("#6F8CFF");
 
@@ -75,6 +92,12 @@ final class SparklineView extends View {
         speedPaint.setColor(speedColor);
 
         fillPaint.setStyle(Paint.Style.FILL);
+
+        ghostPaint.setStyle(Paint.Style.STROKE);
+        ghostPaint.setStrokeWidth(dp(1.8f));
+        ghostPaint.setStrokeJoin(Paint.Join.ROUND);
+        ghostPaint.setColor(Color.argb(120, 230, 237, 247));
+        ghostPaint.setPathEffect(new android.graphics.DashPathEffect(new float[]{dp(5f), dp(4f)}, 0f));
 
         labelPaint.setColor(Color.parseColor("#5D6B80"));
         labelPaint.setTextSize(dp(9f));
@@ -101,13 +124,61 @@ final class SparklineView extends View {
         if (count < CAPACITY) {
             count++;
         }
+        samplesTotal++;
         postInvalidateOnAnimation();
+    }
+
+    /**
+     * A catch has just happened. Closes the stroke that began at the previous catch and keeps it
+     * if its run was the best of the session.
+     */
+    void markStroke() {
+        if (markAt >= 0) {
+            int len = (int) (samplesTotal - markAt);
+            if (len >= GLIDE_MIN && len <= GLIDE_MAX && len <= count) {
+                float sum = 0f;
+                for (int k = 0; k < len; k++) {
+                    sum += valueAt(speed, count - len + k);
+                }
+                float mean = sum / len;
+                if (mean > bestGlideMean) {
+                    bestGlideMean = mean;
+                    bestGlideLen = len;
+                    for (int k = 0; k < len; k++) {
+                        bestGlide[k] = valueAt(speed, count - len + k);
+                    }
+                }
+            }
+        }
+        markAt = samplesTotal;
+    }
+
+    /** The best stroke's speed this many seconds after its catch, or NaN past its end / none yet. */
+    float bestGlideAt(float secondsSinceCatch) {
+        if (bestGlideLen == 0 || secondsSinceCatch < 0) {
+            return Float.NaN;
+        }
+        float pos = secondsSinceCatch * 1000f / samplePeriodMs;
+        int i = (int) pos;
+        if (i >= bestGlideLen - 1) {
+            return Float.NaN;
+        }
+        float f = pos - i;
+        return bestGlide[i] + (bestGlide[i + 1] - bestGlide[i]) * f;
+    }
+
+    float bestGlideMean() {
+        return bestGlideMean;
     }
 
     void clear() {
         count = 0;
         head = 0;
         lastSampleAtMs = 0;
+        samplesTotal = 0;
+        markAt = -1;
+        bestGlideLen = 0;
+        bestGlideMean = 0f;
         shownMaxSpeed = 2f;
         shownMaxPower = 60f;
         postInvalidateOnAnimation();
@@ -198,6 +269,26 @@ final class SparklineView extends View {
             shaderHeight = plotH;
         }
         canvas.drawPath(fillPath, fillPaint);
+
+        // Best glide, laid from the latest catch - behind the live line, running on ahead of it.
+        int sinceMark = markAt >= 0 ? (int) (samplesTotal - markAt) : -1;
+        if (bestGlideLen > 1 && sinceMark >= 0 && sinceMark < count) {
+            float x0 = firstX + (count - 1 - sinceMark) * stepX;
+            ghostPath.rewind();
+            for (int k = 0; k < bestGlideLen; k++) {
+                float x = x0 + k * stepX;
+                float y = plotH * (1f - bestGlide[k] / shownMaxSpeed);
+                if (k == 0) {
+                    ghostPath.moveTo(x, y);
+                } else {
+                    ghostPath.lineTo(x, y);
+                }
+            }
+            canvas.drawPath(ghostPath, ghostPaint);
+            canvas.drawText("best stroke", Math.min(x0 + dp(3f), w - dp(60f)),
+                    plotH * (1f - bestGlide[0] / shownMaxSpeed) - dp(4f), labelPaint);
+        }
+
         canvas.drawPath(speedPath, speedPaint);
 
         powerPath.rewind();

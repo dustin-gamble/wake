@@ -48,6 +48,15 @@ final class GaugeView extends View {
     private boolean paddleTurning = true;
     private boolean driving = true;
 
+    /** Best stroke's speed at this moment after the catch, drawn as a faint needle; NaN hides it. */
+    private float ghost = Float.NaN;
+    private float shownGhost = Float.NaN;
+    /** A target on the dial (the pace the rower set), NaN for none, and the arc's current colour. */
+    private float targetMark = Float.NaN;
+    private int arcColor;
+    private final Paint ghostPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint targetPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
     GaugeView(Context context, String label, String unit, int accent, float scaleMax, int decimals) {
         super(context);
         this.label = label;
@@ -64,6 +73,15 @@ final class GaugeView extends View {
         arcPaint.setStyle(Paint.Style.STROKE);
         arcPaint.setStrokeCap(Paint.Cap.ROUND);
         arcPaint.setColor(accent);
+        arcColor = accent;
+
+        ghostPaint.setStyle(Paint.Style.STROKE);
+        ghostPaint.setStrokeCap(Paint.Cap.ROUND);
+        ghostPaint.setColor(Color.argb(110, 230, 237, 247));
+
+        targetPaint.setStyle(Paint.Style.STROKE);
+        targetPaint.setStrokeCap(Paint.Cap.ROUND);
+        targetPaint.setColor(Color.parseColor("#E6EDF7"));
 
         tickPaint.setColor(Color.parseColor("#2A3648"));
         tickPaint.setStrokeCap(Paint.Cap.ROUND);
@@ -151,6 +169,43 @@ final class GaugeView extends View {
         this.lastUpdateMs = System.currentTimeMillis();
         if (target > scaleMax) {
             scaleMax = target * 1.15f;
+        }
+        postInvalidateOnAnimation();
+    }
+
+    /**
+     * Where the best stroke of the session was at this same moment after its catch. Drawn as a
+     * faint second needle: when the live one falls behind it, this stroke's run is dying sooner.
+     */
+    void setGhost(float value) {
+        if (Float.isNaN(value) != Float.isNaN(ghost) || Math.abs(value - ghost) > 0.0005f) {
+            ghost = value;
+            postInvalidateOnAnimation();
+        }
+    }
+
+    /**
+     * A target marked on the dial, and the colour the arc takes to say whether you are on it.
+     *
+     * @param value NaN for no target
+     * @param color the arc colour; the gauge's own accent when there is no target
+     */
+    void setTarget(float value, int color) {
+        // Compare against the colour that will actually be used, so "no target" with a caller
+        // colour other than the accent does not count as a change on every tick.
+        int effective = Float.isNaN(value) ? accent : color;
+        boolean changed = effective != arcColor
+                || Float.isNaN(value) != Float.isNaN(targetMark)
+                || (!Float.isNaN(value) && Math.abs(value - targetMark) > 0.0005f);
+        if (!changed) {
+            return;
+        }
+        targetMark = value;
+        arcColor = effective;
+        arcPaint.setColor(arcColor);
+        hubPaint.setColor(arcColor);
+        if (!Float.isNaN(value) && value * 1.1f > scaleMax) {
+            scaleMax = value * 1.15f;
         }
         postInvalidateOnAnimation();
     }
@@ -244,6 +299,30 @@ final class GaugeView extends View {
                     tickPaint);
         }
 
+        // The target: a bright notch across the track, so the needle has something to reach.
+        if (!Float.isNaN(targetMark) && scaleMax > 0) {
+            double ta = Math.toRadians(START_ANGLE + SWEEP * Math.min(1f, targetMark / scaleMax));
+            float in = radius - stroke * 0.9f;
+            float out = radius + stroke * 0.75f;
+            targetPaint.setStrokeWidth(dp(3f));
+            canvas.drawLine(cx + (float) Math.cos(ta) * in, cy + (float) Math.sin(ta) * in,
+                    cx + (float) Math.cos(ta) * out, cy + (float) Math.sin(ta) * out, targetPaint);
+        }
+
+        // Ghost needle: eased so it glides with the live one rather than stepping per sample.
+        if (Float.isNaN(ghost)) {
+            shownGhost = Float.NaN;
+        } else {
+            shownGhost = Float.isNaN(shownGhost) ? ghost : shownGhost + (ghost - shownGhost) * Math.min(1f, 10f * dt);
+            if (scaleMax > 0) {
+                double ga = Math.toRadians(START_ANGLE + SWEEP * Math.min(1f, shownGhost / scaleMax));
+                float gLen = radius - stroke * 1.3f;
+                ghostPaint.setStrokeWidth(dp(2f));
+                canvas.drawLine(cx + (float) Math.cos(ga) * gLen * 0.35f, cy + (float) Math.sin(ga) * gLen * 0.35f,
+                        cx + (float) Math.cos(ga) * gLen, cy + (float) Math.sin(ga) * gLen, ghostPaint);
+            }
+        }
+
         double needleAngle = Math.toRadians(START_ANGLE + SWEEP * fraction);
         needlePaint.setStrokeWidth(dp(2.6f));
         float needleLen = radius - stroke * 1.3f;
@@ -264,7 +343,8 @@ final class GaugeView extends View {
         canvas.drawText(label, cx, cy + radius * 0.86f, labelPaint);
 
         // Keep animating while the needle is still moving, coast included.
-        if (Math.abs(target - shown) > 0.001f || (shown > 0f && coast != null)) {
+        if (Math.abs(target - shown) > 0.001f || (shown > 0f && coast != null)
+                || (!Float.isNaN(ghost) && Math.abs(ghost - shownGhost) > 0.001f)) {
             postInvalidateOnAnimation();
         }
     }

@@ -207,6 +207,29 @@ public class MainActivity extends Activity
     private TextView strokesValue;
     private TextView kcalValue;
     private StrokeShapeView strokeShapeView;
+    /* GAUGES extras: rhythm dial, per-stroke power strip, end-of-piece card and a target split. */
+    private GaugeRatioDialView ratioDial;
+    private GaugePowerStripView powerStrip;
+    private GaugeSummaryView pieceSummary;
+    private TextView paceCaption;
+    /** Target split in seconds per 500 m, 0 for none. Tap the PACE tile to set it. */
+    private float paceTargetSec;
+    private int paceTargetColor;
+    /** When the pulse meter last closed a stroke - the catch the best-glide ghost is laid from. */
+    private long lastCatchMs;
+    private PulseMeter.Stroke lastGaugeStroke;
+    private double gaugeWattSum;
+    private int gaugeWattSamples;
+    /* The piece in progress, for the summary card when it ends. */
+    private boolean pieceActive;
+    private long pieceStartMs;
+    private int pieceStartStrokes;
+    private double pieceStartWork;
+    private double pieceStartKcal;
+    private float pieceStartDistance;
+    private int piecePeakWatts;
+    private int pieceBestPace;
+    private int sessionPeakWatts;
     private TextView workValue;
     private Button diagnosticsToggle;
     private LinearLayout diagnosticsPanel;
@@ -292,6 +315,35 @@ public class MainActivity extends Activity
     private double shuffleAccumSeconds;
     private ShuffleBag shuffleBag;
     private TextView shuffleNextChip;
+    /* SHUFFLE decks, score, lock/veto and recap. */
+    private static final String[] SHUFFLE_DECKS = {"ALL", "RACES", "CHILL", "SPRINTS"};
+    /** Indices into SHUFFLE_TITLES for each deck; ALL is every game. */
+    private static final int[][] SHUFFLE_DECK_GAMES = {
+            null,
+            {7, 8, 10, 11, 0},                  // races: RACE, CREW BOAT, HEAD RACE, TUG OF WAR, ZOMBIE RUN
+            {2, 3, 12, 13, 14, 9, 4},           // chill: SKYLINE, WAVE RIDER, COLLECTOR, RIVER, COACH, GRID, CANYON
+            {6, 5, 1, 0, 11}};                  // sprints: MEGA PULL, ROCKET, ROW RUNNER, ZOMBIE RUN, TUG OF WAR
+    /**
+     * The record each shuffle game can break, watched so the recap can say "NEW RECORD" as that
+     * game's best moment. Null where the key depends on a setting the shuffle does not pick.
+     */
+    private static final String[] SHUFFLE_RECORD_KEYS = {
+            null, "runner.distance", "city.tallest", "surf.score", "canyon.gates", "rocket.altitude",
+            "megapull.peak", null, "crew.sync", "grid.percent", "time.2000", null, "collector.score",
+            "river.landmarks", "coach.score"};
+    private int shuffleDeck;
+    private boolean shuffleLocked;
+    private int shuffleCurrent = -1;
+    private int shuffleScore;
+    private int shuffleStreak;
+    private int shuffleLastStrokes = -1;
+    private double shuffleWattSum;
+    private int shuffleWattSamples;
+    private final java.util.ArrayList<ShuffleRecapView.Leg> shuffleLegs = new java.util.ArrayList<>();
+    private ShuffleRecapView.Leg shuffleLeg;
+    private ShuffleOverlayView shuffleOverlay;
+    private TextView shuffleScoreChip;
+    private boolean shuffleRecapPending;
     /** Latest status on the UI thread, for once-a-second sampling. */
     private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
@@ -522,7 +574,12 @@ public class MainActivity extends Activity
 
     private void showScreen(View screen) {
         if (!shuffleSwitching) {
-            shuffleActive = false;   // leaving to anything else ends the shuffle
+            if (shuffleActive) {
+                // Leaving to anything else ends the shuffle; its recap follows on the next frame.
+                closeShuffleLeg();
+                shuffleRecapPending = true;
+            }
+            shuffleActive = false;
         }
         if (currentGame != null) {
             currentGame.stop();
@@ -535,7 +592,10 @@ public class MainActivity extends Activity
             saveLastSession();
             refreshPersonalBests();
             refreshProgress();
-            if (!sessionArtShown && sessionStrokes.size() >= 60) {
+            if (shuffleRecapPending) {
+                // The recap first; Session Art still gets its turn on the way back home.
+                screenHost.post(this::showShuffleRecap);
+            } else if (!sessionArtShown && sessionStrokes.size() >= 60) {
                 sessionArtShown = true;
                 screenHost.post(this::showSessionArt);
             }
@@ -1098,20 +1158,97 @@ public class MainActivity extends Activity
 
     private void startShuffle() {
         shuffleAccumSeconds = 0;
-        shuffleBag = new ShuffleBag(SHUFFLE_TITLES.length, new java.util.Random());
+        shuffleRecapPending = false;
+        shuffleScore = 0;
+        shuffleStreak = 0;
+        shuffleLastStrokes = -1;
+        shuffleWattSum = 0;
+        shuffleWattSamples = 0;
+        shuffleLegs.clear();
+        shuffleLeg = null;
+        shuffleLocked = false;
+        shuffleCurrent = -1;
+        shuffleDeck = 0;
+        String savedDeck = personalBests.getString("shuffle.deck");
+        for (int d = 0; d < SHUFFLE_DECKS.length; d++) {
+            if (SHUFFLE_DECKS[d].equals(savedDeck)) {
+                shuffleDeck = d;
+            }
+        }
+        shuffleBag = new ShuffleBag(shuffleDeckGames(shuffleDeck), new java.util.Random());
+        if (shuffleOverlay == null) {
+            shuffleOverlay = new ShuffleOverlayView(this, new ShuffleOverlayView.Source() {
+                @Override
+                public double secondsLeft() {
+                    return shuffleSecondsLeft();
+                }
+
+                @Override
+                public String nextTitle() {
+                    return shuffleUpcomingTitle();
+                }
+            });
+        }
         shuffleActive = true;
         dealShuffle(0f);
     }
 
+    /** A deck's games, as indices into SHUFFLE_TITLES. */
+    private int[] shuffleDeckGames(int deck) {
+        int[] games = SHUFFLE_DECK_GAMES[deck];
+        if (games == null) {
+            games = new int[SHUFFLE_TITLES.length];
+            for (int i = 0; i < games.length; i++) {
+                games[i] = i;
+            }
+        }
+        return games;
+    }
+
     /** Next game from the bag, with the speed needle carried over from the last one. */
     private void dealShuffle(float carrySpeed) {
+        closeShuffleLeg();
         int pick = shuffleBag.next();
+        shuffleCurrent = pick;
+        shuffleLocked = false;
         GameView game = shuffleGame(pick);
+        shuffleLeg = new ShuffleRecapView.Leg(SHUFFLE_TITLES[pick]);
+        shuffleLeg.recordKey = SHUFFLE_RECORD_KEYS[pick];
+        if (shuffleLeg.recordKey != null) {
+            shuffleLeg.recordBefore = personalBests.has(shuffleLeg.recordKey)
+                    ? personalBests.get(shuffleLeg.recordKey, 0f) : Float.NaN;
+        }
+        shuffleLegs.add(shuffleLeg);
+
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         shuffleNextChip = chip("NEXT IN " + SHUFFLE_MINUTES[shuffleMinutesIndex] + ":00");
         row.addView(shuffleNextChip);
-        TextView skip = chip("SKIP  \u25B6");
+        shuffleScoreChip = chip(shuffleScoreText());
+        shuffleScoreChip.setTextColor(0xFFB48CFF);
+        row.addView(shuffleScoreChip);
+        TextView deck = chip("DECK " + SHUFFLE_DECKS[shuffleDeck]);
+        deck.setOnClickListener(v -> {
+            shuffleDeck = (shuffleDeck + 1) % SHUFFLE_DECKS.length;
+            applyShuffleDeck();
+            personalBests.putString("shuffle.deck", SHUFFLE_DECKS[shuffleDeck]);
+            deck.setText("DECK " + SHUFFLE_DECKS[shuffleDeck]);
+            shuffleTick();
+        });
+        row.addView(deck);
+        TextView lock = chip("LOCK");
+        lock.setOnClickListener(v -> {
+            shuffleLocked = !shuffleLocked;
+            lock.setText(shuffleLocked ? "LOCKED IN" : "LOCK");
+            lock.setTextColor(getColorCompat(shuffleLocked ? R.color.primary : R.color.text_primary));
+            shuffleTick();
+        });
+        row.addView(lock);
+        TextView veto = chip("VETO");
+        veto.setTextColor(getColorCompat(R.color.bad));
+        veto.setOnClickListener(v -> vetoShuffle());
+        row.addView(veto);
+        TextView skip = chip("SKIP  ▶");
         skip.setOnClickListener(v -> skipShuffle());
         row.addView(skip);
         TextView length = chip(SHUFFLE_MINUTES[shuffleMinutesIndex] + " MIN EACH");
@@ -1122,12 +1259,60 @@ public class MainActivity extends Activity
         row.addView(length);
         shuffleSwitching = true;
         try {
-            showGame(game, gameScreen("SHUFFLE  \u00b7  " + SHUFFLE_TITLES[pick], game, row));
+            showGame(game, gameScreen("SHUFFLE  ·  " + SHUFFLE_TITLES[pick], game, row, shuffleOverlay));
         } finally {
             shuffleSwitching = false;
         }
         shuffleActive = true;
+        settleShuffleRecords();
         game.seedSpeed(carrySpeed);
+        shuffleOverlay.announce(SHUFFLE_TITLES[pick], "DECK " + SHUFFLE_DECKS[shuffleDeck]
+                + "  ·  GAME " + shuffleLegs.size() + "  ·  " + shuffleScore + " PTS SO FAR");
+    }
+
+    /** Re-deals from the chosen deck, keeping this shuffle's vetoes out of it. */
+    private void applyShuffleDeck() {
+        java.util.ArrayList<Integer> keep = new java.util.ArrayList<>();
+        for (int g : shuffleDeckGames(shuffleDeck)) {
+            if (!isShuffleVetoed(g)) {
+                keep.add(g);
+            }
+        }
+        if (keep.isEmpty()) {
+            toast("Every game in that deck is vetoed - dealing from all games");
+            for (int g : shuffleDeckGames(0)) {
+                keep.add(g);
+            }
+        }
+        int[] pool = new int[keep.size()];
+        for (int i = 0; i < pool.length; i++) {
+            pool[i] = keep.get(i);
+        }
+        shuffleBag.setPool(pool);
+    }
+
+    private boolean isShuffleVetoed(int game) {
+        for (ShuffleRecapView.Leg leg : shuffleLegs) {
+            if (leg.vetoed && leg.title.equals(SHUFFLE_TITLES[game])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Veto: this game leaves the shuffle for good and the next one is dealt now. */
+    private void vetoShuffle() {
+        if (!shuffleActive || currentGame == null || shuffleLeg == null) {
+            return;
+        }
+        if (shuffleBag.poolSize() <= 1) {
+            toast("It is the last game left in this deck - pick another deck first");
+            return;
+        }
+        shuffleBag.remove(shuffleCurrent);
+        shuffleLeg.vetoed = true;
+        toast(SHUFFLE_TITLES[shuffleCurrent] + " vetoed for this shuffle");
+        skipShuffle();
     }
 
     private void skipShuffle() {
@@ -1138,23 +1323,175 @@ public class MainActivity extends Activity
         dealShuffle(currentGame.boatSpeed());
     }
 
+    /** Rowing-clock seconds until the switch, or -1 when locked in (no switch coming). */
+    private double shuffleSecondsLeft() {
+        if (!shuffleActive || shuffleLocked || currentGame == null) {
+            return -1;
+        }
+        return SHUFFLE_MINUTES[shuffleMinutesIndex] * 60.0 - currentGame.activeSeconds();
+    }
+
+    private String shuffleUpcomingTitle() {
+        int next = shuffleBag != null ? shuffleBag.peek() : -1;
+        return next >= 0 ? SHUFFLE_TITLES[next] : "A SURPRISE";
+    }
+
+    private String shuffleScoreText() {
+        int mult = shuffleMultiplier();
+        return "SCORE " + shuffleScore + (mult > 1 ? "  x" + mult : "");
+    }
+
+    /** Combo: a run of strokes at the rower's own typical power lifts every point, up to x3. */
+    private int shuffleMultiplier() {
+        return 1 + Math.min(2, shuffleStreak / 8);
+    }
+
     /** Once a second: the countdown, the switch, and the record for the longest shuffle. */
     private void shuffleTick() {
         if (!shuffleActive || currentGame == null || shuffleNextChip == null) {
             return;
         }
         double left = SHUFFLE_MINUTES[shuffleMinutesIndex] * 60.0 - currentGame.activeSeconds();
-        String upcoming = shuffleBag.peek() >= 0 ? SHUFFLE_TITLES[shuffleBag.peek()] : "A SURPRISE";
-        shuffleNextChip.setText(left <= 6
-                ? "NEXT: " + upcoming + "  " + Math.max(0, (int) Math.ceil(left))
-                : "NEXT IN " + PersonalBests.formatTime((float) Math.max(0, left)));
+        if (shuffleLocked) {
+            shuffleNextChip.setText("LOCKED  ·  " + PersonalBests.formatTime((float) currentGame.activeSeconds()));
+        } else {
+            shuffleNextChip.setText(left <= 6
+                    ? "NEXT: " + shuffleUpcomingTitle() + "  " + Math.max(0, (int) Math.ceil(left))
+                    : "NEXT IN " + PersonalBests.formatTime((float) Math.max(0, left)));
+        }
+        if (shuffleOverlay != null && !shuffleLocked && left <= 6) {
+            shuffleOverlay.wake();
+        }
         double total = shuffleAccumSeconds + currentGame.activeSeconds();
         if (total >= 60) {
             personalBests.recordHighest("shuffle.minutes", (float) (total / 60.0));
         }
-        if (left <= 0) {
+        if (left <= 0 && !shuffleLocked) {
             skipShuffle();
         }
+    }
+
+    /**
+     * Scores the shuffle from the stroke counter: each stroke earns ten points at the rower's own
+     * typical power (more above it, fewer below, capped at thirty), times the combo. The stroke's
+     * power is the mean of every reading since the previous stroke - not the reading at the moment
+     * the counter ticks, which lands about a second late when power has already collapsed.
+     */
+    private void shuffleScoreStatus(S4Protocol.Status status) {
+        if (!shuffleActive || shuffleLeg == null || currentGame == null) {
+            return;
+        }
+        if (shuffleLastStrokes < 0 || status.strokes < shuffleLastStrokes) {
+            shuffleLastStrokes = status.strokes;   // first reading, or the monitor was reset
+            shuffleWattSum = 0;
+            shuffleWattSamples = 0;
+            return;
+        }
+        shuffleWattSum += Math.max(0, status.watts);
+        shuffleWattSamples++;
+        int landed = status.strokes - shuffleLastStrokes;
+        if (landed <= 0) {
+            return;
+        }
+        shuffleLastStrokes = status.strokes;
+        float power = (float) (shuffleWattSum / shuffleWattSamples);
+        shuffleWattSum = 0;
+        shuffleWattSamples = 0;
+        double typical = Math.max(40, profile.typicalWatts());
+        if (power >= typical * 0.95) {
+            shuffleStreak++;
+        } else if (power < typical * 0.85) {
+            shuffleStreak = 0;
+        }
+        int mult = shuffleMultiplier();
+        // Lumped reads (several strokes in one update) score as one: their power is one average.
+        int base = (int) Math.max(0, Math.min(30, Math.round(10.0 * power / typical)));
+        int points = base * mult;
+        shuffleScore += points;
+        shuffleLeg.points += points;
+        shuffleLeg.strokes += landed;
+        if (power > shuffleLeg.bestWatts) {
+            shuffleLeg.bestWatts = power;
+            shuffleLeg.bestAtSeconds = (float) currentGame.activeSeconds();
+        }
+        shuffleLeg.bestMultiplier = Math.max(shuffleLeg.bestMultiplier, mult);
+        if (shuffleScoreChip != null) {
+            shuffleScoreChip.setText(shuffleScoreText());
+        }
+        if (shuffleOverlay != null && points > 0) {
+            shuffleOverlay.pop(points, mult);
+        }
+    }
+
+    /** Finishes the leg being played: its rowing time. Its record is settled after the game stops. */
+    private void closeShuffleLeg() {
+        if (shuffleLeg != null && currentGame != null) {
+            shuffleLeg.seconds = (float) currentGame.activeSeconds();
+        }
+        shuffleLeg = null;
+    }
+
+    /**
+     * Whether each finished leg's record fell while it was on. Run once its game has stopped,
+     * because some games only save their records in onStop.
+     */
+    private void settleShuffleRecords() {
+        for (ShuffleRecapView.Leg leg : shuffleLegs) {
+            if (leg == shuffleLeg || leg.settled) {
+                continue;
+            }
+            leg.settled = true;
+            if (leg.recordKey != null && personalBests.has(leg.recordKey)) {
+                float after = personalBests.get(leg.recordKey, 0f);
+                if (Float.isNaN(leg.recordBefore) || after != leg.recordBefore) {
+                    leg.record = recordName(leg.recordKey);
+                }
+            }
+        }
+    }
+
+    /** The end of a shuffle: its games, their points and best moments, and the total. */
+    private void showShuffleRecap() {
+        shuffleRecapPending = false;
+        settleShuffleRecords();
+        java.util.ArrayList<ShuffleRecapView.Leg> played = new java.util.ArrayList<>();
+        float seconds = 0;
+        for (ShuffleRecapView.Leg leg : shuffleLegs) {
+            seconds += leg.seconds;
+            if (leg.strokes > 0 || leg.record != null) {
+                played.add(leg);
+            }
+        }
+        if (played.isEmpty()) {
+            return;   // nothing rowed: stay on the home screen
+        }
+        boolean newBest = personalBests.recordHighest("shuffle.score", shuffleScore);
+        ShuffleRecapView recap = new ShuffleRecapView(this);
+        recap.setRecap(played, shuffleScore, newBest,
+                played.size() + " games  ·  " + PersonalBests.formatTime(seconds) + " rowing  ·  deck "
+                        + SHUFFLE_DECKS[shuffleDeck]);
+
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackgroundColor(getColorCompat(R.color.background));
+        frame.addView(recap, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(dp(12), dp(10), dp(12), dp(10));
+        TextView back = chip("‹  HOME");
+        back.setOnClickListener(v -> showHome());
+        bar.addView(back);
+        TextView again = chip("SHUFFLE AGAIN");
+        again.setOnClickListener(v -> startShuffle());
+        bar.addView(again);
+        if (BuildConfig.SCREENSHOT_UPLOAD) {
+            TextView send = chip("SEND TO LAPTOP");
+            send.setOnClickListener(v -> captureScreenshot("shuffle-recap"));
+            bar.addView(send);
+        }
+        frame.addView(bar, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT));
+        showScreen(frame);
     }
 
     /* ---------- progress, session art, help, sharing ---------- */
@@ -1534,7 +1871,11 @@ public class MainActivity extends Activity
             String key = e.getKey();
             if (key.startsWith("ghost.") || key.startsWith("cal.") || key.startsWith("flight.")
                     || key.startsWith("timelast.") || key.startsWith("timefriend.") || key.equals("regatta.day")
-                    || key.equals("regatta.division") || key.equals("hr.max")) {
+                    || key.equals("regatta.division") || key.equals("hr.max")
+                    // 3.22.0: state the games keep between sessions, not achievements.
+                    || key.equals("coach.best.drive") || key.equals("coach.best.length")
+                    || key.equals("surf.spot") || key.equals("city.districts")
+                    || key.startsWith("city.landmark.") || key.equals("grid.battery")) {
                 continue;   // a recording or a calibration constant, not a record
             }
             Object raw = e.getValue();
@@ -1546,7 +1887,28 @@ public class MainActivity extends Activity
             String shown = key.startsWith("time.") || key.startsWith("run.streak")
                     || key.startsWith("storm.") || key.startsWith("tug.")
                     || key.startsWith("crew.time.") || key.equals("daily.best.trial_500")
+                    || key.equals("zonerow.lock") || key.startsWith("surf.ride")
                     ? PersonalBests.formatTime(v)
+                    : key.startsWith("coach.drill.") ? Math.round(v) + "/10"
+                    : key.equals("coach.reach") ? Math.round(v * 100f) + " cm"
+                    : key.equals("zrun.saved") ? Math.round(v) + " saved"
+                    : key.equals("runner.bosses") ? Math.round(v) + " crab kings"
+                    : key.equals("river.rapids") ? Math.round(v) + " rocks"
+                    : key.equals("river.passed") ? Math.round(v) + " boats"
+                    : key.equals("rocket.campaign") ? Math.round(v) + " / 5"
+                    : key.matches("rocket\\.m[1-5]") ? Math.round(v) + "% fuel left"
+                    : key.equals("rocket.landings") ? Math.round(v) + " boosters"
+                    : key.equals("city.landmarks") ? Math.round(v) + " landmarks"
+                    : key.equals("coast.lift") ? Math.round(v) + " m"
+                    : key.equals("megapull.prize") ? megaPullPrize(v)
+                    : key.equals("megapull.wins") ? Math.round(v) + " wins"
+                    : key.equals("megapull.steady") ? Math.round(v) + " strokes"
+                    : key.equals("canyon.score") ? Math.round(v) + " pts"
+                    : key.equals("collector.gold") ? Math.round(v) + " golden fish"
+                    : key.equals("daily.best.rate_ladder") ? Math.round(v) + "%"
+                    : key.equals("daily.best.neg_split") ? String.format(Locale.US, "%+.1f s", v)
+                    : key.equals("grid.held") ? Math.round(v) + " held"
+                    : key.equals("tugcup.wins") ? Math.round(v) + " cups"
                     : key.startsWith("intervals.") ? Math.round(v) + "%"
                     : key.equals("journey.total") ? String.format(Locale.US, "%.1f km", v / 1000f)
                     : key.equals("dive.joules") ? String.format(Locale.US, "%.1f m deep", v / 1000f)
@@ -1578,8 +1940,44 @@ public class MainActivity extends Activity
         showScreen(root);
     }
 
+    private static String megaPullPrize(float v) {
+        String[] names = {"Mini plush", "Bunny", "Teddy", "Giant bear"};
+        int i = Math.round(v) - 1;
+        return i >= 0 && i < names.length ? names[i] : String.valueOf(Math.round(v));
+    }
+
     private static String recordName(String key) {
         if (key.startsWith("time.")) return key.substring(5) + " m fastest";
+        // 3.22.0 upgrades - checked before the broad zonerow./crew.time./daily.best. branches below.
+        if (key.equals("zonerow.lock")) return "Zone Row - longest zone + rate lock";
+        if (key.equals("zonerow.plan.custom")) return "Zone Row - custom plan on schedule";
+        if (key.equals("crew.time.bow.1000")) return "Crew Boat - 1000 m fastest from bow seat";
+        if (key.equals("daily.best.rate_ladder")) return "Daily Row - best rate ladder";
+        if (key.equals("daily.best.neg_split")) return "Daily Row - best negative split";
+        if (key.equals("daily.bosses")) return "Daily Row - Sunday bosses beaten";
+        if (key.startsWith("coach.drill.")) return "Stroke Coach - " + key.substring(12) + " drill";
+        if (key.equals("coach.reach")) return "Stroke Coach - longest drive length";
+        if (key.equals("zrun.saved")) return "Zombie Run - survivors rescued";
+        if (key.equals("runner.bosses")) return "Row Runner - crab kings beaten";
+        if (key.equals("river.rapids")) return "River Explorer - rocks dodged in rapids";
+        if (key.equals("river.passed")) return "River Explorer - boats overtaken";
+        if (key.equals("rocket.campaign")) return "Rocket Launch - campaign missions";
+        if (key.matches("rocket\\.m[1-5]")) return "Rocket Launch - mission " + key.substring(8) + " best";
+        if (key.equals("rocket.landings")) return "Rocket Launch - boosters landed";
+        if (key.equals("surf.tricks")) return "Wave Rider - most tricks";
+        if (key.startsWith("surf.ride.")) return "Wave Rider - longest ride at " + key.substring(10);
+        if (key.equals("city.landmarks")) return "Skyline - landmarks built";
+        if (key.equals("coast.postcards")) return "Coast Flight - postcard stars";
+        if (key.equals("coast.lift")) return "Coast Flight - most height from rising air";
+        if (key.equals("megapull.prize")) return "Mega Pull - best prize";
+        if (key.equals("megapull.wins")) return "Mega Pull - strongman wins";
+        if (key.equals("megapull.steady")) return "Mega Pull - longest steady run";
+        if (key.equals("canyon.score")) return "Canyon - best score";
+        if (key.equals("regatta.golds")) return "Regatta - golds";
+        if (key.equals("regatta.titles")) return "Regatta - season titles";
+        if (key.equals("collector.gold")) return "Collector - golden fish";
+        if (key.equals("grid.held")) return "Night Grid - blackouts held off";
+        if (key.equals("tugcup.wins")) return "Tug of War - cups won";
         if (key.equals("run.streak")) return "The Run - longest streak";
         if (key.equals("run.score")) return "The Run - most run metres";
         if (key.startsWith("intervals.")) return "Intervals - " + key.substring(10) + " in band";
@@ -1593,6 +1991,7 @@ public class MainActivity extends Activity
         if (key.startsWith("zonerow.")) return "Zone Row - most metres in " + key.substring(8) + " min";
         if (key.equals("rocket.test60")) return "Rocket - 60 s power test";
         if (key.equals("shuffle.minutes")) return "Shuffle - longest session (minutes)";
+        if (key.equals("shuffle.score")) return "Shuffle - best score";
         if (key.equals("river.km")) return "River Explorer - km explored";
         if (key.equals("river.landmarks")) return "River Explorer - landmarks found";
         if (key.equals("river.along")) return "River Explorer - metres up the river";
@@ -2303,6 +2702,20 @@ public class MainActivity extends Activity
         shapeParams.rightMargin = dp(3);
         traceRow.addView(shapeWrap, shapeParams);
 
+        // Rhythm: drive against recovery, aiming at 1:2.
+        ratioDial = new GaugeRatioDialView(this);
+        LinearLayout ratioWrap = new LinearLayout(this);
+        ratioWrap.setOrientation(LinearLayout.VERTICAL);
+        ratioWrap.setPadding(dp(10), dp(8), dp(10), dp(8));
+        ratioWrap.setBackgroundColor(getColorCompat(R.color.surface));
+        ratioWrap.addView(cardLabel("RHYTHM  \u00b7  DRIVE : RECOVERY"));
+        ratioWrap.addView(ratioDial, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout.LayoutParams ratioParams =
+                new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.1f);
+        ratioParams.rightMargin = dp(3);
+        traceRow.addView(ratioWrap, ratioParams);
+
         sparkline = new SparklineView(this);
         LinearLayout sparkWrap = new LinearLayout(this);
         sparkWrap.setOrientation(LinearLayout.VERTICAL);
@@ -2320,6 +2733,17 @@ public class MainActivity extends Activity
         root.addView(traceRow, traceParams);
 
         root.addView(buildMetricGrid(), marginTop(dp(6)));
+
+        // One bar per stroke, coloured against the session's average.
+        powerStrip = new GaugePowerStripView(this);
+        LinearLayout stripWrap = new LinearLayout(this);
+        stripWrap.setOrientation(LinearLayout.VERTICAL);
+        stripWrap.setPadding(dp(12), dp(6), dp(12), dp(6));
+        stripWrap.setBackgroundColor(getColorCompat(R.color.surface));
+        stripWrap.addView(cardLabel("POWER PER STROKE  \u00b7  AGAINST YOUR AVERAGE"));
+        stripWrap.addView(powerStrip, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(46)));
+        root.addView(stripWrap, marginTop(dp(4)));
 
         powerBar = new BarMeterView(this, "POWER", getColorCompat(R.color.primary), 250f);
         rateBar = new BarMeterView(this, "STROKE RATE", getColorCompat(R.color.accent_blue), 40f);
@@ -2342,7 +2766,138 @@ public class MainActivity extends Activity
         diagnosticsToggle.setOnClickListener(v -> setDiagnosticsOpen(true));
         root.addView(diagnosticsToggle, marginTop(dp(6)));
 
-        return root;
+        // The end-of-piece card sits over everything, hidden until a piece ends.
+        FrameLayout stack = new FrameLayout(this);
+        stack.addView(root, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        pieceSummary = new GaugeSummaryView(this);
+        stack.addView(pieceSummary, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        return stack;
+    }
+
+    /** Tap the PACE tile: off, then targets around the rower's typical split, fastest last. */
+    private void cyclePaceTarget() {
+        double typical = profile.typicalSplit();
+        int t = (int) Math.round(typical >= 80 && typical <= 300 ? typical : 128);
+        int[] choices = {0, t + 5, t + 2, t - 2, t - 5};
+        int next = 1;
+        for (int i = 0; i < choices.length; i++) {
+            if (Math.round(paceTargetSec) == choices[i]) {
+                next = (i + 1) % choices.length;
+            }
+        }
+        setPaceTarget(choices[next]);
+        personalBests.putString("gauges.target", String.valueOf(choices[next]));
+    }
+
+    private void setPaceTarget(float seconds) {
+        paceTargetSec = seconds > 0 ? seconds : 0;
+        if (paceCaption != null) {
+            paceCaption.setText(paceTargetSec > 0
+                    ? "PACE /500  \u00b7  TARGET " + PersonalBests.formatPace(paceTargetSec)
+                    : "PACE /500  \u00b7  TAP FOR TARGET");
+        }
+        paceTargetColor = 0;   // recoloured on the next tick
+    }
+
+    /** Colours the pace tile and the speed dial against the target split, once per UI tick. */
+    private void applyPaceTarget() {
+        if (paceValue == null || speedGauge == null) {
+            return;
+        }
+        int color;
+        if (paceTargetSec <= 0) {
+            color = getColorCompat(R.color.primary);
+            speedGauge.setTarget(Float.NaN, color);
+        } else {
+            // Green on or under the target, amber within four seconds, red beyond; neutral until
+            // there is a pace to judge.
+            float diff = shownPace - paceTargetSec;
+            color = shownPace <= 0 ? getColorCompat(R.color.text_primary)
+                    : getColorCompat(diff <= 0.5f ? R.color.primary : diff <= 4f ? R.color.warn : R.color.bad);
+            speedGauge.setTarget(500f / paceTargetSec, shownPace <= 0 ? getColorCompat(R.color.primary) : color);
+        }
+        if (color != paceTargetColor) {
+            paceTargetColor = color;
+            paceValue.setTextColor(color);
+        }
+    }
+
+    /**
+     * A stroke closed by the pulse meter: lays the best-glide ghost from this catch, adds a bar to
+     * the power strip and moves the rhythm dial. The stroke's power is the meter's measured
+     * average when it has one, else the mean of the monitor's readings across the stroke.
+     */
+    private void onGaugeStroke(S4Protocol.Status status) {
+        gaugeWattSum += Math.max(0, status.watts);
+        gaugeWattSamples++;
+        PulseMeter.Stroke stroke = status.meter.lastStroke;
+        if (stroke == null || stroke == lastGaugeStroke) {
+            return;
+        }
+        boolean first = lastGaugeStroke == null;
+        lastGaugeStroke = stroke;
+        float mean = gaugeWattSamples > 0 ? (float) (gaugeWattSum / gaugeWattSamples) : status.watts;
+        gaugeWattSum = 0;
+        gaugeWattSamples = 0;
+        lastCatchMs = System.currentTimeMillis();
+        sparkline.markStroke();
+        if (!first) {
+            float power = !Double.isNaN(stroke.averagePowerW) && stroke.averagePowerW > 0
+                    ? (float) stroke.averagePowerW : mean;
+            powerStrip.addStroke(power);
+        }
+        ratioDial.update(status.meter, status.strokeRatePrecise);
+    }
+
+    /** Tracks the piece being rowed, and brings up the summary card when it ends. */
+    private void trackPiece(S4Protocol.Status status) {
+        if (status.stillRowing) {
+            if (!pieceActive) {
+                pieceActive = true;
+                pieceStartMs = System.currentTimeMillis();
+                pieceStartStrokes = status.strokes;
+                pieceStartWork = status.meter.workJoules;
+                pieceStartKcal = status.meter.kcal();
+                pieceStartDistance = targetDistance;
+                piecePeakWatts = 0;
+                pieceBestPace = 0;
+            }
+            piecePeakWatts = Math.max(piecePeakWatts, status.watts);
+            int pace = status.paceSecondsPer500m;
+            if (pace >= 60 && pace <= 600 && (pieceBestPace == 0 || pace < pieceBestPace)) {
+                pieceBestPace = pace;
+            }
+            if (pieceSummary != null && pieceSummary.isShowing()) {
+                pieceSummary.hide();
+            }
+            return;
+        }
+        if (!pieceActive) {
+            return;
+        }
+        pieceActive = false;
+        int strokes = status.strokes - pieceStartStrokes;
+        float seconds = (System.currentTimeMillis() - pieceStartMs) / 1000f;
+        if (strokes < 10) {
+            return;
+        }
+        // Every real piece counts toward the session best, even one rowed in a game, so a
+        // "SESSION BEST" on the gauges means best of the whole session.
+        boolean newPeak = piecePeakWatts > sessionPeakWatts && sessionPeakWatts > 0;
+        sessionPeakWatts = Math.max(sessionPeakWatts, piecePeakWatts);
+        if (pieceSummary == null || screenHost.getChildCount() == 0
+                || screenHost.getChildAt(0) != instrumentsScreen) {
+            return;
+        }
+        float kj = (float) Math.max(0, (status.meter.workJoules - pieceStartWork) / 1000.0);
+        boolean measured = status.meter.source == PulseMeter.EnergySource.PULSES_CALIBRATED;
+        String kcal = (measured ? "" : "~") + Math.round(Math.max(0, status.meter.kcal() - pieceStartKcal)) + " kcal";
+        int metres = Math.max(0, Math.round(targetDistance - pieceStartDistance));
+        pieceSummary.show(piecePeakWatts, pieceBestPace, kj, kcal,
+                metres + " m  \u00b7  " + PersonalBests.formatTime(seconds) + "  \u00b7  " + strokes + " strokes",
+                newPeak);
     }
 
     /** Diagnostics slides in over the instruments, full height and scrollable. */
@@ -2530,6 +3085,18 @@ public class MainActivity extends Activity
         elapsedValue.setTextSize(38);
         distanceValue = addMetric(top, "DISTANCE", "0 m", false);
         paceValue = addMetric(top, "PACE /500", "--:--", true);
+        View paceCell = (View) paceValue.getParent();
+        paceCaption = (TextView) ((ViewGroup) paceCell).getChildAt(0);
+        paceCell.setClickable(true);
+        paceCell.setOnClickListener(v -> cyclePaceTarget());
+        String savedTarget = personalBests.getString("gauges.target");
+        float target = 0;
+        try {
+            target = savedTarget != null ? Float.parseFloat(savedTarget) : 0;
+        } catch (NumberFormatException ignored) {
+            // an unreadable saved target is simply no target
+        }
+        setPaceTarget(target);
         kcalValue = addMetric(top, "KCAL", "0", false);
         grid.addView(top);
 
@@ -3787,6 +4354,9 @@ public class MainActivity extends Activity
 
             paddleView.setSpeed(onPulses ? shownSpeed : status.waterSpeedMps, driving);
             strokeShapeView.update(status.meter);
+            onGaugeStroke(status);
+            trackPiece(status);
+            shuffleScoreStatus(status);
             PulseMeter.Stroke artStroke = status.meter.lastStroke;
             if (artStroke != null && artStroke != lastArtStroke && sessionStrokes.size() < 4000) {
                 lastArtStroke = artStroke;
@@ -3850,6 +4420,13 @@ public class MainActivity extends Activity
                 shownWatts = ease(shownWatts, targetWatts, 0.18f);
                 shownRate = ease(shownRate, targetRate, 0.18f);
 
+                if (speedGauge != null && sparkline != null) {
+                    boolean rowingNow = lastStatus != null && lastStatus.stillRowing && lastCatchMs > 0;
+                    speedGauge.setGhost(rowingNow
+                            ? sparkline.bestGlideAt((System.currentTimeMillis() - lastCatchMs) / 1000f)
+                            : Float.NaN);
+                    applyPaceTarget();
+                }
                 if (distanceValue != null) {
                     distanceValue.setText(Math.round(shownDistance) + " m");
                     paceValue.setText(formatPace(Math.round(shownPace)));
