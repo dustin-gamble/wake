@@ -40,6 +40,31 @@ import android.view.MotionEvent;
  * horde reaches them first - lose one and the horde stops for them, lose none and deliver them to
  * the next safe house.</li>
  * </ul>
+ *
+ * <p>3.23.0, the five the rower approved next - the run is now a campaign rather than an endless
+ * treadmill:
+ * <ul>
+ * <li><b>Waves that escalate into a final chase.</b> A district is four 500 m waves, each ending at
+ * a safe house; every wave the horde is faster and the brute, the runners and the surges come round
+ * sooner. Clearing the fourth opens the <b>FINAL CHASE</b>: no more safe houses, the horde winding
+ * up to a third faster again over 700 m, with a helicopter at the end of it. Reach the chopper and
+ * the district is cleared and the next one starts, harder.</li>
+ * <li><b>Supply drops that need a sprint.</b> A crate comes down on a parachute ahead of you with a
+ * countdown on it: the distance is set so reaching it in time needs the pace 85% of the way up your
+ * own profile, so it is a genuine sprint, not a jog. Flares, planks or a medkit inside. Miss it and
+ * the horde takes it and surges.</li>
+ * <li><b>Barricades.</b> Every stroke inside a safe house nails up a plank (a hard one puts up two,
+ * and planks from a supply drop go up the moment you arrive). When the rest ends the wall stands
+ * where you left it, and the horde has to smash through it - about 0.7 s a plank - while you row
+ * away. That turns the rest into work with something at stake.</li>
+ * <li><b>The limp.</b> Being caught no longer ends the run the first time: they take a bite, you are
+ * shoved clear, and you run wounded - slower against the horde, with a visible limp and blood on
+ * the road. Only <b>steady</b> rowing inside your own range closes it up; sprinting or stopping
+ * stalls the recovery. Get caught again while still limping and it is over.</li>
+ * <li><b>The district map</b>, kept between sessions as {@code zrun.district}: eight districts, the
+ * cleared ones flagged, the one you are in lit up with your marker crawling along it. Shown before
+ * the first stroke, whenever a district falls, and on the MAP button.</li>
+ * </ul>
  */
 final class ZombieRunGame extends GameView {
 
@@ -62,6 +87,43 @@ final class ZombieRunGame extends GameView {
     private static final double FLARE_FLIGHT = 0.45;
     /** Pb key: most survivors delivered to safe houses in one run. Not "zombie." - that prefix is a pace. */
     static final String SAVED_KEY = "zrun.saved";
+    /** Pb key: districts cleared for good, counted across every session. The map is drawn from it. */
+    static final String DISTRICT_KEY = "zrun.district";
+    /** Pb key: most waves survived in one run. */
+    static final String WAVE_KEY = "zrun.wave";
+
+    /* Waves, the final chase and the districts they belong to. */
+    private static final int WAVES_PER_DISTRICT = 4;
+    private static final double FINAL_METRES = 700;
+    private static final String[] DISTRICTS = {"RIVERSIDE", "OLD TOWN", "THE DOCKS", "MILL ROW",
+            "NORTHGATE", "THE STACKS", "GREENWAY", "HARBOUR END"};
+
+    /* Supply drops. */
+    /** Seconds you get to cover the drop's distance; the distance is set from your own sprint pace. */
+    private static final double DROP_WINDOW = 14.0;
+    private static final int LOOT_FLARES = 0;
+    private static final int LOOT_PLANKS = 1;
+    private static final int LOOT_MEDKIT = 2;
+
+    /* Barricades. */
+    private static final int MAX_PLANKS = 14;
+    private static final double SEC_PER_PLANK = 0.7;
+
+    /* The limp. */
+    private static final double LIMP_RECOVER = 22.0;
+    /**
+     * Ground a full wound costs you, as a fraction of the horde's base speed.
+     *
+     * <p>Deliberately not a fraction of <i>your</i> speed: at the gentlest horde pace (2:25 /500 =
+     * 3.45 m/s) this rower's typical 3.85 m/s leaves a margin of 0.4 m/s, and taking 30% off your own
+     * speed would remove it several times over - a bite would have been an unescapable death spiral
+     * rather than a handicap. Taken off the horde's pace instead it scales with the difficulty chosen
+     * and a harder pull always covers it; the cost is that a harder pull is not steady, so it does
+     * not heal.
+     */
+    private static final double LIMP_COST = 0.08;
+    /** Caught again with the leg this bad and the run is over. */
+    private static final double LIMP_FATAL = 0.30;
 
     /* Figure kinds for drawFigure. */
     private static final int K_YOU = 0;
@@ -97,8 +159,52 @@ final class ZombieRunGame extends GameView {
     private double nextSurgeAt;
     private double surgeUntil;
     private double safeUntil;
-    private int nextSafeHouse = SAFE_EVERY;
+    private double nextSafeHouse = SAFE_EVERY;
     private double creep;
+
+    /* Waves and districts. */
+    private int wave = 1;
+    private int wavesCleared;
+    private double districtStart;
+    private boolean finalChase;
+    private double evacAt;
+    private int districtsCleared;
+    /** World metres of the haven you are resting at, and whether it is the evac rather than a house. */
+    private double havenWorld = -1;
+    private boolean havenIsEvac;
+    private boolean prevSafe;
+    private double clearedAt = -10;
+    private float confettiAccum;
+
+    /* Supply drops. */
+    private boolean dropActive;
+    private double dropAt;
+    private double dropDeadline;
+    private double dropSpawnedAt;
+    private double nextDropAt;
+    private int dropLoot;
+    private int plankStock;
+    private double dropGoneAt = -10;
+    private float dropSmokeAccum;
+
+    /* Barricade: planks nailed up in the safe house, then a wall the horde has to smash. */
+    private int barricadePlanks;
+    private double barricadeWorld = -1;
+    private double barricadeHp;
+    private double barricadeHitAt = -10;
+    private double hammerAt = -10;
+    private boolean wallHolding;
+
+    /* The limp. */
+    private double limp;
+    private int steadyState;   // 0 not rowing / too slow, 1 steady, 2 thrashing
+    private double woundedAt = -10;
+    private float bloodAccum;
+
+    /* District map overlay. */
+    private boolean mapShown;
+    private double mapAutoHideAt;
+    private float mapL, mapT, mapR, mapB;
     private final Fx.Shake shake = new Fx.Shake();
     private final Fx.Particles dust = new Fx.Particles();
     private final Fx.Particles sparks = new Fx.Particles();
@@ -157,6 +263,11 @@ final class ZombieRunGame extends GameView {
     private final float[] eyeY = new float[24];
     private int eyeCount;
 
+    /* Screen x of the crate and the wall, or -1: night mode has to cut light holes for them. */
+    private float nightDropX = -1;
+    private float nightDropY;
+    private float nightWallX = -1;
+
     /* On-canvas buttons (no header chips can be added from here). */
     private float nightL, nightT, nightR, nightB;
     private float flareL, flareT, flareR, flareB;
@@ -181,6 +292,12 @@ final class ZombieRunGame extends GameView {
     private static final String[] LINES_GROUP = {"Faster!!", "They're right behind us!", "Keep pulling!", "Is it much further?"};
     private static final String[] LINES_LOST = {"Got one!", "Yoink!", "One for the road!"};
     private static final String[] LINES_HOME = {"We made it!", "Home sweet safe house", "Bolt the door!"};
+    private static final String[] LINES_WALL = {"Open UP!", "Who built this?!", "It's load-bearing!", "Gary, fetch the axe"};
+    private static final String[] LINES_WALL_DOWN = {"TIMBERRR!", "Door's open!", "We're in!"};
+    private static final String[] LINES_DROP = {"Supplies! GO!", "That crate is ours!", "Sprint for it!"};
+    private static final String[] LINES_WAVE = {"MORE OF US NOW", "Wave two, baby!", "We brought friends"};
+    private static final String[] LINES_FINAL = {"NO MORE HIDING", "LAST ONE TO THE CHOPPER", "ALL OF US. NOW."};
+    private static final String[] LINES_WOUND = {"Tastes like cardio", "Got a bite!", "He's limping now..."};
     private final java.util.Random chatter = new java.util.Random();
     private String bubble = "";
     private int bubbleWho;
@@ -232,6 +349,34 @@ final class ZombieRunGame extends GameView {
         grabbedSeconds = 0;
         nextSafeHouse = SAFE_EVERY;
         creep = 0;
+        // The map is the one thing here that outlives a session.
+        districtsCleared = Math.max(0, Math.round(bests.get(DISTRICT_KEY, 0)));
+        wave = 1;
+        wavesCleared = 0;
+        districtStart = 0;
+        finalChase = false;
+        evacAt = 0;
+        havenWorld = -1;
+        havenIsEvac = false;
+        prevSafe = false;
+        clearedAt = -10;
+        dropActive = false;
+        nextDropAt = 35;
+        dropLoot = LOOT_FLARES;
+        plankStock = 0;
+        dropGoneAt = -10;
+        barricadePlanks = 0;
+        barricadeWorld = -1;
+        barricadeHp = 0;
+        barricadeHitAt = -10;
+        hammerAt = -10;
+        wallHolding = false;
+        limp = 0;
+        steadyState = 0;
+        woundedAt = -10;
+        bloodAccum = 0;
+        mapShown = true;
+        mapAutoHideAt = 0;
         surgeUntil = 0;
         safeUntil = 0;
         bubbleUntil = 0;
@@ -385,6 +530,7 @@ final class ZombieRunGame extends GameView {
     protected void onStatusChanged(S4Protocol.Status s) {
         if (phase == Phase.READY && driving && boat.value() > 0.3f) {
             phase = Phase.RUNNING;
+            mapShown = false;
             runStartMeters = sessionMeters;
             runStartSeconds = sessionSeconds;
             nextSurgeAt = sessionSeconds + 40;
@@ -425,7 +571,19 @@ final class ZombieRunGame extends GameView {
     }
 
     private void judgeStroke(double watts) {
-        if (phase != Phase.RUNNING || watts < hardWatts()) {
+        if (phase != Phase.RUNNING) {
+            return;
+        }
+        boolean hard = watts >= hardWatts();
+        // Inside a safe house every stroke is a plank on the door; a hard one is two.
+        if (safe() && barricadePlanks < MAX_PLANKS) {
+            barricadePlanks = Math.min(MAX_PLANKS, barricadePlanks + (hard ? 2 : 1));
+            hammerAt = sessionSeconds;
+            if (barricadePlanks >= MAX_PLANKS) {
+                pop("WALL FULL - " + MAX_PLANKS + " PLANKS", ACCENT);
+            }
+        }
+        if (!hard) {
             return;
         }
         hardStrokeAt = sessionSeconds;
@@ -470,7 +628,7 @@ final class ZombieRunGame extends GameView {
         }
         if (bruteState == 1 || bruteState == 2) {
             bruteState = 3;
-            nextBruteAt = sessionSeconds + 35 + chatter.nextDouble() * 20;
+            nextBruteAt = sessionSeconds + (35 + chatter.nextDouble() * 20) * spawnScale();
         }
     }
 
@@ -479,6 +637,17 @@ final class ZombieRunGame extends GameView {
         if (e.getAction() == MotionEvent.ACTION_DOWN) {
             float x = e.getX();
             float y = e.getY();
+            if (x >= mapL && x <= mapR && y >= mapT && y <= mapB) {
+                mapShown = !mapShown;
+                mapAutoHideAt = 0;
+                return true;
+            }
+            if (mapShown) {
+                // The map is a full panel: anywhere else puts it away rather than firing a flare.
+                mapShown = false;
+                mapAutoHideAt = 0;
+                return true;
+            }
             if (x >= nightL && x <= nightR && y >= nightT && y <= nightB) {
                 night = !night;
                 return true;
@@ -515,13 +684,58 @@ final class ZombieRunGame extends GameView {
         return sessionSeconds < stunUntil;
     }
 
-    /** Horde speed: base pace, +1.5% per minute, +30% in a surge, stunned by a flare, stopped at a safe house. */
+    /**
+     * Horde speed: base pace, +0.5% per minute of creep, the wave and district escalation, the final
+     * chase's ramp, +30% in a surge, stunned by a flare, stopped at a safe house.
+     */
     private float hordeSpeed() {
         if (safe()) {
             return 0f;
         }
         float base = 500f / hordePaceSec;
-        return base * (float) (1 + creep) * (surging() ? 1.3f : 1f) * (stunned() ? 0.4f : 1f);
+        return base * (float) (1 + creep) * (float) waveMul()
+                * (surging() ? 1.3f : 1f) * (stunned() ? 0.4f : 1f);
+    }
+
+    /** What the wave, the districts already cleared and the final chase add to the horde's speed. */
+    private double waveMul() {
+        double m = 1 + 0.05 * (wave - 1) + Math.min(0.24, 0.08 * districtsCleared);
+        if (finalChase) {
+            m *= 1 + 0.20 * finalProgress();
+        }
+        return m;
+    }
+
+    /** 0 at the start of the final chase, 1 at the chopper. */
+    private double finalProgress() {
+        if (!finalChase) {
+            return 0;
+        }
+        double from = districtStart + WAVES_PER_DISTRICT * SAFE_EVERY;
+        return Math.max(0, Math.min(1, (runMeters() - from) / FINAL_METRES));
+    }
+
+    /** How much sooner the brute, the runners and the surges come round as the waves stack up. */
+    private double spawnScale() {
+        double s = 1 - 0.12 * (wave - 1) - Math.min(0.18, 0.06 * districtsCleared);
+        if (finalChase) {
+            s *= 0.55;
+        }
+        return Math.max(0.35, s);
+    }
+
+    /** Your speed as the chase sees it: the wound costs you ground against the horde's own pace. */
+    private float chaseSpeed(float speed) {
+        return Math.max(0f, speed - (float) (LIMP_COST * limp * (500.0 / hordePaceSec)));
+    }
+
+    /** True while nothing can break out of the pack: resting in a safe house, or stuck at a wall. */
+    private boolean held() {
+        return safe() || wallHolding;
+    }
+
+    private String districtName() {
+        return districtName(0);
     }
 
     /** How far the brute or a runner has broken out ahead of the pack, metres. */
@@ -552,23 +766,23 @@ final class ZombieRunGame extends GameView {
     private void stepSpecials(float dt, float hs) {
         double t = sessionSeconds;
         // Brute.
-        if (bruteState == 0 && !safe() && t >= nextBruteAt) {
+        if (bruteState == 0 && !held() && t >= nextBruteAt) {
             bruteState = 1;
-            bruteUntil = t + 2.5;
+            bruteUntil = t + 1.4 + 1.1 * spawnScale();
             say(LINES_BRUTE, WHO_BRUTE);
         } else if (bruteState == 1) {
             shake.kick(dp(2f));
-            if (safe()) {
+            if (held()) {
                 bruteState = 3;
             } else if (t >= bruteUntil) {
                 bruteState = 2;
                 bruteUntil = t + 4;
                 // A charge that closes further the further ahead you are, so a banked lead still has to be defended.
-                bruteBoost = 2.4 + gap * 0.02;
+                bruteBoost = (2.4 + gap * 0.02) * waveMul();
             }
         } else if (bruteState == 2) {
             bruteLead += bruteBoost * dt;
-            if (t >= bruteUntil || safe()) {
+            if (t >= bruteUntil || held()) {
                 bruteState = 3;
             }
         } else if (bruteState == 3) {
@@ -577,28 +791,28 @@ final class ZombieRunGame extends GameView {
                 bruteLead = 0;
                 bruteState = 0;
                 if (nextBruteAt <= t) {
-                    nextBruteAt = t + 35 + chatter.nextDouble() * 20;
+                    nextBruteAt = t + (35 + chatter.nextDouble() * 20) * spawnScale();
                 }
             }
         }
         // Runners.
-        if (!safe() && t >= nextRunnerAt) {
+        if (!held() && t >= nextRunnerAt) {
             for (int i = 0; i < RUNNER_SLOTS; i++) {
                 if (runState[i] == 0) {
                     runState[i] = 1;
                     runLead[i] = 0;
                     runUntil[i] = t + 9;
-                    runBoost[i] = 1.6 + gap * 0.03;
+                    runBoost[i] = (1.6 + gap * 0.03) * waveMul();
                     say(LINES_RUNNER, WHO_RUNNER + i);
                     break;
                 }
             }
-            nextRunnerAt = t + 30 + chatter.nextDouble() * 15;
+            nextRunnerAt = t + (30 + chatter.nextDouble() * 15) * spawnScale();
         }
         for (int i = 0; i < RUNNER_SLOTS; i++) {
             if (runState[i] == 1) {
                 runLead[i] += runBoost[i] * dt;
-                if (t >= runUntil[i] || safe()) {
+                if (t >= runUntil[i] || held()) {
                     runState[i] = 2;
                     if (bubbleUntil < t) {
                         say(LINES_TIRED, WHO_RUNNER + i);
@@ -628,7 +842,7 @@ final class ZombieRunGame extends GameView {
             bruteLead = limit;
             if (bruteState == 1 || bruteState == 2) {
                 bruteState = 3;
-                nextBruteAt = sessionSeconds + 35 + chatter.nextDouble() * 20;
+                nextBruteAt = sessionSeconds + (35 + chatter.nextDouble() * 20) * spawnScale();
             }
         }
         for (int i = 0; i < RUNNER_SLOTS; i++) {
@@ -654,22 +868,199 @@ final class ZombieRunGame extends GameView {
     }
 
     private boolean lostFxPending;
+    private boolean woundFxPending;
 
     private void reachSafeHouse() {
         safeUntil = sessionSeconds + SAFE_SECONDS;
+        havenWorld = nextSafeHouse;
+        havenIsEvac = false;
         nextSafeHouse += SAFE_EVERY;
         boolean restock = flares < MAX_FLARES;
         if (restock) {
             flares++;
         }
-        if (groupCount > 0) {
-            savedThisRun += groupCount;
-            bests.recordHighest(SAVED_KEY, savedThisRun);
-            pop("+" + groupCount + " SAVED" + (restock ? "  ·  +1 FLARE" : ""), ACCENT);
-            say(LINES_HOME, WHO_GROUP);
-            groupCount = 0;
-        } else if (restock) {
-            pop("SAFE HOUSE  ·  +1 FLARE", ACCENT);
+        // Planks carried from a supply drop go up the moment you get through the door.
+        barricadePlanks = Math.min(MAX_PLANKS, plankStock);
+        plankStock = 0;
+        wavesCleared++;
+        bests.recordHighest(WAVE_KEY, wavesCleared);
+        deliverSurvivors();
+        wave++;
+        if (wave > WAVES_PER_DISTRICT) {
+            // The last house of the district: the rest you get is the calm before the final chase.
+            finalChase = true;
+            evacAt = districtStart + WAVES_PER_DISTRICT * SAFE_EVERY + FINAL_METRES;
+            // Every flare they can carry: modelled out, a typical row reaches the chopper only by
+            // spending them, so sending you into the last 700 m empty-handed would settle it early.
+            flares = MAX_FLARES;
+            chargePips = 0;
+            pop("WAVE " + WAVES_PER_DISTRICT + " CLEARED  ·  FINAL CHASE  ·  FLARES FULL", 0xFFFF7A4D);
+            say(LINES_FINAL, WHO_BRUTE);
+        } else {
+            pop("WAVE " + (wave - 1) + " CLEARED  ·  BUILD THE WALL", ACCENT);
+            say(LINES_WAVE, chatter.nextInt(WALKERS));
+        }
+    }
+
+    /** Hands the group over at a haven and banks the record. */
+    private void deliverSurvivors() {
+        if (groupCount <= 0) {
+            return;
+        }
+        savedThisRun += groupCount;
+        bests.recordHighest(SAVED_KEY, savedThisRun);
+        pop("+" + groupCount + " SAVED", 0xFF8FB4FF);
+        say(LINES_HOME, WHO_GROUP);
+        groupCount = 0;
+    }
+
+    /** The chopper at the end of the final chase: the district falls and the next one starts. */
+    private void clearDistrict() {
+        deliverSurvivors();
+        districtsCleared++;
+        bests.recordHighest(DISTRICT_KEY, districtsCleared);
+        clearedAt = sessionSeconds;
+        pop(districtName(-1) + " CLEARED", ACCENT);
+        flares = MAX_FLARES;
+        limp = 0;                       // patched up on board before they drop you at the next one
+        gap = Math.min(MAX_GAP, gap + 50);
+        safeUntil = sessionSeconds + SAFE_SECONDS;
+        havenWorld = evacAt;
+        havenIsEvac = true;
+        barricadeWorld = -1;
+        barricadeHp = 0;
+        barricadePlanks = Math.min(MAX_PLANKS, plankStock);
+        plankStock = 0;
+        finalChase = false;
+        wave = 1;
+        districtStart = runMeters();
+        nextSafeHouse = districtStart + SAFE_EVERY;
+        evacAt = 0;
+        scatterSpecials();
+        stunUntil = Math.max(stunUntil, sessionSeconds + 3);
+        shake.kick(dp(12f));
+        mapShown = true;
+        // Short: the rest is also when the next district's wall goes up, and the map covers it.
+        mapAutoHideAt = sessionSeconds + 4.0;
+    }
+
+    /** Offset, because a clear has already advanced the count by the time the banner is written. */
+    private String districtName(int offset) {
+        int i = districtsCleared + offset;
+        return DISTRICTS[((i % DISTRICTS.length) + DISTRICTS.length) % DISTRICTS.length];
+    }
+
+    /* ---------- supply drops ---------- */
+
+    /**
+     * Puts a crate down far enough ahead that reaching it inside {@link #DROP_WINDOW} needs the pace
+     * 85% of the way up the rower's own profile - a sprint for this rower, whoever they are.
+     */
+    private void spawnDrop() {
+        double need = profile.speedAt(0.85);
+        dropAt = runMeters() + need * DROP_WINDOW;
+        dropDeadline = sessionSeconds + DROP_WINDOW;
+        dropSpawnedAt = sessionSeconds;
+        dropActive = true;
+        dropLoot = (dropLoot + 1) % 3;
+        if (limp > 0.2) {
+            dropLoot = LOOT_MEDKIT;     // a wounded leg makes the medkit the one worth sprinting for
+        }
+        pop("SUPPLY DROP  ·  SPRINT " + Math.round(need * DROP_WINDOW) + " m", WARN);
+        say(LINES_DROP, WHO_GROUP);
+    }
+
+    /** Schedules a crate, and settles the one in the air: reached in time, or gone. */
+    private void stepDrop() {
+        if (!dropActive) {
+            if (!safe() && !wallHolding && sessionSeconds >= nextDropAt) {
+                spawnDrop();
+            }
+            return;
+        }
+        if (runMeters() >= dropAt) {
+            collectDrop();
+        } else if (sessionSeconds > dropDeadline) {
+            missDrop();
+        }
+    }
+
+    private void collectDrop() {
+        dropActive = false;
+        nextDropAt = sessionSeconds + 50 + chatter.nextDouble() * 25;
+        switch (dropLoot) {
+            case LOOT_PLANKS:
+                plankStock += 6;
+                pop("+6 PLANKS FOR THE WALL", 0xFFD6A46A);
+                break;
+            case LOOT_MEDKIT:
+                if (limp > 0) {
+                    limp = 0;
+                    pop("MEDKIT  ·  LEG PATCHED UP", ACCENT);
+                } else {
+                    flares = Math.min(MAX_FLARES, flares + 1);
+                    plankStock += 3;
+                    pop("MEDKIT  ·  +1 FLARE, +3 PLANKS", ACCENT);
+                }
+                break;
+            default:
+                flares = Math.min(MAX_FLARES, flares + 2);
+                pop("+2 FLARES", 0xFFFF7A4D);
+                break;
+        }
+        shake.kick(dp(5f));
+    }
+
+    private void missDrop() {
+        dropActive = false;
+        dropGoneAt = sessionSeconds;
+        nextDropAt = sessionSeconds + 45 + chatter.nextDouble() * 20;
+        // They get it instead, and it puts a spring in their step.
+        surgeUntil = Math.max(surgeUntil, sessionSeconds + 6);
+        pop("DROP LOST - THEY HAVE IT", BAD);
+    }
+
+    /* ---------- the limp ---------- */
+
+    /** Caught, but not finished: a bite, a shove clear, and a leg that no longer works properly. */
+    private void wound() {
+        limp = 1;
+        woundedAt = sessionSeconds;
+        grabbedSeconds = 0;
+        gap = Math.max(gap, 20);
+        pushLeft += 8;
+        stunUntil = Math.max(stunUntil, sessionSeconds + 2.0);
+        scatterSpecials();
+        // Whoever had hold of you is back in the pack: without this the runner that bit you is
+        // still 20 m out in front, and the next grab - fatal now - lands on the very next frame.
+        shoveSpecialsBack(0);
+        shake.kick(dp(16f));
+        pop("BITTEN - ROW STEADY TO RECOVER", BAD);
+        say(LINES_WOUND, chatter.nextInt(WALKERS));
+    }
+
+    /**
+     * Steady rowing closes the wound; sprinting or stopping does not. "Steady" is read off the
+     * rower's own profile, not a constant: inside their low-to-high speed band and near their rate.
+     */
+    private void stepLimp(float dt, float speed) {
+        if (limp <= 0) {
+            steadyState = 0;
+            return;
+        }
+        double rateNow = status != null ? status.strokeRate : 0;
+        boolean movingRight = speed >= profile.lowSpeed() && speed <= profile.highSpeed() * 1.06;
+        boolean ratedRight = rateNow >= profile.typicalRate() - 5 && rateNow <= profile.typicalRate() + 6;
+        if (speed > profile.highSpeed() * 1.06) {
+            steadyState = 2;            // thrashing: the leg does not get a chance
+        } else if (movingRight && ratedRight) {
+            steadyState = 1;
+            limp = Math.max(0, limp - dt / LIMP_RECOVER);
+            if (limp == 0) {
+                pop("LEG HOLDING AGAIN", ACCENT);
+            }
+        } else {
+            steadyState = 0;
         }
     }
 
@@ -697,24 +1088,70 @@ final class ZombieRunGame extends GameView {
         }
         float speed = boat.value();
 
+        // Wounded, you run slower against the horde than the boat says. This is the speed the chase
+        // is settled on; the vitals strip above still shows the true one.
+        float chaseSpeed = chaseSpeed(speed);
+
         if (phase == Phase.RUNNING) {
-            creep = (sessionSeconds - runStartSeconds) / 60.0 * 0.015;
+            // 0.5%/min, down from 1.5%: the waves now carry the escalation the creep used to carry
+            // on its own, and stacked on top of them the horde passed this rower's p90 speed by
+            // wave 3 and no district could be finished. Modelled against the measured envelope, a
+            // typical row now reaches the chopper on banked flares and a p90 row reaches it clear.
+            creep = (sessionSeconds - runStartSeconds) / 60.0 * 0.005;
             if (!surging() && !safe() && sessionSeconds >= nextSurgeAt) {
                 surgeUntil = sessionSeconds + 10;
-                nextSurgeAt = sessionSeconds + 45 + Math.random() * 30;
+                nextSurgeAt = sessionSeconds + (45 + Math.random() * 30) * spawnScale();
             }
-            if (runMeters() >= nextSafeHouse) {
+            if (!finalChase && runMeters() >= nextSafeHouse) {
                 reachSafeHouse();
+            }
+            if (finalChase && runMeters() >= evacAt) {
+                clearDistrict();
             }
             if (runMeters() >= survivorAt) {
                 reachSurvivor(threat());
             }
+            stepDrop();
+            stepLimp(dt, speed);
+            // The wall goes up when the rest ends, where the safe house was.
+            boolean safeNow = safe();
+            if (prevSafe && !safeNow && barricadePlanks > 0 && havenWorld >= 0) {
+                barricadeWorld = havenWorld;
+                barricadeHp = barricadePlanks;
+                pop("BARRICADE UP  ·  " + barricadePlanks + " PLANKS", 0xFFD6A46A);
+                barricadePlanks = 0;
+            }
+            prevSafe = safeNow;
+
             float hs = hordeSpeed();
-            gap += (speed - hs) * dt;
+            gap += (chaseSpeed - hs) * dt;
             if (pushLeft > 0) {
                 double d = Math.min(pushLeft, 14.0 * dt);
                 gap += d;
                 pushLeft -= d;
+            }
+            // A standing barricade pins the pack where it is: they cannot pass until it is smashed.
+            wallHolding = false;
+            if (barricadeHp > 0 && barricadeWorld >= 0) {
+                if (runMeters() - gap > barricadeWorld) {
+                    wallHolding = true;
+                    gap = runMeters() - barricadeWorld;
+                    barricadeHp -= dt / SEC_PER_PLANK;
+                    if (sessionSeconds - barricadeHitAt > 0.25) {
+                        barricadeHitAt = sessionSeconds;
+                        shake.kick(dp(3f));
+                        if (bubbleUntil < sessionSeconds) {
+                            say(LINES_WALL, chatter.nextInt(WALKERS));
+                        }
+                    }
+                    if (barricadeHp <= 0) {
+                        barricadeHp = 0;
+                        wallHolding = false;
+                        pop("BARRICADE DOWN - RUN", BAD);
+                        say(LINES_WALL_DOWN, chatter.nextInt(WALKERS));
+                        shake.kick(dp(10f));
+                    }
+                }
             }
             gap = Math.max(0, Math.min(MAX_GAP, gap));
             stepSpecials(dt, hs);
@@ -726,7 +1163,7 @@ final class ZombieRunGame extends GameView {
             } else if (threat <= 0) {
                 // Grabbed, not gone. Out-row them and you break the grip; only staying slower than
                 // the horde finishes it.
-                if (speed > hs) {
+                if (chaseSpeed > hs) {
                     grabbedSeconds = Math.max(0, grabbedSeconds - dt * 2.5);
                     // A shove of daylight, so the escape reads on screen. The zombie holding you is
                     // shoved back - moving the whole pack instead (gap = lead + 2) handed you +2 m of
@@ -743,15 +1180,42 @@ final class ZombieRunGame extends GameView {
                     fireFlare();
                 }
                 if (grabbedSeconds >= GRAB_LIMIT) {
-                    phase = Phase.CAUGHT;
-                    bests.recordHighest("zombie." + Math.round(hordePaceSec), (float) runMeters());
-                    if (savedThisRun > 0) {
-                        bests.recordHighest(SAVED_KEY, savedThisRun);
+                    if (limp <= LIMP_FATAL) {
+                        // First bite: they take a piece and you are shoved clear, limping.
+                        wound();
+                        woundFxPending = true;
+                    } else {
+                        phase = Phase.CAUGHT;
+                        bests.recordHighest("zombie." + Math.round(hordePaceSec), (float) runMeters());
+                        if (savedThisRun > 0) {
+                            bests.recordHighest(SAVED_KEY, savedThisRun);
+                        }
+                        if (wavesCleared > 0) {
+                            bests.recordHighest(WAVE_KEY, wavesCleared);
+                        }
                     }
                 }
             } else {
                 grabbedSeconds = 0;
             }
+        }
+        // A district falling gets its own moment: confetti off the top of the screen for a second
+        // and a half, over the map that has just lit another node.
+        double sinceClear = sessionSeconds - clearedAt;
+        if (sinceClear >= 0 && sinceClear < 1.5) {
+            // Rate-limited rather than per-frame: the pool holds 240 and the flare needs its share.
+            confettiAccum += dt * 40f;
+            while (confettiAccum >= 1f) {
+                confettiAccum -= 1f;
+                int k = (int) (Math.random() * 3);
+                sparks.spawn((float) Math.random() * w, -dp(10f), (float) (Math.random() - 0.5) * dp(60f),
+                        dp(60f) + (float) Math.random() * dp(90f), 1.6f, dp(3f),
+                        k == 0 ? 0xFF35D0BA : k == 1 ? 0xFFFFD27A : 0xFF8FB4FF, true);
+            }
+        }
+        if (mapShown && mapAutoHideAt > 0 && sessionSeconds > mapAutoHideAt) {
+            mapShown = false;
+            mapAutoHideAt = 0;
         }
         double threat = threat();
         boolean surgeStarting = surging() && phase == Phase.RUNNING && !wasSurging;
@@ -900,19 +1364,63 @@ final class ZombieRunGame extends GameView {
         spkX = youX;
         spkY = groundY - 46f * FIGURE_SCALE * dp(1f);
 
-        // Safe house ahead, if one is in view.
-        float houseX = youX + (float) (nextSafeHouse - runMeters()) * ppm;
-        boolean houseVisible = phase == Phase.RUNNING && houseX < w + dp(60f);
-        if (safe() && phase == Phase.RUNNING) {
-            // Just reached: the house you are standing at, not the next one 500 m on.
-            houseX = youX + (float) (nextSafeHouse - SAFE_EVERY - runMeters()) * ppm;
-            houseVisible = houseX > -dp(60f);
+        // The haven: the safe house you are resting at, the next one up the road, or - in the final
+        // chase - the helicopter waiting at the end of it.
+        float houseX = -1e6f;
+        boolean houseVisible = false;
+        boolean chopperShown = false;
+        if (phase == Phase.RUNNING) {
+            if (safe() && havenWorld >= 0) {
+                houseX = youX + (float) (havenWorld - runMeters()) * ppm;
+                houseVisible = houseX > -dp(80f);
+                chopperShown = havenIsEvac;
+            } else if (finalChase) {
+                houseX = youX + (float) (evacAt - runMeters()) * ppm;
+                houseVisible = houseX < w + dp(80f);
+                chopperShown = true;
+            } else {
+                houseX = youX + (float) (nextSafeHouse - runMeters()) * ppm;
+                houseVisible = houseX < w + dp(60f);
+            }
         }
         if (houseVisible) {
-            drawSafeHouse(c, houseX, groundY, dt);
+            if (chopperShown) {
+                drawChopper(c, houseX, groundY, dt);
+            } else {
+                drawSafeHouse(c, houseX, groundY, dt);
+            }
         }
         smoke.step(dt, -dp(4f));
         smoke.draw(c);
+
+        // The barricade, standing or being smashed, where you nailed it up.
+        nightWallX = -1;
+        if (barricadeWorld >= 0 && phase == Phase.RUNNING) {
+            float bxw = youX + (float) (barricadeWorld - runMeters()) * ppm;
+            if (bxw > -dp(120f) && bxw < w + dp(120f)) {
+                nightWallX = bxw;
+                drawBarricade(c, bxw, groundY, (float) barricadeHp);
+            } else if (bxw <= -dp(120f) && barricadeHp <= 0) {
+                barricadeWorld = -1;
+            }
+        }
+        // While the rest lasts, the wall you are nailing up rises at the house itself.
+        if (safe() && barricadePlanks > 0 && houseVisible && !chopperShown) {
+            drawBarricade(c, houseX + dp(40f), groundY, barricadePlanks);
+        }
+
+        // The supply crate: parachuting in, then sitting on its beacon with the clock running.
+        float dropX = youX + (float) (dropAt - runMeters()) * ppm;
+        nightDropX = dropActive && dropX < w + dp(60f) && dropX > -dp(60f) ? dropX : -1;
+        if (dropActive) {
+            drawDrop(c, dropX, groundY, h, dt);
+            if (dropX > w - dp(46f)) {
+                drawDropMarker(c, w, groundY);
+            }
+        } else if (sessionSeconds - dropGoneAt < 1.2) {
+            float k = (float) ((sessionSeconds - dropGoneAt) / 1.2);
+            Fx.glow(c, dropX, groundY - dp(24f), dp(70f), (((int) (120 * (1 - k))) << 24) | 0xFF3A2A);
+        }
 
         // A survivor waiting on a wrecked car ahead.
         float survX = youX + (float) (survivorAt - runMeters()) * ppm;
@@ -922,7 +1430,8 @@ final class ZombieRunGame extends GameView {
         }
 
         // You, running, with a glow and dust off your heels.
-        Fx.glow(c, youX, groundY - dp(20f), dp(48f), 0x4035D0BA);
+        // blend() forces opaque, so the wounded glow is picked rather than mixed.
+        Fx.glow(c, youX, groundY - dp(20f), dp(48f), limp > 0.15 ? 0x50FF4A4A : 0x4035D0BA);
         if (speed > 0.5f && phase == Phase.RUNNING) {
             dustAccum += dt * speed * 6f;
             while (dustAccum >= 1f) {
@@ -930,6 +1439,19 @@ final class ZombieRunGame extends GameView {
                 dust.spawn(youX - dp(6f), groundY, -dp(30f) - (float) Math.random() * dp(40f),
                         -dp(10f) - (float) Math.random() * dp(30f), 0.5f, dp(2.5f), 0xAA6B5A3A, true);
             }
+            // A wounded leg leaves a trail on the road behind you.
+            if (limp > 0.05) {
+                bloodAccum += dt * (float) limp * 3.5f;
+                while (bloodAccum >= 1f) {
+                    bloodAccum -= 1f;
+                    dust.spawn(youX + dp(4f), groundY - dp(10f), -dp(10f), dp(30f), 1.4f, dp(2.2f),
+                            0xCC8E1B2A, true);
+                }
+            }
+        }
+        if (woundFxPending) {
+            woundFxPending = false;
+            sparks.burst(youX, groundY - dp(30f), 34, dp(150f), 0.9f, dp(3f), 0xFFB3122E, true);
         }
         dust.draw(c);
         if (!night) {
@@ -951,6 +1473,20 @@ final class ZombieRunGame extends GameView {
             sparks.burst(lx, groundY - dp(40f), 30, dp(140f), 0.8f, dp(3f), 0xFF8FB4FF, true);
         }
         drawFigure(c, youX, groundY, ACCENT, speed, (float) (scroll * 3.0), K_YOU, false);
+        // In a safe house the stroke is a hammer blow: the mallet swings on every plank you nail up.
+        if (safe() && phase == Phase.RUNNING) {
+            double sinceHit = sessionSeconds - hammerAt;
+            float swing = sinceHit < 0.35 ? (float) (1 - sinceHit / 0.35) : 0f;
+            float hy = groundY - dp(120f) - swing * dp(26f);
+            paint.setColor(0xFF6B5636);
+            paint.setStrokeWidth(dp(4f));
+            c.drawLine(youX + dp(16f), groundY - dp(96f), youX + dp(34f), hy, paint);
+            paint.setColor(0xFF9AA4B4);
+            c.drawRect(youX + dp(26f), hy - dp(6f), youX + dp(46f), hy + dp(6f), paint);
+            if (sinceHit < 0.12) {
+                sparks.spawn(youX + dp(36f), hy, dp(50f), -dp(30f), 0.4f, dp(2f), 0xFFE8D6A0, true);
+            }
+        }
 
         // The horde: walkers, then the brute, then any runners out in front.
         float hs = hordeSpeed();
@@ -1058,6 +1594,22 @@ final class ZombieRunGame extends GameView {
             c.drawRect(0, 0, w, h, paint);
             paint.setAlpha(255);
         }
+        // The bite: a red flush and a wound-coloured frame that lingers while the leg is bad.
+        double sinceWound = sessionSeconds - woundedAt;
+        if (sinceWound >= 0 && sinceWound < 0.7) {
+            paint.setColor(0xFFB3122E);
+            paint.setAlpha((int) (150 * (1 - sinceWound / 0.7)));
+            c.drawRect(0, 0, w, h, paint);
+            paint.setAlpha(255);
+        }
+        if (limp > 0) {
+            float edge = dp(10f) * (float) limp * (0.8f + 0.2f * (float) Math.sin(sessionSeconds * 3));
+            paint.setColor(0xFF8E1B2A);
+            paint.setAlpha((int) (110 * limp));
+            c.drawRect(0, 0, w, edge, paint);
+            c.drawRect(0, h - edge, w, h, paint);
+            paint.setAlpha(255);
+        }
         if (sessionSeconds < popupUntil) {
             float rise = (float) (2.0 - (popupUntil - sessionSeconds)) * dp(30f);
             bold(c, popup, w * 0.62f, h * 0.45f - rise, 26f, popupColour, Paint.Align.CENTER);
@@ -1080,7 +1632,7 @@ final class ZombieRunGame extends GameView {
             big = "EATEN";
             col = BAD;
         } else if (grabbedSeconds > 0) {
-            big = "GRABBED - PULL!";
+            big = limp > LIMP_FATAL ? "GRABBED - LAST CHANCE!" : "GRABBED - PULL!";
             col = BAD;
         } else {
             big = Math.round(threat) + " m";
@@ -1093,10 +1645,25 @@ final class ZombieRunGame extends GameView {
         if (phase == Phase.READY) {
             cap = "horde runs " + PersonalBests.formatPace(hordePaceSec) + " /500 - take a stroke";
         } else if (phase == Phase.CAUGHT) {
-            cap = "survived " + Math.round(runMeters()) + " m  ·  saved " + savedThisRun + "  ·  tap to run again";
+            cap = "survived " + Math.round(runMeters()) + " m  ·  " + wavesCleared + " waves  ·  saved "
+                    + savedThisRun + "  ·  tap to run again";
         } else if (safe()) {
-            cap = "SAFE HOUSE - they fall back for " + Math.round(safeUntil - sessionSeconds) + "s";
+            cap = (havenIsEvac ? "DROPPED AT " + districtName() + " - " : "SAFE HOUSE - ")
+                    + "PULL TO NAIL UP PLANKS  ·  "
+                    + barricadePlanks + "/" + MAX_PLANKS + "  ·  " + Math.round(safeUntil - sessionSeconds) + "s";
             capCol = ACCENT;
+        } else if (dropActive) {
+            cap = "SUPPLY DROP - " + Math.max(0, Math.round(dropAt - runMeters())) + " m in "
+                    + tenths(dropDeadline - sessionSeconds) + "s - SPRINT";
+            capCol = WARN;
+        } else if (wallHolding) {
+            cap = "THE WALL IS HOLDING - GO! " + PersonalBests.formatTime((float) (barricadeHp * SEC_PER_PLANK));
+            capCol = 0xFFD6A46A;
+        } else if (limp > 0) {
+            cap = steadyState == 1 ? "STEADY - THE LEG IS COMING BACK"
+                    : steadyState == 2 ? "TOO FAST TO HEAL - SETTLE INTO YOUR RHYTHM"
+                    : "WOUNDED - FIND A STEADY RHYTHM TO RECOVER";
+            capCol = steadyState == 1 ? ACCENT : BAD;
         } else if (grabbedSeconds > 0) {
             cap = "out-row them to break free - " + Math.round(GRAB_LIMIT - grabbedSeconds) + "s";
             capCol = BAD;
@@ -1112,6 +1679,12 @@ final class ZombieRunGame extends GameView {
         } else if (surging()) {
             cap = "THEY'RE SURGING - " + Math.round(surgeUntil - sessionSeconds) + "s";
             capCol = BAD;
+        } else if (finalChase) {
+            // Above the survivor line and "something's stirring": in the final chase the surges come
+            // round on spawnScale (~0.35), so the stirring line would have masked the one number
+            // that matters here for three seconds in every twenty.
+            cap = "FINAL CHASE - CHOPPER IN " + Math.max(0, Math.round(evacAt - runMeters())) + " m";
+            capCol = 0xFFFF7A4D;
         } else if (sessionSeconds > nextSurgeAt - 3) {
             cap = "SOMETHING'S STIRRING...";
         } else if (toSurvivor < 90) {
@@ -1123,45 +1696,96 @@ final class ZombieRunGame extends GameView {
         }
         bold(c, cap, w / 2f, h * 0.17f + dp(22f), 11f, capCol, Paint.Align.CENTER);
 
-        // Route bar to the next safe house, with the survivor on it.
+        // Route bar: to the next safe house, or - in the final chase - to the chopper, with the
+        // survivor waiting on it and the wave pips above.
         if (phase == Phase.RUNNING) {
             float bw = w * 0.30f;
             float bx = w / 2f - bw / 2f;
             float by = h * 0.17f + dp(36f);
-            double segStart = nextSafeHouse - SAFE_EVERY;
-            float f = (float) Math.max(0, Math.min(1, (runMeters() - segStart) / SAFE_EVERY));
+            double segStart = finalChase ? districtStart + WAVES_PER_DISTRICT * SAFE_EVERY
+                    : nextSafeHouse - SAFE_EVERY;
+            double segLen = finalChase ? FINAL_METRES : SAFE_EVERY;
+            float f = (float) Math.max(0, Math.min(1, (runMeters() - segStart) / segLen));
             paint.setColor(0x33FFFFFF);
             c.drawRoundRect(bx, by, bx + bw, by + dp(5f), dp(3f), dp(3f), paint);
-            paint.setColor(ACCENT);
+            paint.setColor(finalChase ? 0xFFFF7A4D : ACCENT);
             c.drawRoundRect(bx, by, bx + bw * f, by + dp(5f), dp(3f), dp(3f), paint);
-            if (survivorAt < nextSafeHouse) {
-                float sf = (float) ((survivorAt - segStart) / SAFE_EVERY);
+            if (survivorAt > segStart && survivorAt < segStart + segLen) {
+                float sf = (float) ((survivorAt - segStart) / segLen);
                 paint.setColor(0xFF8FB4FF);
                 c.drawCircle(bx + bw * sf, by + dp(2.5f), dp(5f), paint);
             }
-            paint.setColor(0xFFFFD27A);
+            if (dropActive && dropAt > segStart && dropAt < segStart + segLen) {
+                float df = (float) ((dropAt - segStart) / segLen);
+                paint.setColor(WARN);
+                c.drawRect(bx + bw * df - dp(3f), by - dp(4f), bx + bw * df + dp(3f), by + dp(9f), paint);
+            }
+            paint.setColor(finalChase ? 0xFFFF7A4D : 0xFFFFD27A);
             c.drawRect(bx + bw - dp(4f), by - dp(6f), bx + bw + dp(8f), by + dp(8f), paint);
+            // Wave pips: one per wave in this district, filled as they fall.
+            for (int i = 0; i < WAVES_PER_DISTRICT; i++) {
+                float px = bx + bw / 2f - (WAVES_PER_DISTRICT - 1) * dp(9f) / 2f + i * dp(9f);
+                boolean done = finalChase || i < wave - 1;
+                paint.setColor(done ? ACCENT : 0x44FFFFFF);
+                c.drawCircle(px, by - dp(14f), dp(3f), paint);
+            }
+            label(c, finalChase ? "FINAL CHASE  ·  " + districtName()
+                            : districtName() + "  ·  WAVE " + wave + " OF " + WAVES_PER_DISTRICT,
+                    bx + bw / 2f, by - dp(20f), 9f, finalChase ? 0xFFFF7A4D : DIM, Paint.Align.CENTER);
         }
 
-        bold(c, pace(speed), dp(16f), h * 0.15f, 22f, TEXT, Paint.Align.LEFT);
-        label(c, "YOU /500", dp(16f), h * 0.15f + dp(16f), 9f, FAINT, Paint.Align.LEFT);
+        // The wound meter: how much leg you have back, and whether this rhythm is mending it.
+        if (limp > 0 && phase == Phase.RUNNING) {
+            float bw = w * 0.22f;
+            float bx = w / 2f - bw / 2f;
+            float by = h * 0.17f + dp(52f);
+            paint.setColor(0x33FFFFFF);
+            c.drawRoundRect(bx, by, bx + bw, by + dp(9f), dp(4.5f), dp(4.5f), paint);
+            paint.setColor(steadyState == 1 ? ACCENT : BAD);
+            c.drawRoundRect(bx, by, bx + bw * (float) (1 - limp), by + dp(9f), dp(4.5f), dp(4.5f), paint);
+            if (steadyState == 1) {
+                float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6);
+                Fx.glow(c, bx + bw * (float) (1 - limp), by + dp(4.5f), dp(26f),
+                        (((int) (60 + 70 * pulse)) << 24) | 0x35D0BA);
+            }
+            label(c, "LEG  " + Math.round((1 - limp) * 100) + "%  ·  " + Math.round(profile.lowSpeed() * 10) / 10f
+                            + "-" + Math.round(profile.highSpeed() * 10) / 10f + " m/s",
+                    bx + bw / 2f, by + dp(21f), 9f, steadyState == 1 ? ACCENT : DIM, Paint.Align.CENTER);
+        }
+
+        // The chase is settled on the limping pace, so that is the figure shown against the horde's.
+        float chasePace = chaseSpeed(speed);
+        bold(c, pace(chasePace), dp(16f), h * 0.15f, 22f, limp > 0 ? BAD : TEXT, Paint.Align.LEFT);
+        label(c, limp > 0 ? "YOU /500 - LIMPING" : "YOU /500", dp(16f), h * 0.15f + dp(16f), 9f,
+                limp > 0 ? BAD : FAINT, Paint.Align.LEFT);
         float hs = hordeSpeed();
         bold(c, hs > 0 ? PersonalBests.formatPace(500f / hs) : "--:--",
                 w - dp(16f), h * 0.15f, 22f, BAD, Paint.Align.RIGHT);
         label(c, stunned() ? "HORDE /500 - STUNNED" : "HORDE /500", w - dp(16f), h * 0.15f + dp(16f), 9f,
                 stunned() ? 0xFFFF9A5A : FAINT, Paint.Align.RIGHT);
 
+        if (wallHolding && barricadeHp > 0) {
+            drawWallCam(c, w, h);
+        }
         drawNightButton(c);
+        drawMapButton(c);
         drawFlareButton(c, w, h);
 
         float fy = h - dp(12f);
-        float col4 = w / 4f;
-        stat(c, col4 * 0.5f, fy, Math.round(runMeters()) + " m", "SURVIVED");
-        stat(c, col4 * 1.5f, fy, savedThisRun + (groupCount > 0 ? "  (+" + groupCount + " with you)" : ""),
+        float col5 = w / 5f;
+        stat(c, col5 * 0.5f, fy, Math.round(runMeters()) + " m", "SURVIVED");
+        stat(c, col5 * 1.5f, fy, wavesCleared + (finalChase ? "  (FINAL)" : ""),
+                bests.has(WAVE_KEY) ? "WAVES  ·  BEST " + Math.round(bests.get(WAVE_KEY, 0)) : "WAVES");
+        stat(c, col5 * 2.5f, fy, savedThisRun + (groupCount > 0 ? "  (+" + groupCount + ")" : ""),
                 bests.has(SAVED_KEY) ? "SAVED  ·  BEST " + Math.round(bests.get(SAVED_KEY, 0)) : "SAVED");
-        stat(c, col4 * 2.5f, fy, status == null ? "0" : status.strokeRate + " spm", "RATE");
+        stat(c, col5 * 3.5f, fy, plankStock > 0 ? plankStock + " planks"
+                        : status == null ? "0" : status.strokeRate + " spm",
+                plankStock > 0 ? "CARRIED" : "RATE");
         String key = "zombie." + Math.round(hordePaceSec);
-        stat(c, col4 * 3.5f, fy, bests.has(key) ? Math.round(bests.get(key, 0)) + " m" : "--", "BEST");
+        stat(c, col5 * 4.5f, fy, bests.has(key) ? Math.round(bests.get(key, 0)) + " m" : "--", "BEST");
+        if (mapShown) {
+            drawDistrictMap(c, w, h);
+        }
     }
 
     private void drawNightButton(Canvas c) {
@@ -1179,6 +1803,198 @@ final class ZombieRunGame extends GameView {
         c.drawCircle(mx + dp(4f), my - dp(3f), dp(7f), paint);
         bold(c, night ? "NIGHT ON" : "NIGHT", nightL + dp(36f), my + dp(5f), 12f, night ? TEXT : DIM,
                 Paint.Align.LEFT);
+    }
+
+    /**
+     * A rear-view panel of the wall being smashed.
+     *
+     * <p>Needed because the world view cannot show this: 90 m spans the screen, the pack is off the
+     * left edge past about 55 m, and by the time they reach the wall you are further ahead than
+     * that - so the whole point of the barricade would have happened out of sight. Here you watch
+     * them hammer it, plank by plank, with the head start it is buying you counting down.
+     */
+    private void drawWallCam(Canvas c, float w, float h) {
+        float pw = dp(230f);
+        float ph = dp(126f);
+        float l = dp(16f);
+        float t = h * 0.30f;
+        paint.setColor(0xCC0B1017);
+        c.drawRoundRect(l, t, l + pw, t + ph, dp(12f), dp(12f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x99D6A46A);
+        c.drawRoundRect(l, t, l + pw, t + ph, dp(12f), dp(12f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        label(c, "BEHIND YOU", l + pw / 2f, t + dp(15f), 9f, 0xFFD6A46A, Paint.Align.CENTER);
+
+        float floor = t + ph - dp(22f);
+        float wallX = l + pw * 0.68f;
+        float jitter = (float) Math.sin(sessionSeconds * 60) * dp(2f);
+        // Planks left, stacked.
+        int whole = (int) Math.ceil(barricadeHp);
+        paint.setColor(0xFF5A452E);
+        c.drawRect(wallX - dp(3f) + jitter, floor - dp(54f), wallX + dp(3f) + jitter, floor, paint);
+        for (int i = 0; i < whole; i++) {
+            float py = floor - dp(4f) - i * dp(3.6f);
+            paint.setColor(i % 2 == 0 ? 0xFF9A7B4F : 0xFF876A42);
+            c.drawRect(wallX - dp(22f) + jitter, py - dp(3f), wallX + dp(22f) + jitter, py, paint);
+        }
+        // Three of them swinging at it.
+        for (int i = 0; i < 3; i++) {
+            float zx = wallX - dp(46f) - i * dp(26f);
+            float swing = (float) Math.sin(sessionSeconds * 9 + i * 1.7) * dp(9f);
+            paint.setColor(i % 2 == 0 ? BAD : 0xFF9A3B32);
+            c.drawRect(zx - dp(7f), floor - dp(30f), zx + dp(7f), floor, paint);
+            c.drawRect(zx + dp(5f), floor - dp(26f) + swing, zx + dp(22f), floor - dp(21f) + swing, paint);
+            paint.setColor(0xFF7FB37A);
+            c.drawCircle(zx, floor - dp(37f), dp(7f), paint);
+            paint.setColor(0xFFFF3B3B);
+            c.drawCircle(zx + dp(3f), floor - dp(38f), dp(1.6f), paint);
+        }
+        // Splinters flying off on each blow.
+        paint.setColor(0xFFD9C89A);
+        for (int i = 0; i < 4; i++) {
+            float k = (float) ((sessionSeconds * 1.6 + i * 0.25) % 1.0);
+            paint.setAlpha((int) (200 * (1 - k)));
+            c.drawCircle(wallX - dp(18f) - k * dp(40f), floor - dp(30f) - k * dp(26f), dp(2f), paint);
+        }
+        paint.setAlpha(255);
+        paint.setColor(0xFF1A2416);
+        c.drawRect(l + dp(4f), floor, l + pw - dp(4f), t + ph - dp(4f), paint);
+        bold(c, PersonalBests.formatTime((float) (barricadeHp * SEC_PER_PLANK)) + "  ·  " + whole + " LEFT",
+                l + pw / 2f, t + ph - dp(7f), 12f, 0xFFD6A46A, Paint.Align.CENTER);
+    }
+
+    private void drawMapButton(Canvas c) {
+        mapL = nightR + dp(10f);
+        mapT = nightT;
+        mapR = mapL + dp(104f);
+        mapB = nightB;
+        paint.setColor(mapShown ? 0xFF2A4B3E : 0x33FFFFFF);
+        c.drawRoundRect(mapL, mapT, mapR, mapB, dp(17f), dp(17f), paint);
+        float mx = mapL + dp(20f);
+        float my = (mapT + mapB) / 2f;
+        // A little folded map with a route on it.
+        paint.setColor(mapShown ? 0xFFBFEADD : DIM);
+        c.drawRect(mx - dp(9f), my - dp(7f), mx + dp(9f), my + dp(7f), paint);
+        paint.setColor(mapShown ? 0xFF2A4B3E : 0xFF3A4252);
+        c.drawRect(mx - dp(3f), my - dp(7f), mx - dp(1f), my + dp(7f), paint);
+        c.drawRect(mx + dp(3f), my - dp(7f), mx + dp(5f), my + dp(7f), paint);
+        paint.setColor(ACCENT);
+        c.drawCircle(mx + dp(6f), my + dp(4f), dp(2f), paint);
+        bold(c, "MAP", mapL + dp(36f), my + dp(5f), 12f, mapShown ? TEXT : DIM, Paint.Align.LEFT);
+    }
+
+    /**
+     * The district map, the one thing here that is kept between sessions ({@code zrun.district}).
+     * Eight districts on a winding road: the ones you have cleared flagged and joined by a solid
+     * route, the one you are in lit and pulsing with your marker crawling along it, the rest dark
+     * with the horde still drifting about in them.
+     */
+    private void drawDistrictMap(Canvas c, float w, float h) {
+        float pad = dp(40f);
+        float top = h * 0.24f;
+        float bottom = h * 0.78f;
+        paint.setColor(0xE60B1017);
+        c.drawRoundRect(pad, top, w - pad, bottom, dp(18f), dp(18f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x5535D0BA);
+        c.drawRoundRect(pad, top, w - pad, bottom, dp(18f), dp(18f), paint);
+        paint.setStyle(Paint.Style.FILL);
+
+        // A searchlight sweeping across the paper, so the panel is never still.
+        float sweep = (float) ((sessionSeconds * 0.28) % 1.0);
+        float sx = pad + (w - pad * 2) * sweep;
+        paint.setColor(0x0E9FD8FF);
+        c.drawRect(sx - dp(60f), top + dp(2f), sx + dp(60f), bottom - dp(2f), paint);
+
+        int cleared = districtsCleared;
+        int current = cleared % DISTRICTS.length;
+        int lap = cleared / DISTRICTS.length;
+        bold(c, "DISTRICT MAP", w / 2f, top + dp(30f), 20f, TEXT, Paint.Align.CENTER);
+        label(c, cleared + " cleared" + (lap > 0 ? "  ·  lap " + (lap + 1) : "")
+                        + "  ·  4 waves then the chopper",
+                w / 2f, top + dp(50f), 11f, DIM, Paint.Align.CENTER);
+
+        float ny = (top + bottom) / 2f + dp(14f);
+        float span = w - pad * 2 - dp(120f);
+        float step = span / (DISTRICTS.length - 1);
+        float x0 = pad + dp(60f);
+        // The road between them.
+        paint.setStrokeWidth(dp(3f));
+        for (int i = 0; i < DISTRICTS.length - 1; i++) {
+            float ax = x0 + i * step;
+            float ay = ny + (float) Math.sin(i * 1.1) * dp(34f);
+            float bx = x0 + (i + 1) * step;
+            float by = ny + (float) Math.sin((i + 1) * 1.1) * dp(34f);
+            boolean walked = i < current;
+            paint.setColor(walked ? 0xFF35D0BA : 0x33FFFFFF);
+            c.drawLine(ax, ay, bx, by, paint);
+            if (!walked) {
+                // Dashes crawling the other way: the road not taken yet.
+                for (int k = 0; k < 4; k++) {
+                    float t = (float) (((k * 0.25f) + (sessionSeconds * 0.25) % 0.25) % 1.0);
+                    paint.setColor(0x33FF6A5A);
+                    c.drawCircle(ax + (bx - ax) * t, ay + (by - ay) * t, dp(2f), paint);
+                }
+            }
+        }
+        for (int i = 0; i < DISTRICTS.length; i++) {
+            float nx = x0 + i * step;
+            float nodeY = ny + (float) Math.sin(i * 1.1) * dp(34f);
+            boolean done = i < current;
+            boolean here = i == current;
+            if (here) {
+                float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 3);
+                Fx.glow(c, nx, nodeY, dp(40f), (((int) (70 + 90 * pulse)) << 24) | 0xFFD27A);
+            }
+            paint.setColor(done ? 0xFF35D0BA : here ? 0xFFFFD27A : 0xFF2A3446);
+            c.drawCircle(nx, nodeY, dp(11f), paint);
+            paint.setColor(0xFF0B1017);
+            c.drawCircle(nx, nodeY, dp(6f), paint);
+            if (done) {
+                // A flag planted on a cleared district.
+                paint.setColor(0xFF35D0BA);
+                c.drawRect(nx - dp(1f), nodeY - dp(26f), nx + dp(1f), nodeY - dp(9f), paint);
+                path.reset();
+                path.moveTo(nx + dp(1f), nodeY - dp(26f));
+                path.lineTo(nx + dp(13f), nodeY - dp(22f));
+                path.lineTo(nx + dp(1f), nodeY - dp(18f));
+                path.close();
+                c.drawPath(path, paint);
+            } else if (!here) {
+                // Zombies still drifting about in the districts ahead.
+                for (int k = 0; k < 3; k++) {
+                    float a = (float) (sessionSeconds * 0.6 + k * 2.1 + i);
+                    paint.setColor(0x99FF4A4A);
+                    c.drawCircle(nx + (float) Math.cos(a) * dp(16f), nodeY + (float) Math.sin(a * 0.7) * dp(9f),
+                            dp(2f), paint);
+                }
+            }
+            label(c, DISTRICTS[i], nx, nodeY + dp(30f), 8.5f,
+                    done ? ACCENT : here ? TEXT : FAINT, Paint.Align.CENTER);
+        }
+        // Your marker, crawling through the district you are in.
+        float progress = 0f;
+        if (phase == Phase.RUNNING) {
+            double through = finalChase
+                    ? (WAVES_PER_DISTRICT * SAFE_EVERY + finalProgress() * FINAL_METRES)
+                    : (runMeters() - districtStart);
+            progress = (float) Math.max(0, Math.min(1, through
+                    / (WAVES_PER_DISTRICT * SAFE_EVERY + FINAL_METRES)));
+        }
+        float cx = x0 + (current + Math.min(0.92f, progress)) * step;
+        float cy = ny + (float) Math.sin((current + progress) * 1.1) * dp(34f);
+        if (current < DISTRICTS.length) {
+            float bob = (float) Math.abs(Math.sin(sessionSeconds * 5)) * dp(4f);
+            Fx.glow(c, cx, cy - dp(16f) - bob, dp(26f), 0x6635D0BA);
+            paint.setColor(ACCENT);
+            c.drawCircle(cx, cy - dp(18f) - bob, dp(5f), paint);
+            c.drawRect(cx - dp(2f), cy - dp(15f) - bob, cx + dp(2f), cy - dp(6f) - bob, paint);
+        }
+        label(c, phase == Phase.READY ? "tap anywhere to close  ·  take a stroke to run"
+                        : "tap anywhere to close", w / 2f, bottom - dp(16f), 10f, FAINT, Paint.Align.CENTER);
     }
 
     private void drawFlareButton(Canvas c, float w, float h) {
@@ -1233,6 +2049,14 @@ final class ZombieRunGame extends GameView {
         }
         if (survX >= 0) {
             darkPath.addCircle(survX, groundY - dp(90f), dp(80f), Path.Direction.CW);
+        }
+        if (nightDropX >= 0) {
+            // The crate burns a beacon, and the parachute is white against the sky.
+            darkPath.addCircle(nightDropX, Math.min(groundY - dp(40f), nightDropY - dp(20f)),
+                    dp(110f), Path.Direction.CW);
+        }
+        if (nightWallX >= 0) {
+            darkPath.addCircle(nightWallX, groundY - dp(30f), dp(95f), Path.Direction.CW);
         }
         float flareLight = 0f;
         if (sinceFlare >= FLARE_FLIGHT && sinceFlare < FLARE_FLIGHT + 3.0) {
@@ -1318,6 +2142,197 @@ final class ZombieRunGame extends GameView {
         }
     }
 
+    /**
+     * The extraction helicopter at the end of the final chase: rotor turning, spotlight sweeping the
+     * road, a rope ladder swinging. It sits low over a landing pad so it reads as somewhere to reach.
+     */
+    private void drawChopper(Canvas c, float x, float groundY, float dt) {
+        float hover = (float) Math.sin(sessionSeconds * 1.6) * dp(5f);
+        float bodyY = groundY - dp(150f) + hover;
+        // Spotlight down onto the road.
+        path.reset();
+        path.moveTo(x - dp(8f), bodyY + dp(12f));
+        path.lineTo(x - dp(70f), groundY + dp(6f));
+        path.lineTo(x + dp(70f), groundY + dp(6f));
+        path.lineTo(x + dp(8f), bodyY + dp(12f));
+        path.close();
+        paint.setColor(0x33FFF0C0);
+        c.drawPath(path, paint);
+        Fx.glow(c, x, groundY - dp(10f), dp(90f), 0x40FFE8A0);
+        // Landing pad.
+        paint.setColor(0xFF2A3446);
+        c.drawOval(x - dp(60f), groundY - dp(12f), x + dp(60f), groundY + dp(8f), paint);
+        paint.setColor(0xFFFFD27A);
+        c.drawRect(x - dp(3f), groundY - dp(8f), x + dp(3f), groundY + dp(4f), paint);
+        c.drawRect(x - dp(12f), groundY - dp(4f), x + dp(12f), groundY, paint);
+        // Body, tail and skids.
+        paint.setColor(0xFF3E5A48);
+        c.drawOval(x - dp(38f), bodyY - dp(20f), x + dp(26f), bodyY + dp(16f), paint);
+        c.drawRect(x + dp(20f), bodyY - dp(6f), x + dp(78f), bodyY + dp(2f), paint);
+        paint.setColor(0xFF2E4436);
+        c.drawRect(x + dp(70f), bodyY - dp(26f), x + dp(76f), bodyY + dp(2f), paint);
+        paint.setColor(0xFF9FD8FF);
+        c.drawOval(x - dp(36f), bodyY - dp(12f), x - dp(8f), bodyY + dp(8f), paint);
+        paint.setColor(0xFF22303E);
+        c.drawRect(x - dp(30f), bodyY + dp(20f), x + dp(18f), bodyY + dp(23f), paint);
+        // Rotor: a blur that actually turns.
+        float spin = (float) (sessionSeconds * 22);
+        paint.setStrokeWidth(dp(3f));
+        for (int i = 0; i < 3; i++) {
+            float a = spin + i * 2.094f;
+            paint.setColor(0xCCC8D4E2);
+            c.drawLine(x - dp(6f), bodyY - dp(24f),
+                    x - dp(6f) + (float) Math.cos(a) * dp(74f),
+                    bodyY - dp(24f) + (float) Math.sin(a) * dp(12f), paint);
+        }
+        paint.setColor(0xFF1A2230);
+        c.drawCircle(x - dp(6f), bodyY - dp(24f), dp(5f), paint);
+        // Rope ladder swinging under the door.
+        float sway = (float) Math.sin(sessionSeconds * 2.2) * dp(6f);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xFFC9B284);
+        c.drawLine(x - dp(24f), bodyY + dp(16f), x - dp(24f) + sway, groundY - dp(30f), paint);
+        c.drawLine(x - dp(12f), bodyY + dp(16f), x - dp(12f) + sway, groundY - dp(30f), paint);
+        for (int i = 0; i < 5; i++) {
+            float t = (i + 1) / 6f;
+            float ry = bodyY + dp(16f) + (groundY - dp(30f) - bodyY - dp(16f)) * t;
+            c.drawLine(x - dp(24f) + sway * t, ry, x - dp(12f) + sway * t, ry, paint);
+        }
+        // Beacon.
+        if (((int) (sessionSeconds * 3)) % 2 == 0) {
+            Fx.glow(c, x + dp(24f), bodyY + dp(12f), dp(20f), 0xAAFF4A4A);
+        }
+        label(c, safe() ? "EXTRACTION" : "EVAC  ·  " + Math.max(0, Math.round(evacAt - runMeters())) + " m",
+                x, bodyY - dp(44f), 11f, ACCENT, Paint.Align.CENTER);
+        smokeAccum += dt * 3f;
+        while (smokeAccum >= 1f) {
+            smokeAccum -= 1f;
+            smoke.spawn(x, groundY - dp(4f), -dp(40f) - (float) Math.random() * dp(30f), -dp(8f),
+                    1.2f, dp(6f), 0x44B0BCCC, false);
+        }
+    }
+
+    /**
+     * The barricade: planks across the road. Draws what is left of it, shaking and shedding splinters
+     * while the horde is smashing through, and rubble once it is down.
+     */
+    private void drawBarricade(Canvas c, float x, float groundY, float planks) {
+        int whole = (int) Math.ceil(planks);
+        boolean smashing = wallHolding && barricadeHp > 0 && sessionSeconds - barricadeHitAt < 0.25;
+        float jitter = smashing ? (float) Math.sin(sessionSeconds * 70) * dp(3f) : 0f;
+        // Posts.
+        paint.setColor(0xFF5A452E);
+        c.drawRect(x - dp(26f) + jitter, groundY - dp(62f), x - dp(19f) + jitter, groundY, paint);
+        c.drawRect(x + dp(19f) + jitter, groundY - dp(62f), x + dp(26f) + jitter, groundY, paint);
+        for (int i = 0; i < whole; i++) {
+            float py = groundY - dp(6f) - i * dp(4.2f);
+            float tilt = ((i * 7) % 5 - 2) * dp(1.2f);
+            paint.setColor(i % 2 == 0 ? 0xFF9A7B4F : 0xFF876A42);
+            c.drawRect(x - dp(30f) + jitter + tilt, py - dp(4f), x + dp(30f) + jitter + tilt, py, paint);
+            paint.setColor(0x33000000);
+            c.drawRect(x - dp(30f) + jitter + tilt, py - dp(1.2f), x + dp(30f) + jitter + tilt, py, paint);
+        }
+        if (whole > 0) {
+            // Nail heads catch what light there is.
+            paint.setColor(0xFFD9C89A);
+            c.drawCircle(x - dp(22f) + jitter, groundY - dp(20f), dp(1.8f), paint);
+            c.drawCircle(x + dp(22f) + jitter, groundY - dp(34f), dp(1.8f), paint);
+        } else {
+            paint.setColor(0xFF6B5636);
+            c.drawRect(x - dp(30f), groundY - dp(6f), x + dp(30f), groundY - dp(2f), paint);
+            c.drawRect(x - dp(14f), groundY - dp(12f), x + dp(20f), groundY - dp(8f), paint);
+        }
+        if (smashing) {
+            sparks.spawn(x - dp(26f), groundY - dp(20f) - (float) Math.random() * dp(30f),
+                    -dp(40f) - (float) Math.random() * dp(80f), -dp(60f) - (float) Math.random() * dp(60f),
+                    0.7f, dp(2.4f), 0xFFB08A50, true);
+        }
+        if (wallHolding && barricadeHp > 0) {
+            label(c, "HOLDING  " + PersonalBests.formatTime((float) (barricadeHp * SEC_PER_PLANK)),
+                    x, groundY - dp(74f), 10f, 0xFFD6A46A, Paint.Align.CENTER);
+        } else if (whole > 0) {
+            label(c, whole + " PLANKS", x, groundY - dp(74f), 9f, 0xFFD6A46A, Paint.Align.CENTER);
+        }
+    }
+
+    /** A chevron at the right edge while the crate is still beyond it, with the distance to run. */
+    private void drawDropMarker(Canvas c, float w, float groundY) {
+        float x = w - dp(30f);
+        float y = groundY - dp(120f);
+        float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 7);
+        Fx.glow(c, x, y, dp(46f), (((int) (60 + 70 * pulse)) << 24) | 0xFFB132);
+        paint.setColor(WARN);
+        path.reset();
+        path.moveTo(x - dp(12f), y - dp(14f));
+        path.lineTo(x + dp(12f), y);
+        path.lineTo(x - dp(12f), y + dp(14f));
+        path.close();
+        c.drawPath(path, paint);
+        bold(c, Math.max(0, Math.round(dropAt - runMeters())) + " m", x - dp(6f), y + dp(34f), 13f,
+                WARN, Paint.Align.RIGHT);
+        label(c, "SUPPLY", x - dp(6f), y - dp(24f), 9f, WARN, Paint.Align.RIGHT);
+    }
+
+    /**
+     * The supply crate: a parachute for the first couple of seconds, then a crate on a smoke beacon
+     * with a countdown ring burning down around it.
+     */
+    private void drawDrop(Canvas c, float x, float groundY, float h, float dt) {
+        double since = sessionSeconds - dropSpawnedAt;
+        float fall = (float) Math.min(1.0, since / 2.5);
+        float y = groundY - (1 - fall) * h * 0.85f;
+        nightDropY = y;
+        float left = (float) Math.max(0, dropDeadline - sessionSeconds);
+        float frac = (float) Math.max(0, Math.min(1, left / DROP_WINDOW));
+        int tint = dropLoot == LOOT_MEDKIT ? 0xFFE04A4A : dropLoot == LOOT_PLANKS ? 0xFFD6A46A : 0xFFFF7A4D;
+        if (fall < 1f) {
+            // Canopy.
+            paint.setColor(0xFFE8EDF5);
+            c.drawArc(x - dp(42f), y - dp(76f), x + dp(42f), y - dp(8f), 180, 180, true, paint);
+            paint.setColor(0xFFB9C4D4);
+            c.drawArc(x - dp(14f), y - dp(76f), x + dp(14f), y - dp(8f), 180, 180, true, paint);
+            paint.setStrokeWidth(dp(1.6f));
+            paint.setColor(0xFFDCE4EF);
+            c.drawLine(x - dp(40f), y - dp(40f), x - dp(10f), y - dp(14f), paint);
+            c.drawLine(x + dp(40f), y - dp(40f), x + dp(10f), y - dp(14f), paint);
+        } else {
+            // Beacon smoke and a pulse on the ground.
+            float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6);
+            Fx.glow(c, x, groundY - dp(10f), dp(70f), (((int) (70 + 80 * pulse)) << 24) | (tint & 0x00FFFFFF));
+            dropSmokeAccum += dt * 8f;
+            while (dropSmokeAccum >= 1f) {
+                dropSmokeAccum -= 1f;
+                smoke.spawn(x + dp(20f), groundY - dp(12f), dp(6f), -dp(26f), 1.4f, dp(5f),
+                        0x55FF9A6A, false);
+            }
+        }
+        // Crate.
+        paint.setColor(0xFF7E6136);
+        c.drawRect(x - dp(20f), y - dp(28f), x + dp(20f), y, paint);
+        paint.setColor(0xFF5E4726);
+        c.drawRect(x - dp(20f), y - dp(16f), x + dp(20f), y - dp(12f), paint);
+        c.drawRect(x - dp(3f), y - dp(28f), x + dp(3f), y, paint);
+        paint.setColor(tint);
+        c.drawRect(x - dp(12f), y - dp(24f), x - dp(6f), y - dp(18f), paint);
+        if (dropLoot == LOOT_MEDKIT) {
+            paint.setColor(0xFFFFFFFF);
+            c.drawRect(x + dp(4f), y - dp(24f), x + dp(16f), y - dp(21f), paint);
+            c.drawRect(x + dp(8.5f), y - dp(28f), x + dp(11.5f), y - dp(17f), paint);
+        }
+        // Countdown ring.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(3.5f));
+        paint.setColor(0x33FFFFFF);
+        c.drawArc(x - dp(34f), y - dp(48f), x + dp(34f), y + dp(20f), 0, 360, false, paint);
+        paint.setColor(frac > 0.4f ? ACCENT : frac > 0.18f ? WARN : BAD);
+        c.drawArc(x - dp(34f), y - dp(48f), x + dp(34f), y + dp(20f), -90, 360 * frac, false, paint);
+        paint.setStyle(Paint.Style.FILL);
+        bold(c, tenths(left) + "s", x, y - dp(58f), 14f,
+                frac > 0.18f ? TEXT : BAD, Paint.Align.CENTER);
+        label(c, dropLoot == LOOT_MEDKIT ? "MEDKIT" : dropLoot == LOOT_PLANKS ? "PLANKS" : "FLARES",
+                x, y - dp(70f), 9f, tint, Paint.Align.CENTER);
+    }
+
     /** A wrecked car with a survivor on the roof, waving, a lighter held up in the dark. */
     private void drawWreck(Canvas c, float sx, float groundY, double threat) {
         paint.setColor(0xFF4A3A34);
@@ -1373,10 +2388,29 @@ final class ZombieRunGame extends GameView {
         float s = dp(FIGURE_SCALE) * mul;
         boolean zombie = kind >= K_WALKER;
         float legSwing = speed > 0.2f ? (float) Math.sin(phaseIn) * 8f * s * (kind == K_RUNNER ? 1.3f : 1f) : 0f;
+        // The limp: the bad leg stops swinging and you drop onto it every second step. Feet stay on
+        // the road, so only the body and head bob - which is what a limp actually looks like.
+        float lam = kind == K_YOU ? (float) limp : 0f;
+        float bad = legSwing * (1f - 0.85f * lam);
+        // Gated on movement exactly as legSwing is: phaseIn comes from distance covered, so a rower
+        // who stops would otherwise freeze the body mid-drop, hanging off the road at a random height.
+        float hop = lam > 0 && speed > 0.2f ? Math.max(0f, (float) Math.sin(phaseIn)) * 4f * s * lam : 0f;
+        float bodyY = groundY + hop;
         // Legs: dark trousers on the living, so the figure reads as a person, not a block.
         paint.setColor(zombie ? color : kind == K_SURVIVOR ? 0xFF3A3F55 : 0xFF2A2F3A);
-        c.drawRect(x - 5 * s + legSwing, groundY - 14 * s, x - 1 * s + legSwing, groundY, paint);
-        c.drawRect(x + 1 * s - legSwing, groundY - 14 * s, x + 5 * s - legSwing, groundY, paint);
+        c.drawRect(x - 5 * s + legSwing, bodyY - 14 * s, x - 1 * s + legSwing, groundY, paint);
+        c.drawRect(x + 1 * s - bad, bodyY - 14 * s, x + 5 * s - bad, groundY, paint);
+        if (lam > 0) {
+            // Bandage and a stain on the bitten leg.
+            paint.setColor(0xFFE6E0CE);
+            c.drawRect(x + 1 * s - bad, bodyY - 11 * s, x + 5 * s - bad, bodyY - 7 * s, paint);
+            paint.setColor(0xFF9E1B2E);
+            paint.setAlpha((int) (120 + 135 * Math.min(1f, lam)));
+            c.drawRect(x + 2 * s - bad, bodyY - 10 * s, x + 4.4f * s - bad, bodyY - 8 * s, paint);
+            paint.setAlpha(255);
+        }
+        // Everything above the knees is drawn off the bobbing line, not the road.
+        groundY = bodyY;
         // Body, leaning into the run.
         paint.setColor(color);
         float half = kind == K_BRUTE ? 8 * s : kind == K_RUNNER ? 4.5f * s : 6 * s;
@@ -1467,6 +2501,18 @@ final class ZombieRunGame extends GameView {
             paint.setColor(0xFF1A1A1A);
             c.drawCircle(hx + 3 * s, hy + 0.5f * s, 1.1f * s, paint);
         }
+    }
+
+    /**
+     * One decimal place without {@code String.format}.
+     *
+     * <p>The crate's countdown is drawn twice a frame for the whole 14 s window, and a
+     * {@code Formatter} plus its {@code StringBuilder} on every one of those is exactly the
+     * per-frame allocation the frame loop is not allowed to do.
+     */
+    private static String tenths(double v) {
+        long t = Math.max(0, Math.round(v * 10));
+        return (t / 10) + "." + (t % 10);
     }
 
     private static int blend(int a, int b, float t) {

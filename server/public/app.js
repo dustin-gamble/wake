@@ -671,6 +671,13 @@ function startStream() {
   });
   source.addEventListener('event', (message) => addEvent(JSON.parse(message.data)));
   source.addEventListener('browser-checkin', () => loadState().catch(() => {}));
+  source.addEventListener('history-session', (message) => {
+    try {
+      onHistorySession(JSON.parse(message.data));
+    } catch {
+      // a malformed frame is not worth tearing the stream down for
+    }
+  });
   source.addEventListener('session-reset', () => {
     seenEvents.clear();
     samples.length = 0;
@@ -733,3 +740,642 @@ setInterval(() => browserCheckin().catch(() => {}), 5000);
 setInterval(refreshPills, 1000);
 setInterval(drawChart, 1000);
 drawChart();
+
+/* ---------------- history ---------------- */
+
+/**
+ * Sessions the tablet has pushed to /api/history, per profile, with a day-by-day distance chart
+ * and a split trend. Profiles have no passwords - the rower taps a name on the tablet - so the
+ * chips here are just a view filter, not a login.
+ *
+ * The charts draw themselves in over ~0.9s and the newest table rows arrive with a short
+ * stagger, so a finished row is visibly new. Both are skipped under prefers-reduced-motion.
+ *
+ * Everything the animation needs is worked out ONCE when the data or the size changes and kept
+ * in histPlot / histPalette. The draw itself allocates nothing and reads no CSS: a frame that
+ * re-buckets a year of sessions and calls getComputedStyle four times is the browser equivalent
+ * of allocating in onDraw, and this page is also holding an SSE stream open at 8Hz.
+ */
+const hel = {
+  panel: $('historyPanel'),
+  profiles: $('historyProfiles'),
+  ranges: $('historyRanges'),
+  refresh: $('historyRefresh'),
+  backupLink: $('backupLink'),
+  body: $('historyBody'),
+  note: $('historyNote'),
+  distance: $('historyDistance'),
+  split: $('historySplit'),
+  distanceNote: $('hDistanceNote'),
+  sessions: $('hSessions'),
+  meters: $('hMeters'),
+  time: $('hTime'),
+  split500: $('hSplit'),
+  best: $('hBest'),
+  watts: $('hWatts'),
+};
+
+// A cached page (or a future edit to index.html) must not take the rest of the dashboard down
+// with it: without the panel there is nothing here to run.
+const historyReady = Boolean(hel.panel && hel.ranges && hel.distance && hel.split && hel.body);
+
+const HISTORY_ROWS = 30;
+const HISTORY_ANIM_MS = 900;
+const HISTORY_MIN_PLOT = 24;        // below this the canvas is too small to divide by
+const HISTORY_MAX_BUCKETS = 400;    // "All" on a long history widens the bucket instead
+
+const hist = { profile: null, days: 30, profiles: [], sessions: [], loading: false };
+const histSummary = { sessions: 0, meters: 0, seconds: 0, split: 0, best: 0, watts: 0 };
+
+// Everything the two charts draw, rebuilt on new data and on resize, never inside a frame.
+const histPlot = { buckets: [], perBucket: 1, maxMeters: 1000, points: [], fastest: 0, top: 0, bottom: 0 };
+const histPalette = { faint: '#5d6b80', line: '#1a2230', accent: '#35d0ba', pulse: '#6f8cff' };
+
+const reducedMotion = Boolean(window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+let histAnim = 1;
+let histRaf = 0;
+let histResizeRaf = 0;
+
+function histNum(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * The local calendar day a session belongs to. `at` is stored as UTC, and an evening row west of
+ * Greenwich is already "tomorrow" in UTC - bucketing on the raw string put those rows past the
+ * end of the range, where they were silently dropped from the distance chart.
+ */
+function dayKey(value) {
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  }
+  const text = String(value || '');
+  return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : '';
+}
+
+function dayLabel(key) {
+  const parts = key.split('-');
+  return `${Number(parts[1])}/${Number(parts[2])}`;   // month/day, to match the table's "Sep 19"
+}
+
+function dayIndex(key) {
+  return Math.round(Date.parse(key + 'T12:00:00Z') / 86400000);
+}
+
+function shiftDays(key, delta) {
+  const date = new Date(key + 'T12:00:00Z');
+  date.setUTCDate(date.getUTCDate() + delta);
+  return date.toISOString().slice(0, 10);
+}
+
+function todayKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+}
+
+function formatWhen(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || '--').slice(0, 16);
+  return `${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} `
+    + `${date.getHours()}:${pad2(date.getMinutes())}`;
+}
+
+/* ----- summary ----- */
+
+function computeSummary() {
+  let meters = 0;
+  let seconds = 0;
+  let wattSeconds = 0;
+  let best = 0;
+  for (const session of hist.sessions) {
+    meters += histNum(session.meters);
+    seconds += histNum(session.seconds);
+    wattSeconds += histNum(session.avgWatts) * histNum(session.seconds);
+    const split = histNum(session.splitSeconds);
+    if (split > 0 && histNum(session.meters) >= 250 && (best === 0 || split < best)) best = split;
+  }
+  histSummary.sessions = hist.sessions.length;
+  histSummary.meters = meters;
+  histSummary.seconds = seconds;
+  histSummary.split = meters > 0 && seconds > 0 ? (seconds / meters) * 500 : 0;
+  histSummary.best = best;
+  histSummary.watts = seconds > 0 ? wattSeconds / seconds : 0;
+}
+
+/** Writes the figure without disturbing the "km" / "W" span beside it, so no markup is reparsed. */
+function setFigure(element, text) {
+  if (!element) return;
+  const node = element.firstChild;
+  if (node && node.nodeType === 3) {
+    if (node.nodeValue !== text) node.nodeValue = text;
+  } else {
+    element.insertBefore(document.createTextNode(text), element.firstChild || null);
+  }
+}
+
+/** Counts the figures up as the charts draw in, so the panel lands rather than blinking on. */
+function paintSummary(progress) {
+  const ease = Math.max(0, Math.min(1, progress));
+  setFigure(hel.sessions, String(Math.round(histSummary.sessions * ease)));
+  const km = (histSummary.meters * ease) / 1000;
+  setFigure(hel.meters, km >= 10 ? km.toFixed(0) : km.toFixed(1));
+  setFigure(hel.time, formatElapsed(histSummary.seconds * ease));
+  setFigure(hel.watts, String(Math.round(histSummary.watts * ease)));
+  // Splits count down from a slower figure: a split counting up from zero reads as a record.
+  const settle = (target) => (target > 0 ? target + (1 - ease) * 14 : 0);
+  setFigure(hel.split500, histSummary.split > 0 ? formatPace(settle(histSummary.split)) : '--:--');
+  setFigure(hel.best, histSummary.best > 0 ? formatPace(settle(histSummary.best)) : '--:--');
+}
+
+/* ----- plot preparation (once per data change, never per frame) ----- */
+
+function readPalette() {
+  histPalette.faint = cssVar('--text-faint') || '#5d6b80';
+  histPalette.line = cssVar('--line-soft') || '#1a2230';
+  histPalette.accent = cssVar('--accent') || '#35d0ba';
+  histPalette.pulse = cssVar('--pulse') || '#6f8cff';
+}
+
+/** Day buckets across the selected range; weeks once the span gets long enough to crowd. */
+function buildDistanceBuckets() {
+  histPlot.buckets = [];
+  histPlot.perBucket = 1;
+  histPlot.maxMeters = 1000;
+  const keys = hist.sessions.map((session) => dayKey(session.at)).filter(Boolean).sort();
+  if (!keys.length) return;
+  // A row logged after midnight UTC, or a tablet whose clock runs ahead, must still land inside
+  // the range rather than falling off the end of it.
+  const newest = keys[keys.length - 1];
+  const today = todayKey();
+  const last = newest > today ? newest : today;
+  const first = hist.days > 0 ? shiftDays(last, -(hist.days - 1)) : keys[0];
+  const span = Math.max(1, dayIndex(last) - dayIndex(first) + 1);
+  let perBucket = span > 45 ? 7 : 1;
+  while (Math.ceil(span / perBucket) > HISTORY_MAX_BUCKETS) perBucket *= 2;
+  const count = Math.max(1, Math.ceil(span / perBucket));
+  const buckets = [];
+  for (let i = 0; i < count; i++) {
+    const start = shiftDays(first, i * perBucket);
+    buckets.push({ start, end: shiftDays(start, perBucket - 1), meters: 0 });
+  }
+  const firstIndex = dayIndex(first);
+  for (const session of hist.sessions) {
+    const key = dayKey(session.at);
+    if (!key || key < first) continue;
+    const index = Math.floor((dayIndex(key) - firstIndex) / perBucket);
+    if (index >= 0 && index < buckets.length) buckets[index].meters += histNum(session.meters);
+  }
+  let max = 1000;
+  for (const bucket of buckets) {
+    if (bucket.meters > max) max = bucket.meters;   // a loop, not Math.max(...spread): a long
+  }                                                 // "All" range can hold hundreds of buckets
+  histPlot.buckets = buckets;
+  histPlot.perBucket = perBucket;
+  histPlot.maxMeters = max;
+}
+
+function buildSplitPoints() {
+  const points = [];
+  for (const session of hist.sessions) {
+    const split = histNum(session.splitSeconds);
+    if (split > 0 && histNum(session.meters) >= 250) points.push(split);
+  }
+  histPlot.points = points;
+  if (points.length < 2) {
+    histPlot.fastest = 0;
+    histPlot.top = 0;
+    histPlot.bottom = 1;
+    return;
+  }
+  let fastest = points[0];
+  let slowest = points[0];
+  for (const split of points) {
+    if (split < fastest) fastest = split;
+    if (split > slowest) slowest = split;
+  }
+  // A flat run of identical splits must not collapse the axis to zero height.
+  const spread = Math.max(6, slowest - fastest);
+  const mid = (fastest + slowest) / 2;
+  histPlot.fastest = fastest;
+  histPlot.top = mid - spread / 2 - spread * 0.12;
+  histPlot.bottom = mid + spread / 2 + spread * 0.12;
+}
+
+function prepareHistoryPlots() {
+  readPalette();
+  buildDistanceBuckets();
+  buildSplitPoints();
+  if (hel.distanceNote) {
+    hel.distanceNote.textContent = histPlot.buckets.length
+      ? (histPlot.perBucket > 1 ? `per ${histPlot.perBucket} days` : 'per day')
+      : '';
+  }
+}
+
+/* ----- charts ----- */
+
+function histCanvas(canvas) {
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return null;
+  if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = '10px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
+  return { ctx, width, height };
+}
+
+function gridLines(ctx, padLeft, padTop, plotW, plotH) {
+  ctx.strokeStyle = histPalette.line;
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = Math.round(padTop + (plotH * i) / 3) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y);
+    ctx.lineTo(padLeft + plotW, y);
+    ctx.stroke();
+  }
+}
+
+function drawDistanceChart() {
+  const frame = histCanvas(hel.distance);
+  if (!frame) return;
+  const { ctx, width, height } = frame;
+  const padLeft = 38;
+  const padRight = 10;
+  const padTop = 10;
+  const padBottom = 20;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  if (plotW < HISTORY_MIN_PLOT || plotH < HISTORY_MIN_PLOT) return;
+
+  gridLines(ctx, padLeft, padTop, plotW, plotH);
+
+  const buckets = histPlot.buckets;
+  if (!buckets.length) {
+    ctx.fillStyle = histPalette.faint;
+    ctx.fillText('No sessions in this range', padLeft + 6, padTop + plotH / 2);
+    return;
+  }
+
+  const max = histPlot.maxMeters;
+  const slot = plotW / buckets.length;
+  const barW = Math.max(1, Math.min(26, slot - 3));
+
+  ctx.fillStyle = histPalette.accent;
+  for (let index = 0; index < buckets.length; index++) {
+    const meters = buckets[index].meters;
+    if (meters <= 0) continue;
+    // Each bar grows a beat after the one to its left, so the range reads left to right.
+    const lead = (index / buckets.length) * 0.35;
+    const grow = Math.max(0, Math.min(1, (histAnim - lead) / 0.65));
+    if (grow <= 0) continue;
+    const h = (meters / max) * plotH * grow;
+    const x = padLeft + slot * index + (slot - barW) / 2;
+    const y = padTop + plotH - h;
+    ctx.globalAlpha = 0.28 + 0.62 * grow;
+    ctx.beginPath();
+    const radius = Math.min(3, barW / 2, h / 2);
+    if (ctx.roundRect) ctx.roundRect(x, y, barW, h, radius);
+    else ctx.rect(x, y, barW, h);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = histPalette.faint;
+  ctx.textAlign = 'right';
+  ctx.fillText(`${(max / 1000).toFixed(1)}km`, padLeft - 5, padTop + 8);
+  ctx.fillText('0', padLeft - 5, padTop + plotH);
+  ctx.textAlign = 'left';
+  ctx.fillText(dayLabel(buckets[0].start), padLeft, height - 5);
+  ctx.textAlign = 'right';
+  ctx.fillText(dayLabel(buckets[buckets.length - 1].end), width - padRight, height - 5);
+  ctx.textAlign = 'left';
+}
+
+function drawSplitChart() {
+  const frame = histCanvas(hel.split);
+  if (!frame) return;
+  const { ctx, width, height } = frame;
+  const padLeft = 42;
+  const padRight = 12;
+  const padTop = 12;
+  const padBottom = 20;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  if (plotW < HISTORY_MIN_PLOT || plotH < HISTORY_MIN_PLOT) return;
+
+  gridLines(ctx, padLeft, padTop, plotW, plotH);
+
+  const points = histPlot.points;
+  if (points.length < 2) {
+    ctx.fillStyle = histPalette.faint;
+    ctx.fillText('Two sessions needed for a trend', padLeft + 6, padTop + plotH / 2);
+    return;
+  }
+
+  // Faster is a smaller split, and the rower wants faster to read as higher, so the axis is
+  // inverted: `top` holds the QUICKEST split and maps to y = padTop, the top of the plot.
+  const top = histPlot.top;
+  const bottom = histPlot.bottom;
+  const range = bottom - top;      // >= 7.4s by construction in buildSplitPoints, never zero
+  const lastIndex = Math.max(1, points.length - 1);
+  const xOf = (index) => padLeft + (plotW * index) / lastIndex;
+  const yOf = (split) => padTop + plotH * ((split - top) / range);
+
+  const drawn = 1 + (points.length - 1) * Math.max(0, Math.min(1, histAnim));
+  ctx.beginPath();
+  ctx.moveTo(xOf(0), yOf(points[0]));
+  for (let i = 1; i < points.length; i++) {
+    if (i <= drawn - 1) {
+      ctx.lineTo(xOf(i), yOf(points[i]));
+    } else {
+      // Part-way along the last segment: the line grows rather than snapping into place.
+      const fraction = Math.max(0, drawn - 1 - (i - 1));
+      if (fraction <= 0) break;
+      ctx.lineTo(
+        xOf(i - 1) + (xOf(i) - xOf(i - 1)) * fraction,
+        yOf(points[i - 1]) + (yOf(points[i]) - yOf(points[i - 1])) * fraction);
+      break;
+    }
+  }
+  ctx.strokeStyle = histPalette.pulse;
+  ctx.lineWidth = 1.9;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  for (let i = 0; i < points.length; i++) {
+    if (i > drawn - 1) break;
+    const isFastest = points[i] === histPlot.fastest;
+    ctx.beginPath();
+    ctx.arc(xOf(i), yOf(points[i]), isFastest ? 3.4 : 2.1, 0, Math.PI * 2);
+    ctx.fillStyle = isFastest ? histPalette.accent : histPalette.pulse;
+    ctx.fill();
+  }
+
+  ctx.fillStyle = histPalette.faint;
+  ctx.textAlign = 'right';
+  ctx.fillText(formatPace(top), padLeft - 5, padTop + 8);        // quickest, at the top
+  ctx.fillText(formatPace(bottom), padLeft - 5, padTop + plotH); // slowest, at the bottom
+  ctx.textAlign = 'left';
+  ctx.fillText(`${points.length} sessions`, padLeft + 4, height - 5);
+}
+
+function drawHistoryCharts() {
+  if (!historyReady) return;
+  drawDistanceChart();
+  drawSplitChart();
+}
+
+function stopHistoryAnim() {
+  if (histRaf) {
+    cancelAnimationFrame(histRaf);
+    histRaf = 0;
+  }
+}
+
+function settleHistory() {
+  stopHistoryAnim();
+  histAnim = 1;
+  drawHistoryCharts();
+  paintSummary(1);
+}
+
+function animateHistory() {
+  stopHistoryAnim();
+  if (reducedMotion || document.hidden) {
+    settleHistory();
+    return;
+  }
+  const started = performance.now();
+  histAnim = 0;
+  const step = (now) => {
+    histRaf = 0;
+    const t = Math.min(1, (now - started) / HISTORY_ANIM_MS);
+    histAnim = 1 - Math.pow(1 - t, 3);
+    drawHistoryCharts();
+    paintSummary(histAnim);
+    if (t < 1) histRaf = requestAnimationFrame(step);
+  };
+  histRaf = requestAnimationFrame(step);
+}
+
+// A hidden tab does not get frames, so an animation started just before the switch would sit
+// half-drawn until the tab came back. Land it instead - and never leave a callback pending.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && histRaf) settleHistory();
+});
+
+/* ----- table and chips ----- */
+
+function renderHistoryTable() {
+  if (!hel.body) return;
+  if (!hist.sessions.length) {
+    hel.body.innerHTML = '<tr><td colspan="7" class="empty" style="font-family:var(--sans)">'
+      + 'No sessions recorded yet.</td></tr>';
+    return;
+  }
+  const best = histSummary.best;
+  const rows = hist.sessions.slice(-HISTORY_ROWS).reverse();
+  hel.body.innerHTML = rows.map((session, index) => {
+    const split = histNum(session.splitSeconds);
+    const isBest = split > 0 && split === best;
+    const delay = reducedMotion ? 0 : Math.min(index * 22, 420);
+    return `<tr class="in" style="animation-delay:${delay}ms">`
+      + `<td class="when">${escapeHtml(formatWhen(session.at))}</td>`
+      + `<td>${escapeHtml(String(session.game || 'ROW'))}</td>`
+      + `<td class="val">${Math.round(histNum(session.meters))}m</td>`
+      + `<td>${escapeHtml(formatElapsed(session.seconds))}</td>`
+      + `<td class="${isBest ? 'best' : 'val'}">${split > 0 ? escapeHtml(formatPace(split)) : '--:--'}</td>`
+      + `<td class="age">${histNum(session.spm) > 0 ? histNum(session.spm).toFixed(1) : '--'}</td>`
+      + `<td class="age">${Math.round(histNum(session.avgWatts))}W</td>`
+      + '</tr>';
+  }).join('');
+}
+
+function renderHistoryProfiles() {
+  if (!hel.profiles) return;
+  if (!hist.profiles.length) {
+    hel.profiles.innerHTML = '<span class="small" style="margin:0">'
+      + 'No profiles yet - they appear once the tablet pushes a session.</span>';
+    return;
+  }
+  hel.profiles.innerHTML = hist.profiles.map((entry) => {
+    const id = escapeHtml(String(entry.profile));
+    return `<button class="chip" type="button" data-profile="${id}" `
+      + `aria-pressed="${entry.profile === hist.profile}">`
+      + `<span class="history-profile">${id}<span class="count">${histNum(entry.sessions)}</span></span>`
+      + '</button>';
+  }).join('');
+  for (const button of hel.profiles.querySelectorAll('[data-profile]')) {
+    button.addEventListener('click', () => {
+      hist.profile = button.getAttribute('data-profile');
+      try {
+        localStorage.setItem('wake-history-profile', hist.profile);
+      } catch {
+        // private mode: the choice just does not persist
+      }
+      renderHistoryProfiles();
+      loadHistory().catch(() => {});
+    });
+  }
+}
+
+function renderBackupLink() {
+  if (!hel.backupLink) return;
+  if (hist.profile) {
+    hel.backupLink.href = `/api/backup?profile=${encodeURIComponent(hist.profile)}&download=1`;
+    hel.backupLink.removeAttribute('aria-disabled');
+    hel.backupLink.textContent = `Download ${hist.profile} backup`;
+  } else {
+    hel.backupLink.href = '#';
+    hel.backupLink.setAttribute('aria-disabled', 'true');
+    hel.backupLink.textContent = 'Download backup';
+  }
+}
+
+/* ----- loading ----- */
+
+async function loadHistoryProfiles() {
+  const response = await fetch('/api/history/profiles', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`profiles: HTTP ${response.status}`);
+  const data = await response.json();
+  hist.profiles = Array.isArray(data.profiles)
+    ? data.profiles.filter((entry) => entry && typeof entry.profile === 'string')
+    : [];
+  if (!hist.profile || !hist.profiles.some((entry) => entry.profile === hist.profile)) {
+    let saved = null;
+    try {
+      saved = localStorage.getItem('wake-history-profile');
+    } catch {
+      saved = null;
+    }
+    const match = hist.profiles.find((entry) => entry.profile === saved);
+    hist.profile = match ? match.profile : (hist.profiles[0] ? hist.profiles[0].profile : null);
+  }
+  renderHistoryProfiles();
+  renderBackupLink();
+}
+
+async function loadHistory() {
+  if (!historyReady) return;
+  renderBackupLink();
+  if (!hist.profile) {
+    hist.sessions = [];
+    computeSummary();
+    prepareHistoryPlots();
+    renderHistoryTable();
+    settleHistory();
+    return;
+  }
+  if (hist.loading) return;
+  hist.loading = true;
+  try {
+    const params = new URLSearchParams({ profile: hist.profile });
+    if (hist.days > 0) {
+      const from = new Date(Date.now() - hist.days * 86400000).toISOString().slice(0, 10);
+      params.set('from', from);
+    }
+    const response = await fetch(`/api/history?${params.toString()}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    hist.sessions = Array.isArray(data.sessions)
+      ? data.sessions.filter((session) => session && typeof session === 'object')
+      : [];
+    hist.sessions.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+    computeSummary();
+    prepareHistoryPlots();
+    renderHistoryTable();
+    animateHistory();
+    hel.note.textContent = `${histNum(data.count)} of ${histNum(data.total)} sessions for `
+      + `${hist.profile}. Pushed from the tablet to server/data/history; `
+      + 'backups in server/data/backups.';
+  } catch (error) {
+    hel.note.textContent = `Could not load history: ${error.message}. `
+      + 'The dashboard needs a restart to pick up the new routes.';
+  } finally {
+    hist.loading = false;
+  }
+}
+
+if (historyReady) {
+  for (const button of hel.ranges.querySelectorAll('[data-days]')) {
+    button.addEventListener('click', () => {
+      hist.days = Number(button.getAttribute('data-days')) || 0;
+      for (const other of hel.ranges.querySelectorAll('[data-days]')) {
+        other.setAttribute('aria-pressed', String(other === button));
+      }
+      loadHistory().catch(() => {});
+    });
+  }
+
+  if (hel.refresh) {
+    hel.refresh.addEventListener('click', () => {
+      loadHistoryProfiles().then(() => loadHistory()).catch(() => {});
+    });
+  }
+
+  if (hel.backupLink) {
+    hel.backupLink.addEventListener('click', (clickEvent) => {
+      if (!hist.profile) clickEvent.preventDefault();
+    });
+  }
+
+  // Resize fires in bursts while a window is dragged; coalesce to one repaint per frame.
+  window.addEventListener('resize', () => {
+    if (histRaf || histResizeRaf) return;
+    histResizeRaf = requestAnimationFrame(() => {
+      histResizeRaf = 0;
+      drawHistoryCharts();
+    });
+  });
+
+  // Canvas colours come from the CSS variables, which are read once into histPalette. A theme
+  // change has to refresh that and repaint, or the charts keep the old palette until new data.
+  if (el.themeToggle) {
+    el.themeToggle.addEventListener('click', () => {
+      readPalette();
+      if (!histRaf) drawHistoryCharts();
+    });
+  }
+}
+
+/**
+ * A row finished on the tablet while this page is open: reload and flash the panel, so the
+ * dashboard is current without anyone reaching for Refresh.
+ */
+function onHistorySession(session) {
+  if (!historyReady) return;
+  if (!session || (hist.profile && session.profile !== hist.profile)) {
+    loadHistoryProfiles().catch(() => {});
+    return;
+  }
+  loadHistoryProfiles()
+    .then(() => loadHistory())
+    .then(() => {
+      if (reducedMotion || !hel.panel) return;
+      hel.panel.classList.remove('history-flash');
+      void hel.panel.offsetWidth;   // restart the animation
+      hel.panel.classList.add('history-flash');
+    })
+    .catch(() => {});
+}
+
+if (historyReady) {
+  loadHistoryProfiles().then(() => loadHistory()).catch(() => {
+    hel.note.textContent = 'History routes are not answering - restart the dashboard '
+      + '(node server/server.js) to pick them up.';
+  });
+}

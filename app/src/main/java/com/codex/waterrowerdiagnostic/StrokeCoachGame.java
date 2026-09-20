@@ -45,6 +45,23 @@ import java.util.Locale;
  *   <li><b>Drive length</b> - with the handle calibrated ({@code cal.handle}), each stroke's length
  *   against your own reach, learned across sessions.</li>
  * </ul>
+ *
+ * <p>3.23 additions, all drawn and tapped inside this view:
+ * <ul>
+ *   <li><b>One live cue</b> - the worst fault in your stroke, held on screen until <em>three</em>
+ *   clean strokes retire it, then celebrated and replaced by the next one. The old tip line changed
+ *   every stroke and so could never be worked on.</li>
+ *   <li><b>The challenge</b> - a sixth chip beside the drills: hold a 90% shape match for twenty
+ *   strokes. One stroke under 90% and the chain breaks back to zero, which is the stake.</li>
+ *   <li><b>Badges in a skill tree</b> - nine badges across five tiers, unlocked by the drills, the
+ *   session's consistency and the challenge. Locked ones show what they need and how far along you
+ *   are; earning one stops the screen.</li>
+ *   <li><b>Weekly report card</b> - this week graded against last week, per category, with the bars
+ *   growing into place and the deltas called out.</li>
+ *   <li><b>Best session, not just best stroke</b> - the average shape of your best session is kept
+ *   and drawn as a third curve on the latest panel, with a live TODAY vs BEST SESSION strip.</li>
+ * </ul>
+ * The bottom band pages between the consistency map, the skill tree and the report card.
  */
 final class StrokeCoachGame extends GameView {
 
@@ -66,6 +83,70 @@ final class StrokeCoachGame extends GameView {
     private static final int DRILL_SAME = 2;
     private static final int DRILL_PRESSURE = 3;
     private static final int DRILL_REACH = 4;
+
+    /** The challenge sits beside the drills as a sixth chip: hold the shape for twenty strokes. */
+    private static final int CHALLENGE = DRILL_NAME.length;
+    private static final int CHIPS = DRILL_NAME.length + 1;
+    private static final int CHALLENGE_TARGET = 20;
+    private static final float CHALLENGE_MATCH = 90f;
+
+    // One live cue at a time, held until three clean strokes retire it.
+    private static final int CUE_NONE = -1;
+    private static final int CUE_LATE = 0;
+    private static final int CUE_EARLY = 1;
+    private static final int CUE_RUSH = 2;
+    private static final int CUE_SHORT = 3;
+    private static final int CUE_PAUSE = 4;
+    private static final int CUE_VARY = 5;
+    private static final int CUE_FADE = 6;
+    private static final int CUES = 7;
+    private static final int CUE_CLEAN_NEEDED = 3;
+    private static final String[] CUE_TITLE = {
+            "LEGS FIRST", "FINISH IT", "SLOW THE SLIDE", "REACH FURTHER",
+            "KEEP IT MOVING", "SAME STROKE", "MORE PRESSURE"};
+    private static final String[] CUE_BODY = {
+            "Your power peaks late. Drive with the legs first, then swing the back, then draw the arms.",
+            "Your power peaks too early. Keep pushing all the way through to the finish.",
+            "You are rushing back to the catch. Let the slide take about twice as long as the drive.",
+            "You are stopping short of your own reach. Come all the way up the slide at the catch.",
+            "You are sitting at the catch. Take the next stroke sooner and keep the boat running.",
+            "Every stroke is a different shape. Settle down and repeat the last one exactly.",
+            "The pressure has dropped. Lengthen the stroke and push harder through the water."};
+    private static final String[] CUE_DONE = {
+            "LEGS LEADING", "DRIVING THROUGH", "SLIDE UNDER CONTROL", "FULL LENGTH",
+            "BOAT MOVING", "REPEATABLE", "PRESSURE BACK"};
+
+    // Badges: a small skill tree, five tiers deep. A badge needs its own feat and its prerequisites.
+    private static final int BADGES = 9;
+    private static final String[] BADGE_NAME = {
+            "LEGS FIRST", "RHYTHM", "FULL REACH", "REPEATER", "PRESSURE",
+            "STEADY", "FLAWLESS", "LOCKED IN", "STROKE MASTER"};
+    private static final String[] BADGE_NEED = {
+            "Pass the LEGS FIRST drill", "Pass the RATIO 1:2 drill", "Pass the FULL REACH drill",
+            "Pass the SAME STROKE drill", "Pass the PRESSURE drill",
+            "80% session consistency over 30 strokes", "Take any drill to 10 out of 10",
+            "Hold a 90% shape match for 20 strokes", "Earn every other badge"};
+    /** Which drill earns each badge, or -1 when the feat is something else. */
+    private static final int[] BADGE_DRILL = {
+            DRILL_LEGS, DRILL_RATIO, DRILL_REACH, DRILL_SAME, DRILL_PRESSURE, -1, -1, -1, -1};
+    private static final int[] BADGE_TIER = {0, 0, 0, 1, 1, 2, 2, 3, 4};
+    private static final int[] BADGE_PREREQ = {0, 0, 0, 1, 2, 8, 16, 32 | 64, 255};
+    private static final int BADGE_TIERS = 5;
+    private static final int BADGE_STEADY = 5;
+    private static final int BADGE_FLAWLESS = 6;
+    private static final int BADGE_LOCKED_IN = 7;
+    private static final int BADGE_MASTER = 8;
+    /** Session consistency and stroke count the STEADY badge asks for. */
+    private static final float STEADY_PERCENT = 80f;
+    private static final int STEADY_STROKES = 30;
+
+    // Bottom band pages.
+    private static final int PAGE_MAP = 0;
+    private static final int PAGE_SKILLS = 1;
+    private static final int PAGE_REPORT = 2;
+    private static final String[] PAGE_NAME = {"MAP", "SKILLS", "REPORT"};
+    /** Report card rows: shape, consistency, ratio and overall score. */
+    private static final String[] REPORT_ROW = {"SHAPE MATCH", "CONSISTENCY", "RATIO 1:2", "STROKE SCORE"};
 
     private final PersonalBests bests;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -89,8 +170,6 @@ final class StrokeCoachGame extends GameView {
     private float ratioScore;
     private float consistency;
     private float peakPos;
-    private String tip = "Row a few strokes - each one is drawn here as you finish it.";
-    private int tipColor = DIM;
     private int strokes;
     private float scoreSum;
 
@@ -127,6 +206,8 @@ final class StrokeCoachGame extends GameView {
     private boolean mapDirty;
     private final Rect mapSrc = new Rect();
     private final RectF mapDst = new RectF();
+    /** Reused for every arc drawn in the skill tree - nothing is allocated in the frame loop. */
+    private final RectF arcRect = new RectF();
     private final int[] heat = new int[64];
 
     // Drills.
@@ -140,14 +221,82 @@ final class StrokeCoachGame extends GameView {
     private String stampText = "";
     private float lastJudgeTimer;
     private boolean lastJudgePass;
-    private final float[] chipL = new float[DRILL_NAME.length];
-    private final float[] chipT = new float[DRILL_NAME.length];
-    private final float[] chipR = new float[DRILL_NAME.length];
-    private final float[] chipB = new float[DRILL_NAME.length];
+    private final float[] chipL = new float[CHIPS];
+    private final float[] chipT = new float[CHIPS];
+    private final float[] chipR = new float[CHIPS];
+    private final float[] chipB = new float[CHIPS];
     private final float[] stopHit = new float[4];
     /** Drill bests and the session record, read once per session rather than from prefs every frame. */
     private final float[] drillBest = new float[DRILL_NAME.length];
     private float bestSessionScore = Float.NaN;
+
+    // The challenge: hold a 90% shape match for twenty strokes, a miss breaks the chain.
+    private boolean challengeOn;
+    private int challengeRun;
+    private int challengeBestRun;
+    private float challengeRecord = -1f;
+    private float challengeFlash;
+    private float challengeBreak;
+    private boolean challengeLastPass;
+    private float challengeMatchShown;
+
+    // One live cue at a time.
+    private int cue = CUE_NONE;
+    private int cueClean;
+    private int cueStrokes;
+    private float cueSeverity;
+    private int cueFixedIndex = CUE_NONE;
+    private float cueFixedTimer;
+    private int cuesFixed;
+    private float cueArrive;
+    private final float[] cueSev = new float[CUES];
+
+    // Badges.
+    private int badges;
+    private int badgeBanner = -1;
+    private float badgeBannerTimer;
+    /** A badge earned but not yet looked at, so the SKILLS tab keeps asking to be opened. */
+    private boolean badgeUnseen;
+    private final float[] badgeFlash = new float[BADGES];
+    private final float[] badgeX = new float[BADGES];
+    private final float[] badgeY = new float[BADGES];
+    private final Fx.Particles confetti = new Fx.Particles();
+
+    // Best session, not just best stroke.
+    private boolean hasBestSession;
+    private final float[] bestSessionShape = new float[SHAPE];
+    private float bsScore;
+    private float bsPower;
+    private float bsDrive;
+    private float bsRatio;
+    private float bsConsistency;
+    private int bsStrokes;
+    private long bsDay;
+    private float sessionMatch = Float.NaN;
+    private float sessionPowerSum;
+    private int sessionPowerCount;
+    private float sessionRatioSum;
+    private float sessionDriveSum;
+    /** Eased figures for the TODAY vs BEST SESSION strip, so the bars move rather than jump. */
+    private final float[] compareShown = new float[4];
+
+    // Weekly report card.
+    private long weekIndex;
+    private long prevWeekIndex = Long.MIN_VALUE;
+    /** strokes, score sum, shape sum, consistency sum, ratio-score sum, drills passed, minutes. */
+    private final float[] week = new float[7];
+    private final float[] prevWeek = new float[7];
+    private float weekSavedStrokes;
+    /** Eased report bars, this week then last week. */
+    private final float[] reportShown = new float[REPORT_ROW.length];
+
+    // Bottom band paging.
+    private int page = PAGE_MAP;
+    private float pageAnim;
+    private final float[] tabL = new float[PAGE_NAME.length];
+    private final float[] tabT = new float[PAGE_NAME.length];
+    private final float[] tabR = new float[PAGE_NAME.length];
+    private final float[] tabB = new float[PAGE_NAME.length];
 
     StrokeCoachGame(Context context, PersonalBests bests) {
         super(context);
@@ -176,6 +325,32 @@ final class StrokeCoachGame extends GameView {
         hasTravel = false;
         drill = -1;
         stampTimer = 0;
+        challengeOn = false;
+        challengeRun = 0;
+        challengeBestRun = 0;
+        challengeBreak = 0f;
+        challengeFlash = 0f;
+        challengeMatchShown = 0f;
+        cue = CUE_NONE;
+        cueClean = 0;
+        cueStrokes = 0;
+        cueFixedIndex = CUE_NONE;
+        cueFixedTimer = 0f;
+        cuesFixed = 0;
+        sessionPowerSum = 0f;
+        sessionPowerCount = 0;
+        sessionRatioSum = 0f;
+        sessionDriveSum = 0f;
+        sessionMatch = Float.NaN;
+        weekSavedStrokes = 0f;
+        badgeBanner = -1;
+        badgeBannerTimer = 0f;
+        badgeUnseen = false;
+        Arrays.fill(badgeFlash, 0f);
+        Arrays.fill(compareShown, 0f);
+        Arrays.fill(reportShown, 0f);
+        page = PAGE_MAP;
+        pageAnim = 0f;
         Arrays.fill(mapPixels, 0);
         mapDirty = true;
         String saved = bests.getString("coach.best.power");
@@ -205,12 +380,18 @@ final class StrokeCoachGame extends GameView {
         }
         bestSessionScore = bests.has("coach.score") ? bests.get("coach.score", 0f) : Float.NaN;
         storedReach = bests.get("coach.reach", 0f);
+        challengeRecord = bests.has("coach.challenge") ? bests.get("coach.challenge", 0f) : -1f;
+        badges = Math.round(bests.get("coach.badges", 0f));
+        loadBestSession();
+        loadWeek();
+        checkBadges(false);
     }
 
     @Override
     protected void onStop() {
         if (strokes >= 20) {
             bests.recordHighest("coach.score", scoreSum / strokes);
+            saveBestSessionIfBetter();
         }
         // Learn the rower's reach slowly across sessions, from this session's 90th percentile.
         if (lengthCount >= 20 && !Float.isNaN(sessionReachP90)) {
@@ -218,6 +399,8 @@ final class StrokeCoachGame extends GameView {
             bests.putFloat("coach.reach", reach);
             storedReach = reach;
         }
+        week[6] += (float) (activeSeconds / 60.0);
+        saveWeek();
     }
 
     @Override
@@ -324,34 +507,410 @@ final class StrokeCoachGame extends GameView {
             bests.putFloat("coach.best.length", Float.isNaN(length) ? -1f : length);
         }
 
-        if (drill >= 0) {
-            judgeDrill(ratio, power, length, prevDev);
+        // Session aggregates: what the best-session comparison and the report card are built from.
+        if (!Float.isNaN(power) && power > 0) {
+            sessionPowerSum += power;
+            sessionPowerCount++;
+        }
+        if (ratio > 0) {
+            sessionRatioSum += ratio;
+        }
+        sessionDriveSum += lastDriveSec;
+        if (hasBestSession && mapCount >= 3) {
+            sessionMatch = clamp100(100f * (1f - meanAbs(sessionMean, bestSessionShape) * 1.6f));
         }
 
+        week[0] += 1f;
+        week[1] += lastScore;
+        week[2] += similarity;
+        week[3] += consistency;
+        week[4] += ratioScore;
+        // A prefs write every stroke would be wasteful; every 25 keeps a killed session honest.
+        if (week[0] - weekSavedStrokes >= 25f) {
+            weekSavedStrokes = week[0];
+            saveWeek();
+        }
+
+        if (drill >= 0) {
+            judgeDrill(ratio, power, length, prevDev);
+        } else if (challengeOn) {
+            judgeChallenge();
+        }
+
+        updateCue(ratio, power, length);
+        checkBadges(true);
+    }
+
+    /* ---------- one live cue at a time ---------- */
+
+    /**
+     * Scores every fault this stroke has, keeps working on the worst one, and only retires it after
+     * {@link #CUE_CLEAN_NEEDED} clean strokes in a row - so a cue can actually be worked on, where
+     * the old tip line changed every stroke and none of them stuck.
+     */
+    private void updateCue(float ratio, float power, float length) {
+        Arrays.fill(cueSev, 0f);
         float reach = reachTarget();
         if (peakPos > 0.62f) {
-            tip = "Peak arrives late - drive with the legs first, then the back and arms.";
-            tipColor = WARN;
-        } else if (peakPos < 0.22f) {
-            tip = "Peak comes too early - keep pushing all the way through the finish.";
-            tipColor = WARN;
-        } else if (ratio > 0 && ratio < 1.5f) {
-            tip = String.format(Locale.US, "Rushing the recovery (1:%.1f) - slow the slide back toward 1:2.", ratio);
-            tipColor = WARN;
-        } else if (!Float.isNaN(length) && !Float.isNaN(reach) && length < reach * 0.93f) {
-            tip = String.format(Locale.US, "Short stroke - %d cm under your reach. Come all the way up the slide at the catch.",
-                    Math.round((reach - length) * 100));
-            tipColor = WARN;
-        } else if (ratio > 3.2f) {
-            tip = "A long pause between strokes - keep the boat moving.";
-            tipColor = WARN;
-        } else if (consistency < 70f) {
-            tip = "Strokes are varying - settle into a rhythm and repeat the same stroke.";
-            tipColor = WARN;
-        } else {
-            tip = "Smooth, consistent stroke. Hold it.";
-            tipColor = ACCENT;
+            cueSev[CUE_LATE] = (peakPos - 0.62f) * 260f;
         }
+        if (peakPos < 0.22f) {
+            cueSev[CUE_EARLY] = (0.22f - peakPos) * 260f;
+        }
+        if (ratio > 0 && ratio < 1.5f) {
+            cueSev[CUE_RUSH] = (1.5f - ratio) * 70f;
+        }
+        if (ratio > 3.2f) {
+            cueSev[CUE_PAUSE] = (ratio - 3.2f) * 30f;
+        }
+        if (!Float.isNaN(length) && !Float.isNaN(reach) && reach > 0 && length < reach * 0.93f) {
+            cueSev[CUE_SHORT] = (reach * 0.93f - length) / reach * 400f;
+        }
+        if (consistency < 70f) {
+            cueSev[CUE_VARY] = (70f - consistency) * 1.1f;
+        }
+        // Light strokes are judged against this rower's own easy end, never a constant.
+        float light = (float) profile.wattsAt(0.3);
+        if (!Float.isNaN(power) && power > 0 && light > 0 && power < light) {
+            cueSev[CUE_FADE] = (light - power) / light * 90f;
+        }
+
+        int worst = CUE_NONE;
+        for (int i = 0; i < CUES; i++) {
+            // NaN never compares greater, so a bad reading simply drops out rather than winning.
+            if (cueSev[i] > 0 && (worst < 0 || cueSev[i] > cueSev[worst])) {
+                worst = i;
+            }
+        }
+
+        // A NaN severity would fail "<= 0" and then leave worst at CUE_NONE below, so treat
+        // anything that is not a positive number as "no fault" here.
+        if (cue != CUE_NONE && !(cueSev[cue] > 0f)) {
+            cueClean++;
+            if (cueClean >= CUE_CLEAN_NEEDED) {
+                cueFixedIndex = cue;
+                cueFixedTimer = 3.2f;
+                cuesFixed++;
+                cue = CUE_NONE;
+                cueClean = 0;
+                cueStrokes = 0;
+                confettiBurst();
+            }
+        } else if (cue != CUE_NONE) {
+            cueClean = 0;
+            cueStrokes++;
+            cueSeverity = cueSev[cue];
+            // Only a clearly worse fault interrupts the one being worked on.
+            if (worst != CUE_NONE && worst != cue && cueSev[worst] > cueSev[cue] + 30f) {
+                cue = worst;
+                cueStrokes = 0;
+                cueSeverity = cueSev[worst];
+                cueArrive = 1f;
+            }
+        }
+        if (cue == CUE_NONE && worst != CUE_NONE && cueFixedTimer <= 0f) {
+            cue = worst;
+            cueClean = 0;
+            cueStrokes = 0;
+            cueSeverity = cueSev[worst];
+            cueArrive = 1f;
+        }
+
+    }
+
+    /* ---------- the challenge ---------- */
+
+    private void startChallenge() {
+        challengeOn = true;
+        challengeRun = 0;
+        challengeBreak = 0f;
+        challengeLastPass = true;
+        stampTimer = 0f;
+    }
+
+    private void judgeChallenge() {
+        boolean pass = hasBest && similarity >= CHALLENGE_MATCH;
+        challengeLastPass = pass;
+        if (pass) {
+            challengeRun++;
+            challengeFlash = 1f;
+            challengeBestRun = Math.max(challengeBestRun, challengeRun);
+            if (challengeRun >= CHALLENGE_TARGET) {
+                stampPassed = true;
+                stampText = "CHALLENGE  " + CHALLENGE_TARGET + "/" + CHALLENGE_TARGET;
+                stampTimer = 4f;
+                challengeOn = false;
+                confettiBurst();
+            }
+        } else {
+            challengeBreak = 1f;
+            if (challengeRun > 0) {
+                stampPassed = false;
+                stampText = "CHAIN BROKE  " + challengeRun + "/" + CHALLENGE_TARGET;
+                stampTimer = 2.2f;
+            }
+            challengeRun = 0;
+        }
+        if (challengeBestRun > challengeRecord) {
+            challengeRecord = challengeBestRun;
+            bests.recordHighest("coach.challenge", challengeBestRun);
+        }
+    }
+
+    private void confettiBurst() {
+        float w = getWidth();
+        float h = getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        for (int i = 0; i < 40; i++) {
+            confetti.spawn(w * 0.5f + (float) (Math.random() - 0.5) * w * 0.4f, h * 0.42f,
+                    (float) (Math.random() - 0.5) * 420f, -180f - (float) Math.random() * 320f,
+                    1.8f, dp(4f), i % 3 == 0 ? ACCENT : i % 3 == 1 ? WARN : BLUE, true);
+        }
+    }
+
+    /* ---------- badges ---------- */
+
+    private boolean hasBadge(int i) {
+        return (badges & (1 << i)) != 0;
+    }
+
+    /** How far along a locked badge is, 0..1, so the tree shows progress rather than a blank. */
+    private float badgeProgress(int i) {
+        int d = BADGE_DRILL[i];
+        if (d >= 0) {
+            return drillBest[d] < 0 ? 0f : clamp01(drillBest[d] / DRILL_PASS);
+        }
+        switch (i) {
+            case BADGE_STEADY:
+                if (Float.isNaN(sessionConsistency)) {
+                    return 0f;
+                }
+                return Math.min(clamp01(mapCount / (float) STEADY_STROKES),
+                        clamp01(sessionConsistency / STEADY_PERCENT));
+            case BADGE_FLAWLESS: {
+                float top = 0f;
+                for (float v : drillBest) {
+                    top = Math.max(top, v);
+                }
+                return clamp01(top / DRILL_STROKES);
+            }
+            case BADGE_LOCKED_IN:
+                return clamp01(Math.max(challengeRun, Math.max(challengeBestRun, challengeRecord))
+                        / (float) CHALLENGE_TARGET);
+            default: {
+                int have = 0;
+                for (int k = 0; k < BADGES - 1; k++) {
+                    if (hasBadge(k)) {
+                        have++;
+                    }
+                }
+                return have / (float) (BADGES - 1);
+            }
+        }
+    }
+
+    /** True when the feat itself is done, prerequisites aside. */
+    private boolean badgeFeatDone(int i) {
+        int d = BADGE_DRILL[i];
+        if (d >= 0) {
+            return drillBest[d] >= DRILL_PASS;
+        }
+        switch (i) {
+            case BADGE_STEADY:
+                return mapCount >= STEADY_STROKES && !Float.isNaN(sessionConsistency)
+                        && sessionConsistency >= STEADY_PERCENT;
+            case BADGE_FLAWLESS:
+                for (float v : drillBest) {
+                    if (v >= DRILL_STROKES) {
+                        return true;
+                    }
+                }
+                return false;
+            case BADGE_LOCKED_IN:
+                return Math.max(challengeBestRun, challengeRecord) >= CHALLENGE_TARGET;
+            default:
+                for (int k = 0; k < BADGES - 1; k++) {
+                    if (!hasBadge(k)) {
+                        return false;
+                    }
+                }
+                return true;
+        }
+    }
+
+    /**
+     * Awards anything now earned. Conditions are re-checked every time, so a badge whose feat was
+     * done before its prerequisite lands is granted the moment the prerequisite does.
+     */
+    private void checkBadges(boolean celebrate) {
+        boolean changed = false;
+        // Two passes, so a tier unlocked in this call can award the tier above it.
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < BADGES; i++) {
+                if (hasBadge(i) || (badges & BADGE_PREREQ[i]) != BADGE_PREREQ[i]) {
+                    continue;
+                }
+                if (!badgeFeatDone(i)) {
+                    continue;
+                }
+                badges |= 1 << i;
+                changed = true;
+                if (celebrate) {
+                    badgeFlash[i] = 2.5f;
+                    badgeBanner = i;
+                    badgeBannerTimer = 3.4f;
+                    badgeUnseen = true;
+                    confettiBurst();
+                }
+            }
+        }
+        if (changed) {
+            bests.putFloat("coach.badges", badges);
+        }
+    }
+
+    /* ---------- best session, not just best stroke ---------- */
+
+    private void loadBestSession() {
+        hasBestSession = false;
+        String s = bests.getString("coach.session.best");
+        if (s == null) {
+            return;
+        }
+        String[] parts = s.split("\\|");
+        if (parts.length != 8) {
+            return;
+        }
+        try {
+            bsScore = Float.parseFloat(parts[0]);
+            bsPower = Float.parseFloat(parts[1]);
+            bsDrive = Float.parseFloat(parts[2]);
+            bsRatio = Float.parseFloat(parts[3]);
+            bsConsistency = Float.parseFloat(parts[4]);
+            bsStrokes = Integer.parseInt(parts[5]);
+            bsDay = Long.parseLong(parts[6]);
+            String[] curve = parts[7].split(",");
+            if (curve.length != SHAPE) {
+                return;
+            }
+            for (int i = 0; i < SHAPE; i++) {
+                bestSessionShape[i] = Float.parseFloat(curve[i]);
+            }
+            hasBestSession = true;
+        } catch (NumberFormatException ignored) {
+            hasBestSession = false;
+        }
+    }
+
+    private void saveBestSessionIfBetter() {
+        float avg = scoreSum / strokes;
+        if (hasBestSession && avg <= bsScore) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(Locale.US, "%.2f|%.1f|%.3f|%.3f|%.2f|%d|%d|",
+                avg, sessionAvgPower(), sessionAvgDrive(), sessionAvgRatio(),
+                Float.isNaN(sessionConsistency) ? 0f : sessionConsistency, strokes, todayLocal()));
+        for (int i = 0; i < SHAPE; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(String.format(Locale.US, "%.3f", sessionMean[i]));
+        }
+        bests.putString("coach.session.best", sb.toString());
+    }
+
+    private float sessionAvgPower() {
+        return sessionPowerCount > 0 ? sessionPowerSum / sessionPowerCount : 0f;
+    }
+
+    private float sessionAvgDrive() {
+        return strokes > 0 ? sessionDriveSum / strokes : 0f;
+    }
+
+    private float sessionAvgRatio() {
+        return strokes > 0 ? sessionRatioSum / strokes : 0f;
+    }
+
+    /* ---------- the week ---------- */
+
+    /** Days since the epoch in the tablet's own timezone. */
+    private static long todayLocal() {
+        long now = System.currentTimeMillis();
+        return (now + java.util.TimeZone.getDefault().getOffset(now)) / 86400000L;
+    }
+
+    /** Monday-start week number. Day 0 of the epoch was a Thursday. */
+    private static long weekOf(long day) {
+        long d = day + 3;
+        return d >= 0 ? d / 7 : (d - 6) / 7;
+    }
+
+    private void loadWeek() {
+        weekIndex = weekOf(todayLocal());
+        Arrays.fill(week, 0f);
+        Arrays.fill(prevWeek, 0f);
+        String cur = bests.getString("coach.week");
+        String prev = bests.getString("coach.week.prev");
+        long curWeek = decodeWeek(cur, week);
+        if (curWeek != Long.MIN_VALUE && curWeek != weekIndex) {
+            // The stored week has rolled over: it becomes last week and this one starts clean.
+            prev = cur;
+            bests.putString("coach.week.prev", cur);
+            Arrays.fill(week, 0f);
+            bests.putString("coach.week", encodeWeek(weekIndex, week));
+        } else if (curWeek == Long.MIN_VALUE) {
+            Arrays.fill(week, 0f);
+        }
+        prevWeekIndex = decodeWeek(prev, prevWeek);
+        if (prevWeekIndex == Long.MIN_VALUE) {
+            Arrays.fill(prevWeek, 0f);
+        }
+    }
+
+    /** Fills {@code into} and returns the stored week index, or {@link Long#MIN_VALUE}. */
+    private static long decodeWeek(String s, float[] into) {
+        if (s == null) {
+            return Long.MIN_VALUE;
+        }
+        String[] p = s.split("\\|");
+        if (p.length != into.length + 1) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            long wk = Long.parseLong(p[0]);
+            for (int i = 0; i < into.length; i++) {
+                into[i] = Float.parseFloat(p[i + 1]);
+            }
+            return wk;
+        } catch (NumberFormatException e) {
+            return Long.MIN_VALUE;
+        }
+    }
+
+    private static String encodeWeek(long wk, float[] v) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(wk);
+        for (float f : v) {
+            sb.append('|').append(String.format(Locale.US, "%.2f", f));
+        }
+        return sb.toString();
+    }
+
+    private void saveWeek() {
+        // Nothing to keep only when neither strokes nor minutes were added; a visit with no
+        // strokes still spent minutes on the machine and the report card counts them.
+        if (week[0] <= 0f && week[6] <= 0f) {
+            return;
+        }
+        bests.putString("coach.week", encodeWeek(weekIndex, week));
+    }
+
+    /** Average of a weekly sum, 0 when that week has no strokes. */
+    private static float weekAvg(float[] w, int field) {
+        return w[0] > 0 ? w[field] / w[0] : 0f;
     }
 
     /** Cumulative paddle rotation through the drive: the handle travels in proportion to it. */
@@ -434,7 +993,15 @@ final class StrokeCoachGame extends GameView {
         if (d == DRILL_REACH) {
             return calibrated() && !Float.isNaN(reachTarget());
         }
+        if (d == CHALLENGE) {
+            // Matching a shape needs a best stroke to match against.
+            return hasBest;
+        }
         return true;
+    }
+
+    private String chipName(int i) {
+        return i == CHALLENGE ? "CHALLENGE" : DRILL_NAME[i];
     }
 
     private void startDrill(int d) {
@@ -490,7 +1057,13 @@ final class StrokeCoachGame extends GameView {
                 bests.recordHighest("coach.drill." + DRILL_KEY[drill], drillPassed);
                 drillBest[drill] = Math.max(drillBest[drill], drillPassed);
             }
+            if (stampPassed) {
+                week[5] += 1f;
+                saveWeek();
+                confettiBurst();
+            }
             drill = -1;
+            checkBadges(true);
         }
     }
 
@@ -501,14 +1074,35 @@ final class StrokeCoachGame extends GameView {
                 && e.getEventTime() - e.getDownTime() < ViewConfiguration.getLongPressTimeout()) {
             float x = e.getX();
             float y = e.getY();
-            if (drill >= 0) {
+            boolean onTab = false;
+            for (int i = 0; i < PAGE_NAME.length; i++) {
+                // The rects are zero until the first frame has laid them out; an empty rect must
+                // not swallow a tap at the top-left corner.
+                if (tabR[i] > tabL[i] && x >= tabL[i] && x <= tabR[i] && y >= tabT[i] && y <= tabB[i]) {
+                    if (page != i) {
+                        page = i;
+                        pageAnim = 0f;
+                    }
+                    onTab = true;
+                    break;
+                }
+            }
+            if (onTab) {
+                // handled
+            } else if (drill >= 0 || challengeOn) {
                 if (x >= stopHit[0] && x <= stopHit[2] && y >= stopHit[1] && y <= stopHit[3]) {
                     drill = -1;
+                    challengeOn = false;
                 }
             } else {
-                for (int i = 0; i < DRILL_NAME.length; i++) {
-                    if (x >= chipL[i] && x <= chipR[i] && y >= chipT[i] && y <= chipB[i] && drillAvailable(i)) {
-                        startDrill(i);
+                for (int i = 0; i < CHIPS; i++) {
+                    if (chipR[i] > chipL[i] && x >= chipL[i] && x <= chipR[i]
+                            && y >= chipT[i] && y <= chipB[i] && drillAvailable(i)) {
+                        if (i == CHALLENGE) {
+                            startChallenge();
+                        } else {
+                            startDrill(i);
+                        }
                         break;
                     }
                 }
@@ -866,7 +1460,7 @@ final class StrokeCoachGame extends GameView {
         bold(c, strokes > 0 ? String.valueOf(Math.round(lastScore)) : "--", rx, dp(66f), 60f,
                 strokes == 0 ? FAINT : lastScore >= 80 ? ACCENT : lastScore >= 60 ? WARN : BAD, Paint.Align.LEFT);
         label(c, "STROKE SCORE", rx, dp(86f), 10f, FAINT, Paint.Align.LEFT);
-        wrap(c, tip, rx + dp(150f), dp(30f), right - rx - dp(150f), 15f, tipColor);
+        drawCue(c, rx + dp(140f), dp(10f), right, dp(124f), dt);
         PulseMeter.Stroke s = status == null ? null : status.meter.lastStroke;
         float col = (right - rx) / 4f;
         float gy = dp(150f);
@@ -884,7 +1478,8 @@ final class StrokeCoachGame extends GameView {
         } else {
             metric(c, rx + 3 * col, gy + dp(60f), strokes > 0 ? String.valueOf(strokes) : "--", "STROKES COACHED");
         }
-        drawDrills(c, rx - dp(8f), gy + dp(92f), right, rowA, dt);
+        drawCompare(c, rx - dp(8f), gy + dp(80f), right, gy + dp(142f), dt);
+        drawTraining(c, rx - dp(8f), gy + dp(150f), right, rowA, dt);
 
         // Row B: the stick rower, drive length, live paddle trace.
         float bMid = w * 0.36f;
@@ -892,8 +1487,8 @@ final class StrokeCoachGame extends GameView {
         drawLength(c, bMid + gapX / 2f, rowB0, leftEnd, rowB1, dt);
         drawLiveTrace(c, leftEnd + gapX, rowB0, right, rowB1, dt);
 
-        // Row C: the session's consistency map.
-        drawMap(c, pad, rowC0, right, h - dp(10f));
+        // Row C: the consistency map, the skill tree or the report card.
+        drawBottom(c, pad, rowC0, right, h - dp(10f), dt);
 
         // Drill verdict stamp, over everything.
         if (stampTimer > 0f) {
@@ -918,6 +1513,170 @@ final class StrokeCoachGame extends GameView {
             bold(c, stampText, 0, dp(14f), 48f, colr, Paint.Align.CENTER);
             c.restore();
         }
+
+        // Celebration confetti, then the badge banner above everything.
+        confetti.step(dt, dp(520f));
+        confetti.draw(c);
+        drawBadgeBanner(c, w, h, dt);
+    }
+
+    /** A badge landing stops the screen for a moment - it is the reward the drills are for. */
+    private void drawBadgeBanner(Canvas c, float w, float h, float dt) {
+        if (badgeBannerTimer <= 0f || badgeBanner < 0) {
+            return;
+        }
+        badgeBannerTimer -= dt;
+        if (badgeBannerTimer <= 0f) {
+            badgeBanner = -1;
+            return;
+        }
+        float a = Math.min(1f, badgeBannerTimer / 0.6f);
+        float in = 1f - clamp01((badgeBannerTimer - 3.0f) / 0.4f);
+        float rise = (1f - smooth(in)) * dp(40f);
+        c.save();
+        c.translate(w * 0.5f, h * 0.20f + rise);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xF00B1220);
+        paint.setAlpha((int) (240 * a));
+        c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(3f));
+        paint.setColor(ACCENT);
+        paint.setAlpha((int) (255 * a));
+        c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setAlpha(255);
+        float spin = (float) Math.sin(sessionSeconds * 3) * 0.12f;
+        c.save();
+        c.translate(-dp(200f), 0);
+        c.rotate((float) Math.toDegrees(spin));
+        drawBadgeMedal(c, 0, 0, dp(28f), ACCENT, 1f);
+        c.restore();
+        bold(c, "BADGE EARNED", -dp(150f), -dp(14f), 12f, FAINT, Paint.Align.LEFT);
+        bold(c, BADGE_NAME[badgeBanner], -dp(150f), dp(16f), 30f, ACCENT, Paint.Align.LEFT);
+        c.restore();
+    }
+
+    /** A medal: a ring, a tick and a couple of rays that turn with {@code shine}. */
+    private void drawBadgeMedal(Canvas c, float cx, float cy, float rad, int color, float shine) {
+        Fx.glow(c, cx, cy, rad * 2f, (color & 0x00FFFFFF) | 0x60000000);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF10202E);
+        c.drawCircle(cx, cy, rad, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(rad * 0.16f);
+        paint.setColor(color);
+        c.drawCircle(cx, cy, rad * 0.84f, paint);
+        // Tick.
+        paint.setStrokeWidth(rad * 0.18f);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        c.drawLine(cx - rad * 0.38f, cy + rad * 0.02f, cx - rad * 0.08f, cy + rad * 0.34f, paint);
+        c.drawLine(cx - rad * 0.08f, cy + rad * 0.34f, cx + rad * 0.44f, cy - rad * 0.36f, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        if (shine > 0f) {
+            paint.setStrokeWidth(rad * 0.1f);
+            paint.setAlpha((int) (150 * shine));
+            for (int i = 0; i < 4; i++) {
+                double ang = sessionSeconds * 1.2 + i * Math.PI / 2;
+                float x0 = cx + (float) Math.cos(ang) * rad * 1.15f;
+                float y0 = cy + (float) Math.sin(ang) * rad * 1.15f;
+                float x1 = cx + (float) Math.cos(ang) * rad * 1.45f;
+                float y1 = cy + (float) Math.sin(ang) * rad * 1.45f;
+                c.drawLine(x0, y0, x1, y1, paint);
+            }
+            paint.setAlpha(255);
+        }
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /* ---------- the live cue ---------- */
+
+    /**
+     * One cue, held until it is fixed. The three pips are the clean strokes it needs; filling them
+     * retires the cue with a flash and the next fault takes its place.
+     */
+    private void drawCue(Canvas c, float l, float t, float r, float b, float dt) {
+        cueArrive = Math.max(0f, cueArrive - dt * 2.2f);
+        if (cueFixedTimer > 0f) {
+            cueFixedTimer = Math.max(0f, cueFixedTimer - dt);
+        }
+        boolean fixed = cueFixedTimer > 0f && cueFixedIndex >= 0;
+        int color = fixed ? ACCENT : cue == CUE_NONE ? ACCENT : WARN;
+        float slide = smooth(cueArrive) * dp(26f);
+        c.save();
+        c.translate(slide, 0);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        // A pulsing edge on the side: the cue is the thing to look at.
+        float pulse = 0.55f + 0.45f * (float) Math.sin(sessionSeconds * (fixed ? 8 : 2.4));
+        paint.setColor(color);
+        paint.setAlpha((int) (90 + 140 * pulse));
+        c.drawRoundRect(l, t + dp(8f), l + dp(6f), b - dp(8f), dp(3f), dp(3f), paint);
+        paint.setAlpha(255);
+        float x = l + dp(20f);
+        if (fixed) {
+            label(c, "FIXED", x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
+            bold(c, CUE_DONE[cueFixedIndex], x, t + dp(46f), 24f, ACCENT, Paint.Align.LEFT);
+            label(c, "Three clean strokes in a row. Next cue as soon as one shows up.",
+                    x, t + dp(68f), 11f, DIM, Paint.Align.LEFT);
+            float mx = r - dp(44f);
+            drawBadgeMedal(c, mx, (t + b) / 2f, dp(24f) * (1f + 0.12f * pulse), ACCENT, pulse);
+            label(c, cuesFixed + " fixed this session", x, t + dp(88f), 10f, FAINT, Paint.Align.LEFT);
+            c.restore();
+            return;
+        }
+        if (cue == CUE_NONE) {
+            label(c, strokes == 0 ? "COACH" : "NOTHING TO FIX", x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
+            bold(c, strokes == 0 ? "ROW A FEW STROKES" : "HOLD THIS STROKE", x, t + dp(48f), 24f, ACCENT, Paint.Align.LEFT);
+            label(c, strokes == 0 ? "Each stroke is drawn and scored here as you finish it."
+                            : "Your stroke is clean. The next fault will appear here the moment it shows.",
+                    x, t + dp(72f), 11f, DIM, Paint.Align.LEFT);
+            if (strokes > 0) {
+                label(c, cuesFixed + " fixed this session", x, t + dp(92f), 10f, FAINT, Paint.Align.LEFT);
+            }
+            c.restore();
+            return;
+        }
+        label(c, "WORK ON THIS", x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
+        bold(c, CUE_TITLE[cue], x, t + dp(48f), 24f, WARN, Paint.Align.LEFT);
+        wrap(c, CUE_BODY[cue], x, t + dp(70f), r - x - dp(150f), 11f, DIM);
+        // The three clean strokes it takes to retire this cue.
+        float px = r - dp(120f);
+        float py = t + dp(34f);
+        label(c, "CLEAN STROKES", r - dp(16f), t + dp(18f), 9f, FAINT, Paint.Align.RIGHT);
+        for (int i = 0; i < CUE_CLEAN_NEEDED; i++) {
+            float cx = px + i * dp(32f);
+            if (i < cueClean) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(ACCENT);
+                c.drawCircle(cx, py, dp(11f), paint);
+            } else {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2f));
+                paint.setColor(i == cueClean ? WARN : 0xFF3A475C);
+                if (i == cueClean) {
+                    paint.setAlpha((int) (140 + 115 * pulse));
+                }
+                c.drawCircle(cx, py, dp(11f), paint);
+                paint.setAlpha(255);
+                paint.setStyle(Paint.Style.FILL);
+            }
+        }
+        label(c, cueStrokes == 0 ? "new cue" : cueStrokes + " strokes on this cue",
+                r - dp(16f), t + dp(64f), 10f, FAINT, Paint.Align.RIGHT);
+        // How bad it is right now: the bar shrinks as the fault comes right.
+        float bx0 = r - dp(130f);
+        float bx1 = r - dp(16f);
+        float by = t + dp(80f);
+        paint.setColor(0xFF1A2434);
+        c.drawRoundRect(bx0, by, bx1, by + dp(8f), dp(4f), dp(4f), paint);
+        paint.setColor(clamp01(cueSeverity / 60f) > 0.6f ? BAD : WARN);
+        c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(cueSeverity / 60f), by + dp(8f), dp(4f), dp(4f), paint);
+        label(c, "HOW FAR OFF", bx1, by + dp(22f), 9f, FAINT, Paint.Align.RIGHT);
+        c.restore();
     }
 
     /** One replay panel: the curve drawn up to a playhead that sweeps at the drive's real speed. */
@@ -965,7 +1724,8 @@ final class StrokeCoachGame extends GameView {
                     (cl + cr) / 2f, (ct + cb) / 2f, 12f, FAINT, Paint.Align.CENTER);
             return;
         }
-        // On the latest panel, the best as a faint outline for direct comparison.
+        // On the latest panel, the best stroke and the best session's average shape as outlines:
+        // one lucky stroke and the shape you actually held for a whole piece.
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeJoin(Paint.Join.ROUND);
         if (!isBest && hasBest) {
@@ -973,6 +1733,14 @@ final class StrokeCoachGame extends GameView {
             paint.setStrokeWidth(dp(1.5f));
             paint.setColor(0x806F8CFF);
             c.drawPath(path, paint);
+            label(c, "best stroke", cl + dp(2f), cb - dp(18f), 8f, BLUE, Paint.Align.LEFT);
+        }
+        if (!isBest && hasBestSession) {
+            curvePath(bestSessionShape, cl, ct, cr, cb, 1f);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(0x99F0B132);
+            c.drawPath(path, paint);
+            label(c, "best session", cl + dp(2f), cb - dp(6f), 8f, WARN, Paint.Align.LEFT);
         }
         // Whole curve faint, then the replayed part solid.
         curvePath(curve, cl, ct, cr, cb, 1f);
@@ -1027,29 +1795,147 @@ final class StrokeCoachGame extends GameView {
         }
     }
 
-    private void drawDrills(Canvas c, float l, float t, float r, float b, float dt) {
+    /**
+     * TODAY vs BEST SESSION: the one comparison the coach was missing. A single best stroke is a
+     * lucky stroke; the best session is the shape you held for a whole piece.
+     */
+    private void drawCompare(Canvas c, float l, float t, float r, float b, float dt) {
+        paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xFF0D1420);
         c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
         float x = l + dp(14f);
+        if (!hasBestSession) {
+            label(c, "TODAY vs BEST SESSION", x, t + dp(18f), 10f, FAINT, Paint.Align.LEFT);
+            label(c, strokes >= 20
+                            ? "No benchmark yet - this session becomes it when you leave."
+                            : "Row 20 strokes and this session becomes the one to beat.",
+                    x, t + dp(38f), 12f, DIM, Paint.Align.LEFT);
+            label(c, strokes + " strokes", r - dp(14f), t + dp(38f), 12f, FAINT, Paint.Align.RIGHT);
+            return;
+        }
+        long ago = todayLocal() - bsDay;
+        label(c, "TODAY vs BEST SESSION  ·  " + bsStrokes + " strokes, "
+                        + (ago <= 0 ? "today" : ago == 1 ? "yesterday" : ago + " days ago"),
+                x, t + dp(16f), 10f, FAINT, Paint.Align.LEFT);
+        float todayScore = strokes > 0 ? scoreSum / strokes : 0f;
+        float todayPower = sessionAvgPower();
+        float todayCons = Float.isNaN(sessionConsistency) ? 0f : sessionConsistency;
+        float shapeVs = Float.isNaN(sessionMatch) ? 0f : sessionMatch;
+        float[] now = compareShown;
+        float ease = Math.min(1f, dt * 4f);
+        now[0] += (todayScore - now[0]) * ease;
+        now[1] += (shapeVs - now[1]) * ease;
+        now[2] += (todayPower - now[2]) * ease;
+        now[3] += (todayCons - now[3]) * ease;
+        float col = (r - l - dp(28f)) / 4f;
+        // A figure that does not exist yet reads as "--", never as a red zero: for the first
+        // couple of strokes the session mean and the shape match are simply not computed.
+        compareCell(c, x, t, col, "SCORE", now[0], bsScore, 100f, false, strokes > 0);
+        compareCell(c, x + col, t, col, "SHAPE vs BEST", now[1], 100f, 100f, true,
+                !Float.isNaN(sessionMatch));
+        compareCell(c, x + 2 * col, t, col, "POWER", now[2], bsPower, Math.max(1f, bsPower * 1.4f),
+                false, sessionPowerCount > 0);
+        compareCell(c, x + 3 * col, t, col, "CONSISTENCY", now[3], bsConsistency, 100f, false,
+                !Float.isNaN(sessionConsistency));
+    }
+
+    /** One comparison: today's figure, a bar, and the best session marked on it. */
+    private void compareCell(Canvas c, float x, float t, float w, String name, float now, float best,
+                             float scale, boolean target, boolean known) {
+        boolean up = now >= best - 0.5f;
+        int color = !known ? FAINT : target ? (now >= 90 ? ACCENT : now >= 75 ? WARN : BAD)
+                : up ? ACCENT : WARN;
+        float bx0 = x;
+        float bx1 = x + w - dp(16f);
+        label(c, name, x, t + dp(30f), 9f, FAINT, Paint.Align.LEFT);
+        bold(c, known ? Math.round(now) + (target ? "%" : "") : "--", bx1, t + dp(31f), 17f, color,
+                Paint.Align.RIGHT);
+        float by = t + dp(38f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF1A2434);
+        c.drawRoundRect(bx0, by, bx1, by + dp(7f), dp(3f), dp(3f), paint);
+        if (known) {
+            paint.setColor(color);
+            c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(now / scale), by + dp(7f), dp(3f), dp(3f), paint);
+        }
+        if (!known) {
+            // The benchmark is still drawn, so the rower can see what they are chasing.
+            if (!target && best > 0) {
+                paint.setColor(0xFFE6EDF7);
+                float mx = bx0 + (bx1 - bx0) * clamp01(best / scale);
+                c.drawRect(mx - dp(1f), by - dp(3f), mx + dp(1f), by + dp(10f), paint);
+                label(c, "best " + Math.round(best), bx1, by + dp(20f), 9f, FAINT, Paint.Align.RIGHT);
+            }
+            label(c, "a few more strokes", bx0, by + dp(20f), 9f, FAINT, Paint.Align.LEFT);
+        } else if (!target && best > 0) {
+            // The best session marked on the bar: today either clears it or does not.
+            paint.setColor(0xFFE6EDF7);
+            float mx = bx0 + (bx1 - bx0) * clamp01(best / scale);
+            c.drawRect(mx - dp(1f), by - dp(3f), mx + dp(1f), by + dp(10f), paint);
+            label(c, (up ? "+" : "") + Math.round(now - best) + " on your best",
+                    bx0, by + dp(20f), 9f, up ? ACCENT : DIM, Paint.Align.LEFT);
+            label(c, "best " + Math.round(best), bx1, by + dp(20f), 9f, FAINT, Paint.Align.RIGHT);
+        } else {
+            label(c, "average shape against your best session", bx0, by + dp(20f), 9f, DIM, Paint.Align.LEFT);
+        }
+    }
+
+    private void drawTraining(Canvas c, float l, float t, float r, float b, float dt) {
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        float x = l + dp(14f);
+        if (b - t < dp(48f)) {
+            // Nothing is drawn, so nothing may be tapped: clear the hit rects rather than leave
+            // last frame's, which would start a drill from a chip that is not on screen.
+            Arrays.fill(chipR, 0f);
+            Arrays.fill(chipL, 0f);
+            return;
+        }
+        if (challengeOn) {
+            drawChallenge(c, l, t, r, b, dt);
+            return;
+        }
         if (drill < 0) {
-            label(c, "DRILLS  ·  tap one: 10 strokes, pass 8", x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
-            float cw = (r - l - dp(28f) - dp(8f) * (DRILL_NAME.length - 1)) / DRILL_NAME.length;
+            label(c, "DRILLS  ·  tap one: 10 strokes, pass 8        CHALLENGE  ·  hold 90% shape for 20 strokes",
+                    x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
+            float cw = (r - l - dp(28f) - dp(8f) * (CHIPS - 1)) / CHIPS;
             float ct = t + dp(30f);
             float cb = Math.min(b - dp(12f), ct + dp(64f));
-            for (int i = 0; i < DRILL_NAME.length; i++) {
+            for (int i = 0; i < CHIPS; i++) {
                 float cl = x + i * (cw + dp(8f));
                 chipL[i] = cl;
                 chipT[i] = ct;
                 chipR[i] = cl + cw;
                 chipB[i] = cb;
                 boolean ok = drillAvailable(i);
-                paint.setColor(ok ? 0xFF16324A : 0xFF121A26);
-                c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
-                bold(c, DRILL_NAME[i], cl + cw / 2f, ct + dp(26f), 13f, ok ? TEXT : FAINT, Paint.Align.CENTER);
+                boolean isChallenge = i == CHALLENGE;
+                if (isChallenge && ok) {
+                    // The challenge chip breathes, so it reads as the thing to go for.
+                    float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 2.2);
+                    paint.setColor(0xFF2A2340);
+                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(2f));
+                    paint.setColor(WARN);
+                    paint.setAlpha((int) (110 + 130 * pulse));
+                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                    paint.setAlpha(255);
+                    paint.setStyle(Paint.Style.FILL);
+                } else {
+                    paint.setColor(ok ? 0xFF16324A : 0xFF121A26);
+                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                }
+                bold(c, chipName(i), cl + cw / 2f, ct + dp(26f), 13f,
+                        ok ? (isChallenge ? WARN : TEXT) : FAINT, Paint.Align.CENTER);
                 String sub;
                 if (!ok) {
-                    sub = calibrated() ? "row 5 strokes first" : "calibrate handle";
+                    sub = isChallenge ? "row a best stroke" : calibrated() ? "row 5 strokes first" : "calibrate handle";
+                } else if (isChallenge) {
+                    sub = challengeRecord >= 0 ? "best " + Math.round(challengeRecord) + "/" + CHALLENGE_TARGET
+                            : "20 in a row";
                 } else {
                     sub = drillBest[i] >= 0 ? "best " + Math.round(drillBest[i]) + "/10" : "not tried";
                 }
@@ -1100,6 +1986,356 @@ final class StrokeCoachGame extends GameView {
             label(c, "last: " + drillVerdict + (lastJudgePass ? "  - PASS" : "  - MISS"), x, pipY + dp(32f), 11f,
                     lastJudgePass ? ACCENT : BAD, Paint.Align.LEFT);
         }
+    }
+
+    /**
+     * THE CHALLENGE: twenty strokes in a row at a 90% shape match. The chain of twenty is drawn
+     * link by link and a single miss breaks it back to zero, so every stroke is the one that counts.
+     */
+    private void drawChallenge(Canvas c, float l, float t, float r, float b, float dt) {
+        challengeFlash = Math.max(0f, challengeFlash - dt * 1.6f);
+        challengeBreak = Math.max(0f, challengeBreak - dt * 1.2f);
+        float live = hasBest && strokes > 0 ? similarity : 0f;
+        challengeMatchShown += (live - challengeMatchShown) * Math.min(1f, dt * 5f);
+        float x = l + dp(14f);
+        // The panel flashes red on a break and teal as the chain grows.
+        if (challengeBreak > 0f) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(BAD);
+            paint.setAlpha((int) (70 * challengeBreak));
+            c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+            paint.setAlpha(255);
+        }
+        bold(c, "CHALLENGE", x, t + dp(26f), 18f, WARN, Paint.Align.LEFT);
+        label(c, "hold a " + Math.round(CHALLENGE_MATCH) + "% shape match for " + CHALLENGE_TARGET
+                        + " strokes - one miss and the chain breaks",
+                x + dp(120f), t + dp(24f), 11f, DIM, Paint.Align.LEFT);
+        stopHit[0] = r - dp(96f);
+        stopHit[1] = t + dp(8f);
+        stopHit[2] = r - dp(12f);
+        stopHit[3] = t + dp(40f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF3A2230);
+        c.drawRoundRect(stopHit[0], stopHit[1], stopHit[2], stopHit[3], dp(8f), dp(8f), paint);
+        bold(c, "STOP", (stopHit[0] + stopHit[2]) / 2f, stopHit[3] - dp(10f), 12f, BAD, Paint.Align.CENTER);
+
+        // The chain: twenty links, the next one pulsing.
+        float linkY = t + dp(58f);
+        float step = (r - x - dp(150f)) / CHALLENGE_TARGET;
+        float rad = Math.min(dp(10f), step * 0.42f);
+        for (int i = 0; i < CHALLENGE_TARGET; i++) {
+            float cx = x + rad + i * step;
+            if (i < challengeRun) {
+                paint.setStyle(Paint.Style.FILL);
+                float grow = i == challengeRun - 1 ? 1f + challengeFlash * 0.5f : 1f;
+                paint.setColor(ACCENT);
+                c.drawCircle(cx, linkY, rad * grow, paint);
+                if (i > 0) {
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(3f));
+                    c.drawLine(cx - step + rad, linkY, cx - rad, linkY, paint);
+                }
+            } else {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2f));
+                float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6);
+                paint.setColor(i == challengeRun ? WARN : 0xFF3A475C);
+                if (i == challengeRun) {
+                    paint.setAlpha((int) (140 + 115 * pulse));
+                }
+                c.drawCircle(cx, linkY, rad, paint);
+                paint.setAlpha(255);
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+        float tx = r - dp(130f);
+        bold(c, challengeRun + "/" + CHALLENGE_TARGET, tx, linkY + dp(2f), 22f,
+                challengeRun >= CHALLENGE_TARGET - 5 ? ACCENT : TEXT, Paint.Align.LEFT);
+        label(c, challengeRun == 0 ? "start the chain"
+                        : (CHALLENGE_TARGET - challengeRun) + " to go", tx, linkY + dp(18f), 10f,
+                challengeRun == 0 ? DIM : ACCENT, Paint.Align.LEFT);
+
+        // Live shape match against the 90% line: you can see the next stroke coming.
+        float bx0 = x;
+        float bx1 = r - dp(150f);
+        float by = t + dp(84f);
+        paint.setColor(0xFF1A2434);
+        c.drawRoundRect(bx0, by, bx1, by + dp(12f), dp(5f), dp(5f), paint);
+        int mc = challengeMatchShown >= CHALLENGE_MATCH ? ACCENT : challengeMatchShown >= 80 ? WARN : BAD;
+        paint.setColor(mc);
+        c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(challengeMatchShown / 100f), by + dp(12f),
+                dp(5f), dp(5f), paint);
+        float gate = bx0 + (bx1 - bx0) * (CHALLENGE_MATCH / 100f);
+        paint.setColor(0xFFE6EDF7);
+        c.drawRect(gate - dp(1.5f), by - dp(5f), gate + dp(1.5f), by + dp(17f), paint);
+        label(c, "LAST STROKE'S SHAPE MATCH  " + Math.round(challengeMatchShown) + "%",
+                bx0, by + dp(28f), 10f, mc, Paint.Align.LEFT);
+        label(c, Math.round(CHALLENGE_MATCH) + "%", gate, by + dp(28f), 9f, FAINT, Paint.Align.CENTER);
+        String best = challengeBestRun > 0 ? "session best " + challengeBestRun
+                : challengeRecord >= 0 ? "record " + Math.round(challengeRecord) + "/" + CHALLENGE_TARGET
+                : "no record yet";
+        label(c, best, bx1, by + dp(28f), 10f, FAINT, Paint.Align.RIGHT);
+        if (!challengeLastPass && challengeBreak > 0f) {
+            bold(c, "CHAIN BROKE", tx, by + dp(12f), 14f, BAD, Paint.Align.LEFT);
+        }
+    }
+
+    /* ---------- the bottom band: map, skill tree, report card ---------- */
+
+    private void drawBottom(Canvas c, float l, float t, float r, float b, float dt) {
+        pageAnim = Math.min(1f, pageAnim + dt * 2f);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF0D1420);
+        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        // Tabs, top right.
+        float tw = dp(92f);
+        float th = dp(24f);
+        float tabTop = t + dp(4f);
+        for (int i = 0; i < PAGE_NAME.length; i++) {
+            float tl = r - dp(10f) - (PAGE_NAME.length - i) * (tw + dp(6f)) + dp(6f);
+            tabL[i] = tl;
+            tabT[i] = tabTop;
+            tabR[i] = tl + tw;
+            tabB[i] = tabTop + th;
+            boolean on = page == i;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(on ? 0xFF16324A : 0xFF121A26);
+            c.drawRoundRect(tl, tabTop, tl + tw, tabTop + th, dp(8f), dp(8f), paint);
+            if (on) {
+                paint.setColor(ACCENT);
+                c.drawRoundRect(tl + dp(10f), tabTop + th - dp(4f), tl + tw - dp(10f), tabTop + th - dp(2f),
+                        dp(1f), dp(1f), paint);
+            }
+            String name = PAGE_NAME[i];
+            // A dot on SKILLS while a badge is newly earned, so the tab asks to be opened.
+            bold(c, name, tl + tw / 2f, tabTop + dp(16f), 11f, on ? TEXT : DIM, Paint.Align.CENTER);
+            if (i == PAGE_SKILLS && badgeUnseen) {
+                paint.setColor(ACCENT);
+                c.drawCircle(tl + tw - dp(10f), tabTop + dp(8f), dp(3.5f), paint);
+            }
+        }
+        float ct = t + dp(26f);
+        if (page == PAGE_SKILLS) {
+            badgeUnseen = false;
+            drawSkills(c, l, t, r, b, ct, dt);
+        } else if (page == PAGE_REPORT) {
+            drawReport(c, l, t, r, b, ct, dt);
+        } else {
+            drawMap(c, l, t, r, b, ct);
+        }
+    }
+
+    /**
+     * The skill tree: nine badges over five tiers, the connectors lit once a tier is earned.
+     * A locked badge shows what it needs and how far along the rower is, so nothing is a mystery.
+     */
+    private void drawSkills(Canvas c, float l, float t, float r, float b, float ct, float dt) {
+        int have = 0;
+        for (int i = 0; i < BADGES; i++) {
+            if (hasBadge(i)) {
+                have++;
+            }
+            badgeFlash[i] = Math.max(0f, badgeFlash[i] - dt);
+        }
+        label(c, "SKILL TREE  ·  " + have + " of " + BADGES + " earned", l + dp(14f), t + dp(18f), 9f,
+                FAINT, Paint.Align.LEFT);
+
+        float colW = (r - l - dp(28f)) / BADGE_TIERS;
+        float bandTop = ct + dp(6f);
+        float bandH = b - dp(8f) - bandTop;
+        if (bandH < dp(40f)) {
+            return;
+        }
+        float rowH = bandH / 3f;
+        float rad = Math.min(dp(18f), rowH * 0.26f);
+        // The name and requirement sit under each node, so the nodes themselves use a shorter band.
+        float usable = Math.max(dp(30f), bandH - dp(28f));
+        // Positions first: the connectors are drawn underneath everything.
+        for (int tier = 0; tier < BADGE_TIERS; tier++) {
+            int n = 0;
+            for (int i = 0; i < BADGES; i++) {
+                if (BADGE_TIER[i] == tier) {
+                    n++;
+                }
+            }
+            int k = 0;
+            for (int i = 0; i < BADGES; i++) {
+                if (BADGE_TIER[i] != tier) {
+                    continue;
+                }
+                badgeX[i] = l + dp(14f) + tier * colW + colW / 2f;
+                badgeY[i] = bandTop + usable * (k + 0.5f) / n;
+                k++;
+            }
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        for (int i = 0; i < BADGES; i++) {
+            for (int p = 0; p < BADGES; p++) {
+                if ((BADGE_PREREQ[i] & (1 << p)) == 0) {
+                    continue;
+                }
+                boolean lit = hasBadge(p);
+                paint.setColor(lit ? ACCENT : 0xFF27324A);
+                paint.setAlpha(lit ? 120 : 90);
+                c.drawLine(badgeX[p] + rad, badgeY[p], badgeX[i] - rad, badgeY[i], paint);
+                paint.setAlpha(255);
+                if (lit && !hasBadge(i)) {
+                    // A spark runs the connector into the badge that is now available.
+                    float f = (float) ((sessionSeconds * 0.55 + i * 0.13 + p * 0.07) % 1.0);
+                    float sx = badgeX[p] + rad + (badgeX[i] - rad - badgeX[p] - rad) * f;
+                    float sy = badgeY[p] + (badgeY[i] - badgeY[p]) * f;
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(WARN);
+                    c.drawCircle(sx, sy, dp(3f), paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(2f));
+                }
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < BADGES; i++) {
+            boolean earned = hasBadge(i);
+            boolean open = (badges & BADGE_PREREQ[i]) == BADGE_PREREQ[i];
+            float cx = badgeX[i];
+            float cy = badgeY[i];
+            float pop = 1f + badgeFlash[i] * 0.25f;
+            if (earned) {
+                drawBadgeMedal(c, cx, cy, rad * pop, ACCENT, badgeFlash[i] > 0f ? 1f : 0f);
+            } else {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xFF121A26);
+                c.drawCircle(cx, cy, rad, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2f));
+                paint.setColor(open ? WARN : 0xFF33405A);
+                c.drawCircle(cx, cy, rad, paint);
+                // Progress arc around the rim.
+                float prog = badgeProgress(i);
+                if (open && prog > 0.01f) {
+                    arcRect.set(cx - rad, cy - rad, cx + rad, cy + rad);
+                    paint.setStrokeWidth(dp(3.5f));
+                    paint.setColor(WARN);
+                    c.drawArc(arcRect, -90f, 360f * clamp01(prog), false, paint);
+                }
+                paint.setStyle(Paint.Style.FILL);
+                if (!open) {
+                    // A little padlock for a badge whose prerequisites are not in yet.
+                    paint.setColor(0xFF4A5670);
+                    c.drawRoundRect(cx - rad * 0.32f, cy - rad * 0.05f, cx + rad * 0.32f, cy + rad * 0.42f,
+                            rad * 0.1f, rad * 0.1f, paint);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(rad * 0.14f);
+                    arcRect.set(cx - rad * 0.2f, cy - rad * 0.42f, cx + rad * 0.2f, cy + rad * 0.1f);
+                    c.drawArc(arcRect, 180f, 180f, false, paint);
+                    paint.setStyle(Paint.Style.FILL);
+                } else {
+                    bold(c, Math.round(badgeProgress(i) * 100) + "%", cx, cy + dp(5f), 11f, WARN, Paint.Align.CENTER);
+                }
+            }
+            bold(c, BADGE_NAME[i], cx, cy + rad + dp(12f), 10f, earned ? ACCENT : open ? TEXT : FAINT,
+                    Paint.Align.CENTER);
+            if (!earned) {
+                label(c, BADGE_NEED[i], cx, cy + rad + dp(23f), 8f, open ? DIM : FAINT, Paint.Align.CENTER);
+            }
+        }
+    }
+
+    /**
+     * The weekly report card: this week graded against last week, category by category. The bars
+     * grow into place when the page opens so the week reads as a result rather than a table.
+     */
+    private void drawReport(Canvas c, float l, float t, float r, float b, float ct, float dt) {
+        boolean haveLast = prevWeekIndex != Long.MIN_VALUE && prevWeek[0] > 0f;
+        long back = haveLast ? weekIndex - prevWeekIndex : 0;
+        label(c, "WEEKLY REPORT CARD  ·  " + Math.round(week[0]) + " strokes this week"
+                        + (haveLast ? "   vs " + Math.round(prevWeek[0]) + " "
+                        + (back == 1 ? "last week" : back + " weeks ago") : "   (no earlier week yet)"),
+                l + dp(14f), t + dp(18f), 9f, FAINT, Paint.Align.LEFT);
+        float bandTop = ct + dp(4f);
+        float bandH = b - dp(10f) - bandTop;
+        if (bandH < dp(40f)) {
+            return;
+        }
+        if (week[0] <= 0f) {
+            label(c, "Row this week and it is graded here against last week.", (l + r) / 2f,
+                    bandTop + bandH / 2f, 12f, FAINT, Paint.Align.CENTER);
+            return;
+        }
+        // Overall grade, left.
+        float gradeW = dp(190f);
+        float overall = weekAvg(week, 1);
+        float overallLast = haveLast ? weekAvg(prevWeek, 1) : Float.NaN;
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF121A26);
+        c.drawRoundRect(l + dp(14f), bandTop, l + dp(14f) + gradeW, b - dp(10f), dp(12f), dp(12f), paint);
+        float pop = 1f + (1f - smooth(pageAnim)) * 0.5f;
+        c.save();
+        c.translate(l + dp(14f) + gradeW * 0.32f, bandTop + bandH * 0.56f);
+        c.scale(pop, pop);
+        bold(c, grade(overall), 0, dp(20f), 58f, gradeColor(overall), Paint.Align.CENTER);
+        c.restore();
+        label(c, "THIS WEEK", l + dp(14f) + gradeW * 0.32f, bandTop + dp(16f), 9f, FAINT, Paint.Align.CENTER);
+        bold(c, String.valueOf(Math.round(overall)), l + dp(14f) + gradeW * 0.72f, bandTop + bandH * 0.45f,
+                20f, TEXT, Paint.Align.CENTER);
+        label(c, "AVG SCORE", l + dp(14f) + gradeW * 0.72f, bandTop + bandH * 0.45f + dp(14f), 8f, FAINT,
+                Paint.Align.CENTER);
+        if (haveLast) {
+            float d = overall - overallLast;
+            label(c, (d >= 0 ? "+" : "") + String.format(Locale.US, "%.1f", d) + " on last week",
+                    l + dp(14f) + gradeW * 0.72f, bandTop + bandH * 0.75f, 9f, d >= 0 ? ACCENT : BAD,
+                    Paint.Align.CENTER);
+        }
+        label(c, Math.round(week[5]) + " drills passed  ·  "
+                        + Math.round(week[6] + activeSeconds / 60.0) + " min",
+                l + dp(14f) + gradeW / 2f, b - dp(18f), 9f, DIM, Paint.Align.CENTER);
+
+        // Four graded rows.
+        float rl = l + dp(24f) + gradeW;
+        float rr = r - dp(16f);
+        float rowH = bandH / REPORT_ROW.length;
+        for (int i = 0; i < REPORT_ROW.length; i++) {
+            // shape, consistency, ratio, score -> week fields 2, 3, 4, 1.
+            int field = i == 0 ? 2 : i == 1 ? 3 : i == 2 ? 4 : 1;
+            float now = weekAvg(week, field);
+            float was = haveLast ? weekAvg(prevWeek, field) : Float.NaN;
+            reportShown[i] += (now * smooth(pageAnim) - reportShown[i]) * Math.min(1f, dt * 6f);
+            float y = bandTop + rowH * i + rowH * 0.5f;
+            label(c, REPORT_ROW[i], rl, y - dp(6f), 10f, DIM, Paint.Align.LEFT);
+            bold(c, grade(now), rl + dp(120f), y + dp(2f), 16f, gradeColor(now), Paint.Align.CENTER);
+            float bx0 = rl + dp(140f);
+            float bx1 = rr - dp(150f);
+            float by = y - dp(6f);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFF1A2434);
+            c.drawRoundRect(bx0, by, bx1, by + dp(12f), dp(5f), dp(5f), paint);
+            paint.setColor(gradeColor(now));
+            c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(reportShown[i] / 100f), by + dp(12f),
+                    dp(5f), dp(5f), paint);
+            if (!Float.isNaN(was) && was > 0) {
+                paint.setColor(0xFFE6EDF7);
+                float mx = bx0 + (bx1 - bx0) * clamp01(was / 100f);
+                c.drawRect(mx - dp(1f), by - dp(4f), mx + dp(1f), by + dp(16f), paint);
+            }
+            bold(c, String.valueOf(Math.round(now)), bx1 + dp(34f), y + dp(2f), 15f, TEXT, Paint.Align.RIGHT);
+            if (!Float.isNaN(was) && was > 0) {
+                float d = now - was;
+                label(c, (d >= 0 ? "UP  +" : "DOWN  ") + String.format(Locale.US, "%.1f", d) + " vs last week",
+                        bx1 + dp(44f), y + dp(2f), 9f, d >= 0 ? ACCENT : BAD, Paint.Align.LEFT);
+            } else {
+                label(c, "no earlier week", bx1 + dp(44f), y + dp(2f), 9f, FAINT, Paint.Align.LEFT);
+            }
+        }
+    }
+
+    private static String grade(float v) {
+        return v >= 90 ? "A" : v >= 80 ? "B" : v >= 70 ? "C" : v >= 60 ? "D" : v >= 45 ? "E" : "F";
+    }
+
+    private static int gradeColor(float v) {
+        return v >= 80 ? ACCENT : v >= 60 ? WARN : BAD;
     }
 
     private void drawLength(Canvas c, float l, float t, float r, float b, float dt) {
@@ -1163,23 +2399,29 @@ final class StrokeCoachGame extends GameView {
         label(c, "0", x0, ry + rh + dp(18f), 9f, FAINT, Paint.Align.LEFT);
     }
 
-    private void drawMap(Canvas c, float l, float t, float r, float b) {
+    private void drawMap(Canvas c, float l, float t, float r, float b, float ct) {
+        paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
         String head = "SESSION CONSISTENCY MAP  ·  one column per stroke, catch at top, bright = power";
         label(c, head, l + dp(14f), t + dp(18f), 9f, FAINT, Paint.Align.LEFT);
         String summary = Float.isNaN(sessionConsistency) ? "row 3 strokes"
                 : Math.round(sessionConsistency) + "% consistent over " + mapCount + " strokes";
-        bold(c, summary, r - dp(14f), t + dp(19f), 12f,
+        // The tabs now own the top right of this band, so the summary sits left of them. Held to a
+        // share of the width as well as a fixed offset, so a narrower band cannot push it under
+        // the tabs or off the panel.
+        float band = r - l;
+        float sx = l + dp(14f) + Math.min(dp(416f), band * 0.30f);
+        bold(c, summary, sx, t + dp(19f), 12f,
                 Float.isNaN(sessionConsistency) ? FAINT : sessionConsistency >= 75 ? ACCENT : sessionConsistency >= 60 ? WARN : BAD,
-                Paint.Align.RIGHT);
+                Paint.Align.LEFT);
         if (!Float.isNaN(bestSessionScore)) {
-            label(c, "best session score " + Math.round(bestSessionScore), r - dp(300f), t + dp(18f), 9f, FAINT, Paint.Align.RIGHT);
+            label(c, "best session score " + Math.round(bestSessionScore),
+                    l + dp(14f) + Math.min(dp(686f), band * 0.50f), t + dp(18f), 9f,
+                    FAINT, Paint.Align.LEFT);
         }
         float ml = l + dp(14f);
         float mr = r - dp(14f);
-        float mt = t + dp(26f);
+        float mt = ct;
         float mb = b - dp(8f);
         if (mb - mt < dp(10f)) {
             return;

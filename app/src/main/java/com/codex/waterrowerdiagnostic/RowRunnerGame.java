@@ -41,10 +41,32 @@ import android.view.MotionEvent;
  * <p>The course is generated from a fixed seed, so a run is repeatable and a best means something,
  * and it is sized to the rower's own typical speed: gaps are clearable at a normal pace, not at a
  * crawl.
+ *
+ * <p>And the five the rower approved after those:
+ * <ul>
+ *   <li><b>A shop.</b> Coins earned in a run are banked between sessions and spent on runner skins,
+ *   a better pet and the worlds - buy DESERT, SNOWFIELDS or CASTLE and the whole run is themed to
+ *   it instead of cycling. Opened from the start screen or from game over; it is drawn on the game's
+ *   own canvas, so it needs no chrome from the activity.</li>
+ *   <li><b>Daily run.</b> A 500 m course seeded from today's date - the same for every attempt
+ *   today, different tomorrow - timed on the rowing clock. Today's best is kept and the finish card
+ *   offers RETRY, so the loop is: run it, see the gap, run it again.</li>
+ *   <li><b>Combo chain.</b> Enemies stomped inside five seconds of each other chain up; the chain
+ *   multiplies the coins they pay, to x5. A hit breaks it. The chain and its draining window sit
+ *   over the runner's head, so the next enemy is worth something in the next few seconds.</li>
+ *   <li><b>A pet.</b> A little companion flies alongside and darts at coins the runner is going to
+ *   miss - the high coins, the far side of an arc. PIP is free; a gull and a drone in the shop reach
+ *   further.</li>
+ *   <li><b>Endless.</b> A fresh seed every time, course generated ahead of the runner and pruned
+ *   behind, difficulty climbing with distance, and one tap anywhere to run again the instant you
+ *   die.</li>
+ * </ul>
  */
 final class RowRunnerGame extends GameView {
 
-    private enum Kind { PIT, BLOCK, WALL, COIN, ARC_COIN, HIGH_COIN, CRAB, SLIME, SPIKY, BOSS, FLAG }
+    private enum Kind { PIT, BLOCK, WALL, COIN, ARC_COIN, HIGH_COIN, CRAB, SLIME, SPIKY, BOSS, FLAG, FINISH }
+
+    private enum Mode { TOUR, DAILY, ENDLESS }
 
     private static final class Thing {
         final Kind kind;
@@ -94,6 +116,53 @@ final class RowRunnerGame extends GameView {
     /** One sample a second: an hour of running. */
     private static final int MAX_GHOST = 3600;
 
+    /* Shop, daily, combo, pet, endless. */
+    private static final String BANK_KEY = "runner.bank";
+    private static final String OWNED_KEY = "runner.owned";
+    private static final String SKIN_KEY = "runner.skin";
+    private static final String PET_KEY = "runner.pet";
+    private static final String THEME_KEY = "runner.theme";
+    private static final String MODE_KEY = "runner.mode";
+    private static final String COMBO_KEY = "runner.combo";
+    private static final String ENDLESS_KEY = "runner.endless";
+    /** "<day>|<seconds>": stamped, so yesterday's time is not shown as today's best. */
+    private static final String DAILY_BEST_KEY = "runner.daily.best";
+    private static final String DAILY_RUNS_KEY = "runner.daily.runs";
+    private static final String GHOST_ENDLESS_KEY = "runner.ghost.endless";
+    private static final String GHOST_DAILY_KEY = "runner.ghost.daily";
+
+    /** The daily course, short enough to re-run: about two and a half minutes at a typical pace. */
+    private static final float DAILY_METRES = 500f;
+    /** Floor for the chain window; the real one is {@link #comboWindow()}, sized to the rower. */
+    private static final double COMBO_WINDOW = 5.0;
+    private static final int COMBO_MAX_MULT = 5;
+    /** Metres of course kept generated ahead of the runner, and kept behind before pruning. */
+    private static final float BUILD_AHEAD = 280f;
+    private static final float KEEP_BEHIND = 90f;
+
+    /* Shop stock. Prices are against a run: a decent tour run banks 150-400 coins. */
+    private static final String[] SKIN_ID = {"red", "aqua", "ninja", "robot", "knight"};
+    private static final String[] SKIN_NAME = {"ROOKIE", "AQUA", "NINJA", "ROBOT", "KNIGHT"};
+    private static final int[] SKIN_COST = {0, 120, 300, 600, 1000};
+    private static final int[] SKIN_SHIRT = {0xFFE84C3D, 0xFF2FA8C8, 0xFF232833, 0xFF9AA6B8, 0xFFD8D3C0};
+    private static final int[] SKIN_LEGS = {0xFF2E5BBA, 0xFF1E6E8C, 0xFF12161F, 0xFF5C6676, 0xFF8A6A3A};
+    private static final int[] SKIN_FACE = {0xFFF1C27D, 0xFFF1C27D, 0xFFE8C9A0, 0xFFCFE3FF, 0xFFF1C27D};
+
+    private static final String[] PET_ID = {"pip", "gull", "drone"};
+    private static final String[] PET_NAME = {"PIP", "GULL", "DRONE"};
+    private static final int[] PET_COST = {0, 350, 700};
+    /** How far ahead, in metres, the pet will go for a coin. */
+    private static final float[] PET_RANGE = {2.4f, 4.0f, 6.5f};
+    private static final int[] PET_BODY = {0xFF6BCB5A, 0xFFF2F7FB, 0xFF9AD8F0};
+    private static final int[] PET_WING = {0xFF3F9A34, 0xFFDCEBF7, 0xFF3A6A8C};
+
+    private static final String[] MODE_NAMES = {"TOUR", "DAILY", "ENDLESS"};
+    private static final String[] SHOP_HEADS = {"RUNNERS", "PETS", "WORLDS"};
+
+    /** A world you may lock the whole run to. Index -1 is the tour, which cycles as before. */
+    private static final String[] THEME_ID = {"tour", "world.desert", "world.snow", "world.castle"};
+    private static final int[] THEME_COST = {0, 250, 500, 900};
+
     /* Worlds: one per kilometre, in this order, then round again. */
     private static final String[] WORLD_NAMES = {"MEADOW", "DESERT", "SNOWFIELDS", "CASTLE"};
     private static final int[] SKY_TOP = {0xFF3C8EE0, 0xFFE58A3C, 0xFF7FA6CF, 0xFF140F26};
@@ -126,6 +195,10 @@ final class RowRunnerGame extends GameView {
     private final float[] hsv = new float[3];
     private final RectF continueRect = new RectF();
     private final RectF restartRect = new RectF();
+    private final RectF shopBtnRect = new RectF();
+    private final RectF closeRect = new RectF();
+    private final RectF retryRect = new RectF();
+    private final RectF[] modeRect = {new RectF(), new RectF(), new RectF()};
 
     private boolean started;
     private boolean over;
@@ -195,6 +268,98 @@ final class RowRunnerGame extends GameView {
     private float ghostLegPhase;
     private boolean newBestRun;
 
+    /* Mode, course generation. */
+    private Mode mode = Mode.TOUR;
+    private java.util.Random gen;
+    private long courseSeed = 1234L;
+    private float buildAt;
+    private float buildFlag;
+    private float buildBoss;
+    private float courseEnd;
+    private double nextPrune;
+    private boolean finished;
+    private float dailyTime;
+    private boolean dailyIsBest;
+    private long dailyDay;
+    /**
+     * Today's best, cached. {@link #dailyBest()} reads SharedPreferences and parses a stamped
+     * string; three draw paths were calling it on every frame, which is a prefs read plus four
+     * allocations per frame in the game loop. Refreshed on start and whenever it is written.
+     */
+    private float dailyBestSeconds;
+    private String dailyBestText;
+    private String dailyModeNote = "today's seed  ·  500 m, timed";
+    /** Best endless distance, cached for the same reason: game over redrew it from prefs each frame. */
+    private float bestEndless;
+
+    /* Combo chain. */
+    private int combo;
+    private int bestCombo;
+    private double comboUntil;
+    private double comboBrokeAt = -10;
+
+    /* Shop: the coin bank, what is owned and what is worn. */
+    private int bank;
+    private int coinsBanked;
+    private final java.util.HashSet<String> owned = new java.util.HashSet<>();
+    private int skinIndex;
+    private int petIndex;
+    /** -1 for the tour (the world cycles every kilometre), else the world the whole run is locked to. */
+    private int themeIndex = -1;
+    private boolean shopOpen;
+    private final float[] shopRowY = new float[3];
+    private String shopNote = "";
+    private double shopNoteUntil;
+
+    /* The pet, in screen pixels: it lags behind the runner and darts at coins. */
+    private float petPx;
+    private float petPy;
+    private boolean petPlaced;
+    private int petGrabs;
+
+    /** One row of the shop. Built once; the rectangles are only re-set while it is drawn. */
+    private static final class Item {
+        final int group;    // 0 skin, 1 pet, 2 theme
+        final int index;    // index into that group's arrays; for a theme, the world (-1 = tour)
+        final String id;
+        final String name;
+        final int cost;
+        /** Built once: the card's sub-line and its price, so the shop draws without allocating. */
+        final String note;
+        final String price;
+        final RectF rect = new RectF();
+
+        Item(int group, int index, String id, String name, int cost, String note) {
+            this.group = group;
+            this.index = index;
+            this.id = id;
+            this.name = name;
+            this.cost = cost;
+            this.note = note;
+            this.price = "● " + cost;
+        }
+    }
+
+    private final Item[] shop = buildShop();
+
+    private static Item[] buildShop() {
+        Item[] items = new Item[SKIN_ID.length + PET_ID.length + THEME_ID.length];
+        int n = 0;
+        for (int i = 0; i < SKIN_ID.length; i++) {
+            items[n++] = new Item(0, i, SKIN_ID[i], SKIN_NAME[i], SKIN_COST[i], "runner skin");
+        }
+        for (int i = 0; i < PET_ID.length; i++) {
+            items[n++] = new Item(1, i, PET_ID[i], PET_NAME[i], PET_COST[i],
+                    String.format(java.util.Locale.US, "reach %.1f m", PET_RANGE[i]));
+        }
+        items[n++] = new Item(2, -1, THEME_ID[0], "TOUR", 0, "all four, a kilometre each");
+        for (int i = 1; i < THEME_ID.length; i++) {
+            items[n++] = new Item(2, i, THEME_ID[i], WORLD_NAMES[i], THEME_COST[i],
+                    "every kilometre is " + WORLD_NAMES[i]);
+        }
+        return items;
+    }
+
     RowRunnerGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
@@ -244,77 +409,135 @@ final class RowRunnerGame extends GameView {
         shownWorld = 0;
         worldBannerUntil = 0;
         whiteFlash = 0;
+        finished = false;
+        combo = 0;
+        bestCombo = 0;
+        comboUntil = 0;
+        comboBrokeAt = -10;
+        coinsBanked = 0;
+        petPlaced = false;
+        petGrabs = 0;
+        nextPrune = 0;
+        shopOpen = false;
+        shopNoteUntil = 0;
+        loadShop();
+        dailyDay = RegattaGame.today();
+        refreshDailyBest();
+        bestEndless = bests.get(ENDLESS_KEY, 0f);
+        resetCourse(true);
         loadGhost();
-        things.clear();
-        buildLevel();
+        shownWorld = worldAt(0);
     }
 
     @Override
     protected void onStop() {
         // Leaving mid-run still counts: the furthest you got, and the ghost if it is your best.
-        if (started && !over && x > 50) {
-            bests.recordHighest("runner.distance", (float) x);
-            bests.recordHighest("runner.coins", coins);
-            bests.recordHighest(BOSSES_KEY, bossesBeaten);
+        if (started && !over && !finished && x > 50) {
+            recordRun();
             saveGhostIfBest();
         }
+        bankRun();
     }
 
-    /** A dense course sized to the rower's typical jump, harder with distance. */
-    private void buildLevel() {
-        java.util.Random r = new java.util.Random(1234);
+    /* ---------- the course ---------- */
+
+    /**
+     * Starts the course over for the current mode. The seed is the mode's own: fixed for the tour,
+     * today's date for the daily, a fresh one per endless run - and it is kept, so CONTINUE can
+     * regenerate exactly the same ground.
+     */
+    private void resetCourse(boolean freshSeed) {
+        things.clear();
+        if (mode == Mode.TOUR) {
+            courseSeed = 1234L;
+        } else if (mode == Mode.DAILY) {
+            courseSeed = dailyDay * 8191L + 7L;
+        } else if (freshSeed) {
+            courseSeed = System.currentTimeMillis();
+        }
+        gen = new java.util.Random(courseSeed);
+        buildAt = 30f;
+        buildFlag = FLAG_EVERY;
+        buildBoss = BOSS_EVERY;
+        courseEnd = mode == Mode.DAILY ? DAILY_METRES - 14f
+                : mode == Mode.ENDLESS ? Float.MAX_VALUE : LEVEL_LENGTH;
+        if (mode == Mode.DAILY) {
+            things.add(new Thing(Kind.FINISH, DAILY_METRES, 0, 0));
+        }
+        extendCourse((float) x + BUILD_AHEAD);
+    }
+
+    /**
+     * Generates course up to {@code upTo} metres. A dense course sized to the rower's typical jump,
+     * harder with distance. Generated a few hundred metres ahead rather than all at once, so endless
+     * can run for as long as the rower does.
+     */
+    private void extendCourse(float upTo) {
+        if (gen == null) {
+            return;
+        }
+        float limit = Math.min(upTo, courseEnd);
         float typicalSpeed = (float) profile.typicalSpeed();
         float typicalWatts = (float) profile.typicalWatts();
         float reach = Math.max(4f, typicalSpeed * JUMP_FACTOR);
-        float at = 30f;
-        float nextFlag = FLAG_EVERY;
-        float nextBoss = BOSS_EVERY;
-        while (at < LEVEL_LENGTH) {
-            if (at + 30f > nextBoss) {
+        while (buildAt < limit) {
+            if (buildAt + 30f > buildBoss) {
                 // A clear run-in, the King Crab on the kilometre, and a flag just past it.
-                things.add(new Thing(Kind.BOSS, nextBoss, 0, 0));
-                things.add(new Thing(Kind.FLAG, nextBoss + 12f, 0, 0));
-                at = nextBoss + 25f;
-                nextFlag = nextBoss + FLAG_EVERY;
-                nextBoss += BOSS_EVERY;
+                things.add(new Thing(Kind.BOSS, buildBoss, 0, 0));
+                things.add(new Thing(Kind.FLAG, buildBoss + 12f, 0, 0));
+                buildAt = buildBoss + 25f;
+                buildFlag = buildBoss + FLAG_EVERY;
+                buildBoss += BOSS_EVERY;
                 continue;
             }
-            if (at >= nextFlag) {
-                things.add(new Thing(Kind.FLAG, at, 0, 0));
-                at += 6f;
-                nextFlag += FLAG_EVERY;
+            if (buildAt >= buildFlag) {
+                things.add(new Thing(Kind.FLAG, buildAt, 0, 0));
+                buildAt += 6f;
+                buildFlag += FLAG_EVERY;
                 continue;
             }
-            float difficulty = Math.min(1f, at / 2500f);
-            int roll = r.nextInt(100);
+            // Endless keeps climbing past the tour's ceiling, so a long endless run really does bite.
+            float difficulty = Math.min(mode == Mode.ENDLESS ? 1.35f : 1f, buildAt / 2500f);
+            int roll = gen.nextInt(100);
             if (roll < 20) {
-                float width = 2f + r.nextFloat() * (reach * 0.7f - 2f) * (0.4f + 0.6f * difficulty);
-                things.add(new Thing(Kind.PIT, at, width, 0));
-                coinArc(at - 0.5f, width + 1f, 1.6f);
-                at += width + reach + 2f;
+                float width = 2f + gen.nextFloat() * (reach * 0.7f - 2f) * (0.4f + 0.6f * difficulty);
+                things.add(new Thing(Kind.PIT, buildAt, width, 0));
+                coinArc(buildAt - 0.5f, width + 1f, 1.6f);
+                buildAt += width + reach + 2f;
             } else if (roll < 40) {
-                int crates = 1 + (int) (r.nextFloat() * (1 + difficulty * 2.2f));
-                things.add(new Thing(Kind.BLOCK, at, crates, 0));
-                coinArc(at - 1.5f, 4f, crates + 1.2f);
-                at += 1f + reach + 2f;
+                int crates = 1 + (int) (gen.nextFloat() * (1 + difficulty * 2.2f));
+                things.add(new Thing(Kind.BLOCK, buildAt, crates, 0));
+                coinArc(buildAt - 1.5f, 4f, crates + 1.2f);
+                buildAt += 1f + reach + 2f;
             } else if (roll < 62) {
-                Kind enemy = r.nextInt(3) == 0 ? Kind.SPIKY : r.nextBoolean() ? Kind.SLIME : Kind.CRAB;
-                things.add(new Thing(enemy, at + 18f, 0, 0));
-                at += reach + 3f;
+                Kind enemy = gen.nextInt(3) == 0 ? Kind.SPIKY : gen.nextBoolean() ? Kind.SLIME : Kind.CRAB;
+                things.add(new Thing(enemy, buildAt + 18f, 0, 0));
+                buildAt += reach + 3f;
             } else if (roll < 70) {
-                float watts = typicalWatts * (0.7f + r.nextFloat() * (0.35f + difficulty * 0.5f));
-                things.add(new Thing(Kind.WALL, at, watts, 0));
-                at += 6f;
+                float watts = typicalWatts * (0.7f + gen.nextFloat() * (0.35f + difficulty * 0.5f));
+                things.add(new Thing(Kind.WALL, buildAt, watts, 0));
+                buildAt += 6f;
             } else if (roll < 90) {
                 for (int i = 0; i < 5; i++) {
-                    things.add(new Thing(Kind.COIN, at + i * 1.5f, 0, 0));
+                    things.add(new Thing(Kind.COIN, buildAt + i * 1.5f, 0, 0));
                 }
-                at += 8f;
+                buildAt += 8f;
             } else {
-                things.add(new Thing(Kind.HIGH_COIN, at, 0, 0));
-                at += 4f;
+                things.add(new Thing(Kind.HIGH_COIN, buildAt, 0, 0));
+                buildAt += 4f;
             }
-            at += 3f + r.nextFloat() * 6f;
+            buildAt += 3f + gen.nextFloat() * 6f;
+        }
+    }
+
+    /** Endless would grow the list forever; drop what is well behind the runner. */
+    private void pruneCourse() {
+        java.util.Iterator<Thing> it = things.iterator();
+        while (it.hasNext()) {
+            Thing t = it.next();
+            if (t.at < x - KEEP_BEHIND) {
+                it.remove();
+            }
         }
     }
 
@@ -324,6 +547,227 @@ final class RowRunnerGame extends GameView {
             float f = (i + 0.5f) / 5f;
             things.add(new Thing(Kind.ARC_COIN, start + span * f, 0, 4f * f * (1f - f) * peak));
         }
+    }
+
+    /* ---------- the shop: bank, ownership, what is worn ---------- */
+
+    private void loadShop() {
+        bank = Math.round(bests.get(BANK_KEY, 0f));
+        owned.clear();
+        owned.add(SKIN_ID[0]);
+        owned.add(PET_ID[0]);
+        owned.add(THEME_ID[0]);
+        String csv = bests.getString(OWNED_KEY);
+        if (csv != null) {
+            for (String part : csv.split(",")) {
+                String id = part.trim();
+                if (!id.isEmpty()) {
+                    owned.add(id);
+                }
+            }
+        }
+        skinIndex = indexOf(SKIN_ID, bests.getString(SKIN_KEY));
+        if (!owned.contains(SKIN_ID[skinIndex])) {
+            skinIndex = 0;
+        }
+        petIndex = indexOf(PET_ID, bests.getString(PET_KEY));
+        if (!owned.contains(PET_ID[petIndex])) {
+            petIndex = 0;
+        }
+        String theme = bests.getString(THEME_KEY);
+        themeIndex = -1;
+        for (int i = 1; i < THEME_ID.length; i++) {
+            if (THEME_ID[i].equals(theme) && owned.contains(THEME_ID[i])) {
+                themeIndex = i;
+            }
+        }
+        String saved = bests.getString(MODE_KEY);
+        mode = "DAILY".equals(saved) ? Mode.DAILY : "ENDLESS".equals(saved) ? Mode.ENDLESS : Mode.TOUR;
+    }
+
+    private static int indexOf(String[] ids, String id) {
+        if (id != null) {
+            for (int i = 0; i < ids.length; i++) {
+                if (ids[i].equals(id)) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
+    private void saveOwned() {
+        StringBuilder sb = new StringBuilder();
+        for (String id : owned) {
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(id);
+        }
+        bests.putString(OWNED_KEY, sb.toString());
+    }
+
+    /** The run's coins go into the bank once, whether the run ended in a death, a finish or an exit. */
+    private void bankRun() {
+        int fresh = coins - coinsBanked;
+        if (fresh <= 0) {
+            return;
+        }
+        coinsBanked = coins;
+        bank += fresh;
+        bests.putFloat(BANK_KEY, bank);
+    }
+
+    private boolean equipped(Item it) {
+        return it.group == 0 ? skinIndex == it.index
+                : it.group == 1 ? petIndex == it.index
+                : themeIndex == it.index;
+    }
+
+    /** Buys an item if it can be afforded, then wears it. Owned items are simply worn. */
+    private void tapShopItem(Item it) {
+        if (!owned.contains(it.id)) {
+            if (bank < it.cost) {
+                shopNote = "NEEDS " + (it.cost - bank) + " MORE COINS";
+                shopNoteUntil = sessionSeconds + 2.0;
+                return;
+            }
+            bank -= it.cost;
+            bests.putFloat(BANK_KEY, bank);
+            owned.add(it.id);
+            saveOwned();
+            shopNote = "BOUGHT " + it.name;
+        } else {
+            shopNote = it.name + " ON";
+        }
+        shopNoteUntil = sessionSeconds + 1.6;
+        if (it.group == 0) {
+            skinIndex = it.index;
+            bests.putString(SKIN_KEY, it.id);
+        } else if (it.group == 1) {
+            petIndex = it.index;
+            bests.putString(PET_KEY, it.id);
+            petPlaced = false;
+        } else {
+            themeIndex = it.index;
+            bests.putString(THEME_KEY, it.id);
+            skyShader = null;
+            shownWorld = worldAt(x);
+        }
+    }
+
+    /* ---------- modes ---------- */
+
+    private void setMode(Mode m) {
+        if (mode == m) {
+            return;
+        }
+        mode = m;
+        bests.putString(MODE_KEY, m.name());
+        restartRun();
+    }
+
+    /** A clean run in the current mode, keeping the bank and the shop as they are. */
+    private void restartRun() {
+        bankRun();
+        start();
+    }
+
+    /** Today's best time for the daily course, or 0 when today has not been run. */
+    private float dailyBest() {
+        String stored = bests.getString(DAILY_BEST_KEY);
+        if (stored == null) {
+            return 0f;
+        }
+        int bar = stored.indexOf('|');
+        if (bar < 0 || !stored.substring(0, bar).equals(Long.toString(dailyDay))) {
+            return 0f;
+        }
+        try {
+            return Float.parseFloat(stored.substring(bar + 1));
+        } catch (NumberFormatException e) {
+            return 0f;
+        }
+    }
+
+    /** Reads today's best once and keeps the strings the cards draw, so no frame parses prefs. */
+    private void refreshDailyBest() {
+        dailyBestSeconds = dailyBest();
+        dailyBestText = dailyBestSeconds > 0f ? clock(dailyBestSeconds) : null;
+        dailyModeNote = dailyBestText != null
+                ? "today's seed  ·  best " + dailyBestText
+                : "today's seed  ·  500 m, timed";
+    }
+
+    /** The 500 m daily is done: time it on the rowing clock and keep today's best. */
+    private void finishDaily() {
+        finished = true;
+        fighting = false;
+        starUntil = -1;
+        dailyTime = (float) activeSeconds;
+        float prev = dailyBestSeconds;
+        dailyIsBest = prev <= 0f || dailyTime < prev;
+        if (dailyIsBest) {
+            bests.putString(DAILY_BEST_KEY, dailyDay + "|" + String.format(java.util.Locale.US, "%.1f", dailyTime));
+            saveGhost(GHOST_DAILY_KEY, dailyDay + "|");
+            refreshDailyBest();
+        }
+        bests.putFloat(DAILY_RUNS_KEY, bests.get(DAILY_RUNS_KEY, 0f) + 1f);
+        bests.recordHighest("runner.coins", coins);
+        bests.recordHighest(COMBO_KEY, bestCombo);
+        bankRun();
+        shake.kick(dp(10f));
+        fx.burst(getWidth() * 0.3f, getHeight() * 0.6f, 60, dp(260f), 0.9f, dp(4f), 0xFFF5C518, true);
+        say(dailyIsBest ? "NEW DAILY BEST!" : "FINISH!");
+    }
+
+    /** Records for the mode just run. The tour and endless keep separate distances. */
+    private void recordRun() {
+        if (mode == Mode.TOUR) {
+            bests.recordHighest("runner.distance", (float) x);
+        } else if (mode == Mode.ENDLESS) {
+            bests.recordHighest(ENDLESS_KEY, (float) x);
+            bestEndless = Math.max(bestEndless, (float) x);
+        }
+        bests.recordHighest("runner.coins", coins);
+        bests.recordHighest(BOSSES_KEY, bossesBeaten);
+        bests.recordHighest(COMBO_KEY, bestCombo);
+    }
+
+    /* ---------- the combo chain ---------- */
+
+    /**
+     * How long a chain stays alive, from the rower's own pace rather than a constant.
+     *
+     * <p>The generator spaces enemies at {@code typicalSpeed * JUMP_FACTOR + 6..12 m}, so the time
+     * between two of them is {@code 1.9 + 6..12 / typicalSpeed} seconds - about 3.5-5.0 s for this
+     * machine's 3.85 m/s, but 4.3-6.7 s for someone holding 2.5. A flat five seconds meant a slower
+     * rower could essentially never chain two stomps, which is the "it never moves" mistake this
+     * project keeps making with a hard-coded threshold.
+     */
+    private double comboWindow() {
+        return Math.max(COMBO_WINDOW, 2.0 + 14.0 / Math.max(1.5, profile.typicalSpeed()));
+    }
+
+    /** Coins a stomp pays: the chain multiplies them, to x5. */
+    private int comboMultiplier() {
+        return Math.max(1, Math.min(COMBO_MAX_MULT, 1 + combo / 3));
+    }
+
+    private void addCombo() {
+        combo = sessionSeconds < comboUntil ? combo + 1 : 1;
+        comboUntil = sessionSeconds + comboWindow();
+        bestCombo = Math.max(bestCombo, combo);
+    }
+
+    /** A hit ends the chain. Silent on purpose: the hit has its own callout, and the badge vanishing
+     * over the runner's head is the feedback. */
+    private void breakCombo() {
+        if (combo >= 2) {
+            comboBrokeAt = sessionSeconds;
+        }
+        combo = 0;
+        comboUntil = 0;
     }
 
     @Override
@@ -353,17 +797,63 @@ final class RowRunnerGame extends GameView {
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_DOWN && over) {
-            float tx = e.getX();
-            float ty = e.getY();
+        if (e.getAction() != MotionEvent.ACTION_DOWN) {
+            return super.onTouchEvent(e);
+        }
+        float tx = e.getX();
+        float ty = e.getY();
+        if (shopOpen) {
+            if (closeRect.contains(tx, ty)) {
+                shopOpen = false;
+                return true;
+            }
+            for (Item it : shop) {
+                if (it.rect.contains(tx, ty)) {
+                    tapShopItem(it);
+                    return true;
+                }
+            }
+            return true;   // the shop swallows taps so nothing behind it moves
+        }
+        if (finished) {
+            if (retryRect.contains(tx, ty)) {
+                restartRun();
+            } else if (shopBtnRect.contains(tx, ty)) {
+                shopOpen = true;
+            }
+            return true;
+        }
+        if (over) {
+            if (shopBtnRect.contains(tx, ty)) {
+                shopOpen = true;
+                return true;
+            }
+            // Endless is about the next run, not the last one: a tap anywhere runs again.
+            if (mode == Mode.ENDLESS) {
+                restartRun();
+                return true;
+            }
             if (checkpoint > 0 && continueRect.contains(tx, ty)) {
                 continueRun();
                 return true;
             }
             if (checkpoint <= 0 || restartRect.contains(tx, ty)) {
-                start();
+                restartRun();
             }
             return true;
+        }
+        if (!started) {
+            // The start screen: pick a mode, or open the shop.
+            for (int i = 0; i < modeRect.length; i++) {
+                if (modeRect[i].contains(tx, ty)) {
+                    setMode(i == 0 ? Mode.TOUR : i == 1 ? Mode.DAILY : Mode.ENDLESS);
+                    return true;
+                }
+            }
+            if (shopBtnRect.contains(tx, ty)) {
+                shopOpen = true;
+                return true;
+            }
         }
         return super.onTouchEvent(e);
     }
@@ -400,7 +890,11 @@ final class RowRunnerGame extends GameView {
         return sessionSeconds < starUntil;
     }
 
-    private static int worldAt(double metres) {
+    /** The world a point on the course is in - the kilometre it sits in, or the bought theme. */
+    private int worldAt(double metres) {
+        if (themeIndex >= 0) {
+            return themeIndex;
+        }
         if (metres < 0) {
             return 0;
         }
@@ -408,7 +902,7 @@ final class RowRunnerGame extends GameView {
     }
 
     /** The King Crab stands on the kilometre but guards the world it is fought in, 8 m short of it. */
-    private static int bossWorld(float at) {
+    private int bossWorld(float at) {
         return worldAt(at - BOSS_STAND);
     }
 
@@ -426,7 +920,8 @@ final class RowRunnerGame extends GameView {
         }
         float speed = boat.value();
         boolean bonked = sessionSeconds < bonkUntil;
-        if (started && !over && !bonked && !fighting) {
+        boolean holding = over || finished || bonked || fighting || shopOpen;
+        if (started && !holding) {
             x = sessionMeters - runStart;
         } else if (started) {
             // Held in place (a bonk, the boss, game over): keep the anchor moving so the run does
@@ -438,11 +933,16 @@ final class RowRunnerGame extends GameView {
         float youX = w * 0.30f;
         float metre = dp(METRE_PX_DP);
 
-        if (started && !over) {
+        if (started && !over && !finished && !shopOpen) {
             runClock += dt;
             while (runClock >= nextGhostSample && ghostRecLen < MAX_GHOST) {
                 ghostRec[ghostRecLen++] = (int) Math.round(x);
                 nextGhostSample += 1.0;
+            }
+            extendCourse((float) x + BUILD_AHEAD);
+            if (sessionSeconds > nextPrune) {
+                nextPrune = sessionSeconds + 3.0;
+                pruneCourse();
             }
             update(dt, speed, w, groundY, youX, metre);
         }
@@ -489,6 +989,8 @@ final class RowRunnerGame extends GameView {
         if (!hurt || starNow || ((int) (sessionSeconds * 10) % 2 == 0)) {
             drawHero(c, youX + lunge, groundY - jy, speed, airNow, 0xFF, starNow);
         }
+        drawPet(c);
+        drawCombo(c, youX, groundY - jy);
         fx.draw(c);
         c.restore();
         if (whiteFlash > 0f) {
@@ -500,6 +1002,9 @@ final class RowRunnerGame extends GameView {
             Fx.vignette(c, w, h, 0.7f, 0x8A1010);
         }
         drawHud(c, w, h, speed, groundY, youX, world);
+        if (shopOpen) {
+            drawShop(c, w, h);
+        }
     }
 
     private void update(float dt, float speed, float w, float groundY, float youX, float metre) {
@@ -522,6 +1027,11 @@ final class RowRunnerGame extends GameView {
                 say("INVINCIBLE!");
             }
         }
+
+        if (combo > 0 && sessionSeconds >= comboUntil) {
+            combo = 0;
+        }
+        updatePet(dt, speed, groundY, youX, w / 40f, metre);
 
         if (fighting) {
             updateBoss(groundY, youX, w);
@@ -639,15 +1149,30 @@ final class RowRunnerGame extends GameView {
                         return;
                     }
                     break;
+                case FINISH:
+                    if (x >= t.at) {
+                        t.done = true;
+                        finishDaily();
+                        return;
+                    }
+                    break;
                 default:   // enemies
                     if (Math.abs((float) x - t.at) < 0.6f) {
                         t.done = true;
                         if (hNow > 0.7f || starNow) {
-                            coins += 2;
+                            addCombo();
+                            int mult = comboMultiplier();
+                            coins += 2 * mult;
                             stomps++;
-                            fx.burst(youX, groundY - dp(20f), 18, dp(130f), 0.5f, dp(3.5f),
+                            fx.burst(youX, groundY - dp(20f), 18 + combo * 3, dp(130f), 0.5f, dp(3.5f),
                                     enemyColour(t.kind, worldAt(t.at)), true);
-                            say(stomps % 5 == 0 ? stomps + " STOMPS!" : starNow ? "BOP!" : "STOMP");
+                            if (combo >= 2) {
+                                fx.burst(youX, groundY - dp(46f), 10, dp(110f), 0.5f, dp(3f),
+                                        rainbow(combo * 0.4), false);
+                                say("CHAIN x" + combo + "  +" + (2 * mult));
+                            } else {
+                                say(stomps % 5 == 0 ? stomps + " STOMPS!" : starNow ? "BOP!" : "STOMP");
+                            }
                         } else {
                             hit("OUCH!");
                         }
@@ -752,6 +1277,7 @@ final class RowRunnerGame extends GameView {
         if (sessionSeconds < hurtUntil || star()) {
             return;
         }
+        breakCombo();
         hearts--;
         shake.kick(dp(12f));
         hurtUntil = sessionSeconds + 1.5;
@@ -760,6 +1286,7 @@ final class RowRunnerGame extends GameView {
     }
 
     private void fall(Thing pit) {
+        breakCombo();
         hearts--;
         shake.kick(dp(10f));
         hurtUntil = sessionSeconds + 1.5;
@@ -777,17 +1304,17 @@ final class RowRunnerGame extends GameView {
             over = true;
             fighting = false;
             starUntil = -1;
-            bests.recordHighest("runner.distance", (float) x);
-            bests.recordHighest("runner.coins", coins);
-            bests.recordHighest(BOSSES_KEY, bossesBeaten);
+            recordRun();
             saveGhostIfBest();
+            bankRun();
         }
     }
 
     /** Back to the last flag: hearts refilled, coins and stomps as they were when it was raised. */
     private void continueRun() {
-        things.clear();
-        buildLevel();
+        x = checkpoint;
+        resetCourse(false);
+        extendCourse(checkpoint + BUILD_AHEAD);
         for (Thing t : things) {
             if (t.at <= checkpoint + 0.01f) {
                 t.done = true;
@@ -818,13 +1345,26 @@ final class RowRunnerGame extends GameView {
 
     /* ---------- ghost ---------- */
 
+    /** Each mode races its own ghost: the tour's course, an endless run, today's daily. */
+    private String ghostKey() {
+        return mode == Mode.ENDLESS ? GHOST_ENDLESS_KEY : mode == Mode.DAILY ? GHOST_DAILY_KEY : GHOST_KEY;
+    }
+
     private void loadGhost() {
         ghost = null;
         ghostEnd = 0;
         storedBest = 0;
-        String s = bests.getString(GHOST_KEY);
+        String s = bests.getString(ghostKey());
         if (s == null || s.isEmpty()) {
             return;
+        }
+        if (mode == Mode.DAILY) {
+            // Day-stamped: yesterday's daily was a different course, so it is not a ghost for today.
+            int bar = s.indexOf('|');
+            if (bar < 0 || !s.substring(0, bar).equals(Long.toString(dailyDay))) {
+                return;
+            }
+            s = s.substring(bar + 1);
         }
         try {
             String[] p = s.split(",");
@@ -846,10 +1386,21 @@ final class RowRunnerGame extends GameView {
 
     /** Stores this run as the ghost if it went further. The replayed ghost changes on the next start. */
     private void saveGhostIfBest() {
-        if (ghostRecLen < 2 || x <= storedBest + 0.5f) {
+        if (mode == Mode.DAILY || ghostRecLen < 2 || x <= storedBest + 0.5f) {
+            return;   // the daily's ghost is its fastest run, saved by finishDaily
+        }
+        saveGhost(ghostKey(), "");
+        storedBest = (float) x;
+        newBestRun = true;
+    }
+
+    /** Writes this run's recording under {@code key}, after an optional stamp such as the day. */
+    private void saveGhost(String key, String prefix) {
+        if (ghostRecLen < 2) {
             return;
         }
-        StringBuilder sb = new StringBuilder(ghostRecLen * 5);
+        StringBuilder sb = new StringBuilder(ghostRecLen * 5 + prefix.length());
+        sb.append(prefix);
         for (int i = 0; i < ghostRecLen; i++) {
             if (i > 0) {
                 sb.append(',');
@@ -859,9 +1410,7 @@ final class RowRunnerGame extends GameView {
         if (ghostRecLen < MAX_GHOST) {
             sb.append(',').append((int) Math.round(x));
         }
-        bests.putString(GHOST_KEY, sb.toString());
-        storedBest = (float) x;
-        newBestRun = true;
+        bests.putString(key, sb.toString());
     }
 
     /** Where the best run was at this point on the run clock. */
@@ -1059,6 +1608,9 @@ final class RowRunnerGame extends GameView {
                 }
                 case FLAG:
                     drawFlag(c, t, sx, groundY);
+                    break;
+                case FINISH:
+                    drawFinishGate(c, sx, groundY);
                     break;
                 case BOSS:
                     if (!t.done) {
@@ -1357,6 +1909,35 @@ final class RowRunnerGame extends GameView {
         }
     }
 
+    /** The daily's finish: a chequered banner on two posts, with bunting that sways. */
+    private void drawFinishGate(Canvas c, float sx, float groundY) {
+        float top = groundY - dp(180f);
+        paint.setColor(0xFFDDDDDD);
+        c.drawRect(sx - dp(56f), top, sx - dp(46f), groundY, paint);
+        c.drawRect(sx + dp(46f), top, sx + dp(56f), groundY, paint);
+        float band = dp(26f);
+        for (int row = 0; row < 2; row++) {
+            for (int col = 0; col < 8; col++) {
+                paint.setColor(((row + col) & 1) == 0 ? 0xFFFFFFFF : 0xFF10171F);
+                float cx0 = sx - dp(56f) + col * dp(14f);
+                c.drawRect(cx0, top + row * band * 0.5f, cx0 + dp(14f), top + (row + 1) * band * 0.5f, paint);
+            }
+        }
+        bold(c, "FINISH", sx, top + dp(48f), 16f, 0xFFFFE28A, Paint.Align.CENTER);
+        for (int i = 0; i < 6; i++) {
+            float bx = sx - dp(46f) + i * dp(18f);
+            float sway = (float) Math.sin(sessionSeconds * 3 + i) * dp(4f);
+            paint.setColor(i % 2 == 0 ? ACCENT : 0xFFF5C518);
+            path.reset();
+            path.moveTo(bx, top + band + sway);
+            path.lineTo(bx + dp(14f), top + band + sway);
+            path.lineTo(bx + dp(7f), top + band + dp(16f) + sway);
+            path.close();
+            c.drawPath(path, paint);
+        }
+        Fx.glow(c, sx, groundY - dp(40f), dp(70f), 0x3335D0BA);
+    }
+
     private void drawFlag(Canvas c, Thing t, float sx, float groundY) {
         float pole = dp(100f);
         paint.setColor(0xFFDDDDDD);
@@ -1531,25 +2112,211 @@ final class RowRunnerGame extends GameView {
         c.drawCircle(cx + dp(4f), cy, dp(1.4f), paint);
     }
 
-    /** The runner. {@code alpha} below 0xFF draws the ghost; {@code star} cycles the colours. */
+    /**
+     * The runner. {@code alpha} below 0xFF draws the ghost; {@code star} cycles the colours.
+     * The bought skin sets the three colours and adds its own piece of headgear.
+     */
     private void drawHero(Canvas c, float x0, float feetY, float speed, boolean inAir, int alpha, boolean star) {
+        drawHero(c, x0, feetY, speed, inAir, alpha, star, skinIndex);
+    }
+
+    private void drawHero(Canvas c, float x0, float feetY, float speed, boolean inAir, int alpha, boolean star,
+                          int wearing) {
         float s = dp(1f);
         float swing = inAir ? 6 * s : (speed > 0.2f ? (float) Math.sin(legPhase) * 7f * s : 0f);
-        int legs = star ? rainbow(sessionSeconds * 3 + 0.5) : 0xFF2E5BBA;
-        int shirt = star ? rainbow(sessionSeconds * 3) : 0xFFE84C3D;
+        int skin = alpha < 0xFF ? 0 : wearing;
+        int legs = star ? rainbow(sessionSeconds * 3 + 0.5) : SKIN_LEGS[skin];
+        int shirt = star ? rainbow(sessionSeconds * 3) : SKIN_SHIRT[skin];
+        int face = SKIN_FACE[skin];
         if (alpha < 0xFF) {
             legs = 0xFFCFE3FF;
             shirt = 0xFFCFE3FF;
+            face = 0xFFEAF2FF;
         }
         paint.setColor(withAlpha(legs, alpha));
         c.drawRect(x0 - 6 * s + swing, feetY - 16 * s, x0 - 1 * s + swing, feetY, paint);
         c.drawRect(x0 + 1 * s - swing, feetY - 16 * s, x0 + 6 * s - swing, feetY, paint);
         paint.setColor(withAlpha(shirt, alpha));
         c.drawRect(x0 - 8 * s, feetY - 36 * s, x0 + 8 * s, feetY - 16 * s, paint);
-        paint.setColor(withAlpha(alpha < 0xFF ? 0xFFEAF2FF : 0xFFF1C27D, alpha));
+        paint.setColor(withAlpha(face, alpha));
         c.drawRect(x0 - 6 * s, feetY - 48 * s, x0 + 6 * s, feetY - 36 * s, paint);
         paint.setColor(withAlpha(shirt, alpha));
         c.drawRect(x0 - 7 * s, feetY - 52 * s, x0 + 9 * s, feetY - 46 * s, paint);
+        if (alpha == 0xFF) {
+            drawSkinExtras(c, x0, feetY, s, skin, speed);
+        }
+    }
+
+    /** The bit that makes a skin worth 600 coins: a mask, a visor, a plume, goggles. */
+    private void drawSkinExtras(Canvas c, float x0, float feetY, float s, int skin, float speed) {
+        switch (skin) {
+            case 1:   // AQUA: goggles and a trailing scarf
+                paint.setColor(0xFF10171F);
+                c.drawRect(x0 - 6 * s, feetY - 45 * s, x0 + 6 * s, feetY - 41 * s, paint);
+                paint.setColor(0xFF7FE8FF);
+                c.drawRect(x0 - 4 * s, feetY - 44 * s, x0 - 1 * s, feetY - 42 * s, paint);
+                c.drawRect(x0 + 1 * s, feetY - 44 * s, x0 + 4 * s, feetY - 42 * s, paint);
+                paint.setColor(0xFF2FA8C8);
+                c.drawRect(x0 - 8 * s - Math.min(18f * s, speed * 4f * s), feetY - 38 * s,
+                        x0 - 7 * s, feetY - 33 * s, paint);
+                break;
+            case 2: {   // NINJA: headband with tails that stream behind
+                paint.setColor(0xFFE84C3D);
+                c.drawRect(x0 - 7 * s, feetY - 45 * s, x0 + 7 * s, feetY - 41 * s, paint);
+                float tail = Math.min(22f * s, 6f * s + speed * 4f * s);
+                float wave = (float) Math.sin(legPhase * 0.7) * 3f * s;
+                c.drawRect(x0 - 7 * s - tail, feetY - 45 * s + wave, x0 - 7 * s, feetY - 42 * s + wave, paint);
+                paint.setColor(0xFF12161F);
+                c.drawRect(x0 - 6 * s, feetY - 41 * s, x0 + 6 * s, feetY - 38 * s, paint);
+                break;
+            }
+            case 3:   // ROBOT: antenna with a blinking light, and a visor
+                paint.setColor(0xFF5C6676);
+                c.drawRect(x0 - 1 * s, feetY - 60 * s, x0 + 1 * s, feetY - 52 * s, paint);
+                paint.setColor(((int) (sessionSeconds * 4)) % 2 == 0 ? 0xFFF0655D : 0xFF7A3A36);
+                c.drawCircle(x0, feetY - 62 * s, 3f * s, paint);
+                paint.setColor(0xFF35D0BA);
+                c.drawRect(x0 - 5 * s, feetY - 45 * s, x0 + 5 * s, feetY - 41 * s, paint);
+                break;
+            case 4: {   // KNIGHT: helmet, plume and a slit
+                paint.setColor(0xFFB8BCC8);
+                c.drawRect(x0 - 7 * s, feetY - 50 * s, x0 + 7 * s, feetY - 38 * s, paint);
+                paint.setColor(0xFF10171F);
+                c.drawRect(x0 - 5 * s, feetY - 45 * s, x0 + 5 * s, feetY - 42 * s, paint);
+                paint.setColor(0xFFE84C3D);
+                float lean = (float) Math.sin(legPhase * 0.5) * 2f * s;
+                c.drawRect(x0 - 3 * s + lean, feetY - 60 * s, x0 + 3 * s + lean, feetY - 50 * s, paint);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /* ---------- the pet ---------- */
+
+    /** Where a coin sits on screen, so the pet can fly at it. */
+    private float coinY(Thing t, float groundY, float metre) {
+        return t.kind == Kind.HIGH_COIN ? groundY - dp(90f)
+                : t.kind == Kind.ARC_COIN ? groundY - dp(20f) - t.height * metre
+                : groundY - dp(20f);
+    }
+
+    private static boolean isCoin(Kind k) {
+        return k == Kind.COIN || k == Kind.ARC_COIN || k == Kind.HIGH_COIN;
+    }
+
+    /**
+     * The pet flies just behind and above the runner, and darts at the nearest coin within its
+     * reach - which is how the coins a jump misses still get collected. A better pet reaches further.
+     */
+    private void updatePet(float dt, float speed, float groundY, float youX, float ppm, float metre) {
+        float homeX = youX - dp(50f);
+        float homeY = groundY - dp(76f) - height() * metre * 0.5f
+                + (float) Math.sin(sessionSeconds * 2.6) * dp(7f);
+        if (!petPlaced) {
+            petPx = homeX;
+            petPy = homeY;
+            petPlaced = true;
+        }
+        Thing target = null;
+        float best = Float.MAX_VALUE;
+        float range = PET_RANGE[petIndex];
+        // The pet reaches a high coin well before the runner does (2.4 m of reach against 0.6 s of
+        // running), so left alone it took every one of them for 2 coins and the 5-coin reward for
+        // running fast enough could never be collected. It only salvages the ones you are too slow for.
+        boolean fastEnough = speed >= highCoinSpeed();
+        for (Thing t : things) {
+            if (t.done || !isCoin(t.kind) || (fastEnough && t.kind == Kind.HIGH_COIN)) {
+                continue;
+            }
+            float d = t.at - (float) x;
+            if (d < -1.5f || d > range) {
+                continue;
+            }
+            float away = Math.abs(d);
+            if (away < best) {
+                best = away;
+                target = t;
+            }
+        }
+        float tx = homeX;
+        float ty = homeY;
+        if (target != null) {
+            tx = youX + (target.at - (float) x) * ppm;
+            ty = coinY(target, groundY, metre);
+        }
+        float k = Math.min(1f, dt * (target != null ? 10f : 5f));
+        petPx += (tx - petPx) * k;
+        petPy += (ty - petPy) * k;
+        if (target != null && Math.abs(petPx - tx) < dp(15f) && Math.abs(petPy - ty) < dp(15f)) {
+            target.done = true;
+            // A high coin is worth 5 to a runner going fast enough; the pet can only carry some of it.
+            coins += target.kind == Kind.HIGH_COIN ? 2 : 1;
+            petGrabs++;
+            fx.burst(petPx, petPy, 8, dp(90f), 0.4f, dp(3f), 0xFFF5C518, true);
+        }
+    }
+
+    /** A round little companion: two flapping wings, an eye, and a sparkle trail while it dives. */
+    private void drawPet(Canvas c) {
+        if (!started || !petPlaced) {
+            return;
+        }
+        drawPetAt(c, petPx, petPy, petIndex);
+    }
+
+    /** Drawn at an explicit point so the shop can preview one without touching the live pet. */
+    private void drawPetAt(Canvas c, float px, float py, int kind) {
+        float s = dp(1f);
+        float flap = (float) Math.sin(sessionSeconds * 13);
+        int body = PET_BODY[kind];
+        int wing = PET_WING[kind];
+        Fx.glow(c, px, py, dp(20f), withAlpha(body, 0x44));
+        paint.setColor(wing);
+        c.drawOval(px - 18 * s, py - 4 * s + flap * 5 * s, px - 4 * s, py + 4 * s + flap * 5 * s, paint);
+        c.drawOval(px + 4 * s, py - 4 * s - flap * 5 * s, px + 18 * s, py + 4 * s - flap * 5 * s, paint);
+        paint.setColor(body);
+        c.drawCircle(px, py, 9 * s, paint);
+        if (kind == 2) {
+            // The drone: a rotor bar instead of a beak, and a blinking underside light.
+            paint.setColor(0xFF3A4658);
+            c.drawRect(px - 14 * s, py - 11 * s, px + 14 * s, py - 9 * s, paint);
+            paint.setColor(((int) (sessionSeconds * 5)) % 2 == 0 ? 0xFFF0655D : 0xFF5A2A28);
+            c.drawCircle(px, py + 10 * s, 2.5f * s, paint);
+        } else {
+            paint.setColor(0xFFF5C518);
+            path.reset();
+            path.moveTo(px + 8 * s, py - 1 * s);
+            path.lineTo(px + 16 * s, py + 1 * s);
+            path.lineTo(px + 8 * s, py + 4 * s);
+            path.close();
+            c.drawPath(path, paint);
+        }
+        paint.setColor(0xFFFFFFFF);
+        c.drawCircle(px + 3 * s, py - 2 * s, 3 * s, paint);
+        paint.setColor(0xFF10171F);
+        c.drawCircle(px + 4 * s, py - 2 * s, 1.4f * s, paint);
+    }
+
+    /** The chain over the runner's head: how many in a row, what they are worth, and how long left. */
+    private void drawCombo(Canvas c, float youX, float headY) {
+        double since = sessionSeconds - comboBrokeAt;
+        if (combo < 2) {
+            if (since >= 0 && since < 0.5) {
+                bold(c, "CHAIN LOST", youX, headY - dp(70f), 13f, BAD, Paint.Align.CENTER);
+            }
+            return;
+        }
+        float left = (float) Math.max(0, Math.min(1, (comboUntil - sessionSeconds) / comboWindow()));
+        float bx = youX - dp(34f);
+        float by = headY - dp(96f);
+        paint.setColor(0x99000000);
+        c.drawRect(bx, by, bx + dp(68f), by + dp(26f), paint);
+        paint.setColor(rainbow(combo * 0.35));
+        c.drawRect(bx, by + dp(26f), bx + dp(68f) * left, by + dp(30f), paint);
+        bold(c, "x" + combo + "  ·  x" + comboMultiplier(), bx + dp(34f), by + dp(19f), 12f,
+                left > 0.3f ? 0xFFFFE28A : BAD, Paint.Align.CENTER);
     }
 
     private void drawHud(Canvas c, float w, float h, float speed, float groundY, float youX, int world) {
@@ -1579,17 +2346,32 @@ final class RowRunnerGame extends GameView {
                 mx, my + dp(24f), 9f, starNow ? 0xFFFFE28A : DIM, Paint.Align.LEFT);
 
         bold(c, "● " + coins, w - dp(16f), dp(30f), 20f, 0xFFF5C518, Paint.Align.RIGHT);
+        label(c, "bank " + (bank + coins - coinsBanked) + (petGrabs > 0 ? "   ·   " + PET_NAME[petIndex] + " got " + petGrabs : ""),
+                w - dp(16f), dp(48f), 9f, DIM, Paint.Align.RIGHT);
         if (bossesBeaten > 0) {
             label(c, bossesBeaten + (bossesBeaten == 1 ? " crab king beaten" : " crab kings beaten"),
-                    w - dp(16f), dp(48f), 9f, DIM, Paint.Align.RIGHT);
+                    w - dp(16f), dp(64f), 9f, DIM, Paint.Align.RIGHT);
         }
-        bold(c, Math.round(x) + " m", w / 2f, dp(30f), 20f, TEXT, Paint.Align.CENTER);
-        String sub = WORLD_NAMES[world] + (checkpoint > 0 ? "   ·   flag " + Math.round(checkpoint) + " m" : "");
+        if (mode == Mode.DAILY) {
+            float left = Math.max(0f, DAILY_METRES - (float) x);
+            // Once the gate is crossed the run is timed: hold the finish time rather than letting
+            // the header clock run on past the time the card is showing.
+            bold(c, clock(finished ? dailyTime : activeSeconds), w / 2f, dp(30f), 20f, TEXT, Paint.Align.CENTER);
+            label(c, "DAILY " + Math.round(DAILY_METRES) + " m  ·  " + Math.round(left) + " m to go"
+                            + (dailyBestText != null ? "  ·  today's best " + dailyBestText : "  ·  no time today yet"),
+                    w / 2f, dp(48f), 10f, DIM, Paint.Align.CENTER);
+        } else {
+            bold(c, Math.round(x) + " m", w / 2f, dp(30f), 20f, TEXT, Paint.Align.CENTER);
+        }
+        String sub = (mode == Mode.ENDLESS ? "ENDLESS  ·  " : "") + WORLD_NAMES[world]
+                + (checkpoint > 0 && mode != Mode.ENDLESS ? "   ·   flag " + Math.round(checkpoint) + " m" : "");
         if (ghost != null && started) {
             int gap = Math.round((float) x - ghostAt(runClock));
             sub += "   ·   " + (gap >= 0 ? "+" + gap + " m on BEST" : gap + " m on BEST");
         }
-        label(c, sub, w / 2f, dp(48f), 10f, DIM, Paint.Align.CENTER);
+        if (mode != Mode.DAILY) {
+            label(c, sub, w / 2f, dp(48f), 10f, DIM, Paint.Align.CENTER);
+        }
 
         // The ghost when it is off screen: an arrow at the edge with the gap.
         if (ghost != null && started && !over) {
@@ -1617,15 +2399,20 @@ final class RowRunnerGame extends GameView {
             boolean good = flash.startsWith("STOMP") || flash.startsWith("+") || flash.startsWith("SMASH")
                     || flash.endsWith("STOMPS!") || flash.startsWith("CHECKPOINT") || flash.startsWith("INVINCIBLE")
                     || flash.startsWith("COUNTER") || flash.startsWith("HIT") || flash.startsWith("BOSS DOWN")
-                    || flash.startsWith("BLOCKED") || flash.startsWith("BOP") || flash.startsWith("FROM");
+                    || flash.startsWith("BLOCKED") || flash.startsWith("BOP") || flash.startsWith("FROM")
+                    || flash.startsWith("CHAIN") || flash.startsWith("FINISH") || flash.startsWith("NEW DAILY");
             bold(c, flash, w / 2f, h * 0.36f, 24f, good ? ACCENT : WARN, Paint.Align.CENTER);
         }
         String cap;
         int col = FAINT;
         if (!started) {
+            drawStartCard(c, w, h);
             cap = ghost != null
                     ? "TAKE A STROKE TO RUN  ·  YOUR BEST RUN (" + Math.round(ghostEnd) + " m) RUNS WITH YOU AS A GHOST"
                     : "TAKE A STROKE TO RUN  ·  JUMPS ARE AUTOMATIC - ROW FASTER TO RUN FASTER";
+        } else if (finished) {
+            cap = "";
+            drawDailyCard(c, w, h);
         } else if (over) {
             cap = "";
             drawGameOver(c, w, h);
@@ -1638,6 +2425,90 @@ final class RowRunnerGame extends GameView {
         }
         if (!cap.isEmpty()) {
             bold(c, cap, w / 2f, h - dp(16f), 11f, col, Paint.Align.CENTER);
+        }
+    }
+
+    /**
+     * The shop, drawn over the game. Three columns - RUNNERS, PETS, WORLDS - each item a card that
+     * buys on the first tap and is worn on the next. Coins come from runs and are banked between
+     * sessions, so a run is worth something even when it ends badly.
+     */
+    private void drawShop(Canvas c, float w, float h) {
+        paint.setColor(0xE60A0F16);
+        c.drawRect(0, 0, w, h, paint);
+        bold(c, "SHOP", dp(24f), dp(44f), 26f, TEXT, Paint.Align.LEFT);
+        bold(c, "● " + bank, dp(140f), dp(44f), 26f, 0xFFF5C518, Paint.Align.LEFT);
+        label(c, "coins are banked between sessions  ·  tap to buy, tap again to wear",
+                dp(24f), dp(66f), 10f, DIM, Paint.Align.LEFT);
+
+        closeRect.set(w - dp(130f), dp(18f), w - dp(24f), dp(62f));
+        paint.setColor(0xFF3A4658);
+        c.drawRect(closeRect, paint);
+        bold(c, "CLOSE", closeRect.centerX(), closeRect.centerY() + dp(6f), 13f, TEXT, Paint.Align.CENTER);
+
+        float colW = (w - dp(48f) - dp(24f) * 2) / 3f;
+        float top = dp(96f);
+        float cardH = dp(66f);
+        for (int g = 0; g < 3; g++) {
+            float cx0 = dp(24f) + g * (colW + dp(24f));
+            bold(c, SHOP_HEADS[g], cx0, top + dp(14f), 13f, ACCENT, Paint.Align.LEFT);
+            if (g == 1) {
+                label(c, "a pet grabs the coins you jump past", cx0 + dp(96f), top + dp(14f), 9f, DIM,
+                        Paint.Align.LEFT);
+            } else if (g == 2) {
+                label(c, "lock every kilometre to one world", cx0 + dp(96f), top + dp(14f), 9f, DIM,
+                        Paint.Align.LEFT);
+            }
+        }
+        // One running Y per column; the shop's stock is fixed, so no list allocation in the frame.
+        shopRowY[0] = top + dp(26f);
+        shopRowY[1] = shopRowY[0];
+        shopRowY[2] = shopRowY[0];
+        for (Item it : shop) {
+            float cx0 = dp(24f) + it.group * (colW + dp(24f));
+            float y0 = shopRowY[it.group];
+            shopRowY[it.group] = y0 + cardH + dp(10f);
+            it.rect.set(cx0, y0, cx0 + colW, y0 + cardH);
+            boolean have = owned.contains(it.id);
+            boolean on = have && equipped(it);
+            paint.setColor(on ? 0xFF15584F : have ? 0xFF222B38 : bank >= it.cost ? 0xFF2A3342 : 0xFF1A202A);
+            c.drawRect(it.rect, paint);
+            if (on) {
+                paint.setColor(ACCENT);
+                c.drawRect(cx0, y0, cx0 + dp(5f), y0 + cardH, paint);
+            }
+            drawShopPreview(c, it, cx0 + dp(44f), y0 + cardH - dp(14f));
+            bold(c, it.name, cx0 + dp(84f), y0 + dp(28f), 14f, have ? TEXT : 0xFFB9C4D4, Paint.Align.LEFT);
+            label(c, it.note, cx0 + dp(84f), y0 + dp(46f), 9f, DIM, Paint.Align.LEFT);
+            String right = on ? "WEARING" : have ? "TAP TO WEAR" : it.price;
+            bold(c, right, cx0 + colW - dp(12f), y0 + dp(34f), 12f,
+                    on ? ACCENT : have ? 0xFFB9C4D4 : bank >= it.cost ? 0xFFF5C518 : FAINT, Paint.Align.RIGHT);
+        }
+        if (sessionSeconds < shopNoteUntil) {
+            bold(c, shopNote, w / 2f, h - dp(24f), 16f,
+                    shopNote.startsWith("NEEDS") ? WARN : ACCENT, Paint.Align.CENTER);
+        } else {
+            label(c, "earn coins by running: stomps chain up, the crab kings pay by the kilometre",
+                    w / 2f, h - dp(24f), 10f, FAINT, Paint.Align.CENTER);
+        }
+    }
+
+    /** A little live preview on each shop card: the runner, the pet, or a slice of the world's sky. */
+    private void drawShopPreview(Canvas c, Item it, float cx, float feetY) {
+        if (it.group == 0) {
+            drawHero(c, cx, feetY, 3.5f, false, 0xFF, false, it.index);
+        } else if (it.group == 1) {
+            drawPetAt(c, cx, feetY - dp(24f), it.index);
+        } else {
+            int world = it.index < 0 ? (int) ((sessionSeconds / 1.2) % WORLD_NAMES.length) : it.index;
+            paint.setColor(SKY_TOP[world]);
+            c.drawRect(cx - dp(22f), feetY - dp(42f), cx + dp(22f), feetY - dp(14f), paint);
+            paint.setColor(HILL[world]);
+            c.drawCircle(cx - dp(6f), feetY - dp(12f), dp(16f), paint);
+            paint.setColor(TOP[world]);
+            c.drawRect(cx - dp(22f), feetY - dp(14f), cx + dp(22f), feetY - dp(8f), paint);
+            paint.setColor(SOIL_A[world]);
+            c.drawRect(cx - dp(22f), feetY - dp(8f), cx + dp(22f), feetY, paint);
         }
     }
 
@@ -1673,6 +2544,82 @@ final class RowRunnerGame extends GameView {
         }
     }
 
+    /**
+     * The card before the first stroke: pick TOUR, DAILY or ENDLESS, and open the shop. Drawn on the
+     * game's own canvas and handled in {@link #onTouchEvent}, since a game cannot add header chips.
+     */
+    private void drawStartCard(Canvas c, float w, float h) {
+        float pw = Math.min(w - dp(24f), dp(860f));
+        float ph = dp(178f);
+        float left = w / 2f - pw / 2f;
+        float top = h * 0.30f;
+        paint.setColor(0xCC10171F);
+        c.drawRect(left, top, left + pw, top + ph, paint);
+        bold(c, "ROW RUNNER", w / 2f, top + dp(36f), 22f, TEXT, Paint.Align.CENTER);
+        label(c, "bank ● " + bank + "   ·   " + SKIN_NAME[skinIndex] + " + " + PET_NAME[petIndex]
+                        + "   ·   " + (themeIndex >= 0 ? WORLD_NAMES[themeIndex] : "WORLD TOUR"),
+                w / 2f, top + dp(58f), 11f, DIM, Paint.Align.CENTER);
+
+        float bw = dp(190f);
+        float bh = dp(70f);
+        float by = top + dp(76f);
+        float gap = dp(14f);
+        float x0 = w / 2f - (bw * 2 + gap * 1.5f);
+        for (int i = 0; i < 3; i++) {
+            modeRect[i].set(x0 + i * (bw + gap), by, x0 + i * (bw + gap) + bw, by + bh);
+            boolean on = mode.ordinal() == i;
+            String note = i == 0 ? "the fixed course, kings and worlds"
+                    : i == 1 ? dailyModeNote
+                    : "fresh seed, instant restart";
+            paint.setColor(on ? ACCENT : 0xFF2A3342);
+            c.drawRect(modeRect[i], paint);
+            bold(c, MODE_NAMES[i], modeRect[i].centerX(), modeRect[i].centerY() - dp(2f), 15f,
+                    on ? 0xFF10171F : TEXT, Paint.Align.CENTER);
+            label(c, note, modeRect[i].centerX(), modeRect[i].centerY() + dp(20f), 8f,
+                    on ? 0xCC10171F : DIM, Paint.Align.CENTER);
+        }
+        shopBtnRect.set(x0 + 3 * (bw + gap), by, x0 + 3 * (bw + gap) + bw, by + bh);
+        paint.setColor(0xFFF5C518);
+        c.drawRect(shopBtnRect, paint);
+        bold(c, "SHOP", shopBtnRect.centerX(), shopBtnRect.centerY() - dp(2f), 15f, 0xFF10171F, Paint.Align.CENTER);
+        label(c, "● " + bank + " to spend", shopBtnRect.centerX(), shopBtnRect.centerY() + dp(20f), 8f,
+                0xCC10171F, Paint.Align.CENTER);
+    }
+
+    /** The daily's finish card: this run's time against today's best, and RETRY on the same seed. */
+    private void drawDailyCard(Canvas c, float w, float h) {
+        float pw = dp(640f);
+        float ph = dp(250f);
+        float left = w / 2f - pw / 2f;
+        float top = h * 0.28f;
+        paint.setColor(0xCC10171F);
+        c.drawRect(left, top, left + pw, top + ph, paint);
+        bold(c, dailyIsBest ? "NEW DAILY BEST" : "DAILY DONE", w / 2f, top + dp(44f), 28f,
+                dailyIsBest ? ACCENT : TEXT, Paint.Align.CENTER);
+        bold(c, clock(dailyTime), w / 2f, top + dp(86f), 30f, 0xFFFFE28A, Paint.Align.CENTER);
+        String against = dailyIsBest || dailyBestText == null
+                ? "your fastest run of today's course"
+                : "today's best " + dailyBestText + "   ·   "
+                        + String.format(java.util.Locale.US, "%+.1f s", dailyTime - dailyBestSeconds);
+        label(c, against + "   ·   " + coins + " coins   ·   " + stomps + " stomps   ·   best chain x" + bestCombo,
+                w / 2f, top + dp(112f), 11f, DIM, Paint.Align.CENTER);
+
+        float btnTop = top + dp(136f);
+        float btnH = dp(84f);
+        retryRect.set(left + dp(24f), btnTop, w / 2f - dp(12f), btnTop + btnH);
+        shopBtnRect.set(w / 2f + dp(12f), btnTop, left + pw - dp(24f), btnTop + btnH);
+        paint.setColor(ACCENT);
+        c.drawRect(retryRect, paint);
+        bold(c, "RETRY", retryRect.centerX(), retryRect.centerY() - dp(2f), 18f, 0xFF10171F, Paint.Align.CENTER);
+        label(c, "same course, beat that time", retryRect.centerX(), retryRect.centerY() + dp(22f), 10f,
+                0xCC10171F, Paint.Align.CENTER);
+        paint.setColor(0xFFF5C518);
+        c.drawRect(shopBtnRect, paint);
+        bold(c, "SHOP", shopBtnRect.centerX(), shopBtnRect.centerY() - dp(2f), 18f, 0xFF10171F, Paint.Align.CENTER);
+        label(c, "● " + bank + " banked", shopBtnRect.centerX(), shopBtnRect.centerY() + dp(22f), 10f,
+                0xCC10171F, Paint.Align.CENTER);
+    }
+
     private void drawGameOver(Canvas c, float w, float h) {
         float pw = dp(640f);
         float ph = dp(250f);
@@ -1681,14 +2628,38 @@ final class RowRunnerGame extends GameView {
         paint.setColor(0xCC10171F);
         c.drawRect(left, top, left + pw, top + ph, paint);
         bold(c, "GAME OVER", w / 2f, top + dp(44f), 28f, BAD, Paint.Align.CENTER);
-        label(c, Math.round(x) + " m   ·   " + coins + " coins   ·   " + stomps + " stomps   ·   "
-                        + bossesBeaten + " crab kings" + (continues > 0 ? "   ·   " + continues + " continues" : ""),
+        label(c, Math.round(x) + " m   ·   " + coins + " coins   ·   " + stomps + " stomps   ·   chain x" + bestCombo
+                        + "   ·   " + bossesBeaten + " crab kings"
+                        + (continues > 0 ? "   ·   " + continues + " continues" : ""),
                 w / 2f, top + dp(76f), 12f, TEXT, Paint.Align.CENTER);
         if (newBestRun) {
             label(c, "NEW BEST RUN - it is your ghost next time", w / 2f, top + dp(100f), 11f, ACCENT, Paint.Align.CENTER);
         }
         float btnTop = top + dp(130f);
         float btnH = dp(84f);
+        if (mode == Mode.ENDLESS) {
+            // Endless is about the next run: one tap anywhere and you are off again.
+            continueRect.setEmpty();
+            restartRect.set(left + dp(24f), btnTop, w / 2f + dp(140f), btnTop + btnH);
+            shopBtnRect.set(w / 2f + dp(164f), btnTop, left + pw - dp(24f), btnTop + btnH);
+            paint.setColor(ACCENT);
+            c.drawRect(restartRect, paint);
+            bold(c, ((int) (sessionSeconds * 2)) % 2 == 0 ? "TAP ANYWHERE TO RUN AGAIN" : "TAP TO RUN AGAIN",
+                    restartRect.centerX(), restartRect.centerY() - dp(2f), 17f, 0xFF10171F, Paint.Align.CENTER);
+            label(c, "best endless " + Math.round(bestEndless) + " m   ·   a new course every run",
+                    restartRect.centerX(), restartRect.centerY() + dp(22f), 10f, 0xCC10171F, Paint.Align.CENTER);
+            paint.setColor(0xFFF5C518);
+            c.drawRect(shopBtnRect, paint);
+            bold(c, "SHOP", shopBtnRect.centerX(), shopBtnRect.centerY() - dp(2f), 17f, 0xFF10171F, Paint.Align.CENTER);
+            label(c, "● " + bank, shopBtnRect.centerX(), shopBtnRect.centerY() + dp(22f), 10f, 0xCC10171F,
+                    Paint.Align.CENTER);
+            return;
+        }
+        shopBtnRect.set(left + pw - dp(150f), top + dp(14f), left + pw - dp(24f), top + dp(56f));
+        paint.setColor(0xFFF5C518);
+        c.drawRect(shopBtnRect, paint);
+        bold(c, "SHOP ● " + bank, shopBtnRect.centerX(), shopBtnRect.centerY() + dp(6f), 12f, 0xFF10171F,
+                Paint.Align.CENTER);
         if (checkpoint > 0) {
             continueRect.set(left + dp(24f), btnTop, w / 2f - dp(12f), btnTop + btnH);
             restartRect.set(w / 2f + dp(12f), btnTop, left + pw - dp(24f), btnTop + btnH);

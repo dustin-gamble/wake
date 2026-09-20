@@ -24,6 +24,26 @@ import android.view.MotionEvent;
  *
  * <p>Crew speeds come from the rower's own typical speed, the division factor and each crew's
  * strength, so the field is always within reach of whoever is rowing.
+ *
+ * <p>3.23.0 adds five things on top of that week:
+ * <ul>
+ *   <li><b>The points table</b> is a real table: every crew's Monday-to-Sunday day grid, a form
+ *       strip of their last five results, days raced, the head-to-head, and bars that count up
+ *       when the table opens.</li>
+ *   <li><b>Qualification.</b> Race {@value #QUALIFY_DAYS} ranked days in the week and Sunday
+ *       becomes the GRAND FINAL - one 500 m race against the top three of the ladder for double
+ *       points. Miss the qualification and Sunday is an ordinary regatta day. A progress strip of
+ *       seven day pips sits in the HUD from Monday, so the target is always visible, and an
+ *       EXHIBITION pill rows the grand-final course unranked once the day's regatta is done.</li>
+ *   <li><b>A medal ceremony</b> after every ranked final: the podium rises, the crews walk on, a
+ *       medal comes down on its ribbon, flags climb their poles and the sky goes up in fireworks.
+ *       Tap to skip.</li>
+ *   <li><b>A grudge meter</b> against your nemesis - the crew with the best record over you. Its
+ *       needle sits on the head-to-head and swings live with the metres between you whenever they
+ *       are in your race. Lead them by {@value #GRUDGE_TARGET} and the grudge is settled.</li>
+ *   <li><b>Off-season training.</b> Metres rowed outside the ranked races bank toward pre-season
+ *       points that start you ahead on next week's ladder.</li>
+ * </ul>
  */
 final class RegattaGame extends GameView {
 
@@ -47,9 +67,19 @@ final class RegattaGame extends GameView {
 
     /** Season points by overall day placing: A final 1-4, then B final 1-4. */
     private static final int[] POINTS = {12, 9, 7, 5, 4, 3, 2, 1};
+    /** The grand final pays double: it is one race, and only qualifiers are in it. */
+    private static final int[] GRAND_POINTS = {24, 18, 14, 10};
+    /** Ranked days needed inside the week to be entered for Sunday's grand final. */
+    static final int QUALIFY_DAYS = 3;
+    /** Lead a crew by this many head-to-head wins and the grudge is settled. */
+    static final int GRUDGE_TARGET = 3;
+    /** Most pre-season points a week of training can carry, so training never replaces racing. */
+    private static final int TRAIN_CAP = 6;
+    /** Seconds of rowing at the rower's typical speed that earn one pre-season point. */
+    private static final double TRAIN_SECONDS_PER_POINT = 420;
 
-    private enum Phase { READY, RACING, RESULTS, DONE }
-    private enum Stage { HEAT, A_FINAL, B_FINAL }
+    private enum Phase { READY, RACING, RESULTS, CEREMONY, DONE }
+    private enum Stage { HEAT, A_FINAL, B_FINAL, GRAND }
     private enum Overlay { NONE, LADDER, CABINET }
 
     private final PersonalBests bests;
@@ -60,6 +90,8 @@ final class RegattaGame extends GameView {
     private final RectF rect = new RectF();
     private final RectF btnLadder = new RectF();
     private final RectF btnCabinet = new RectF();
+    private final RectF btnGrand = new RectF();
+    private final RectF barRect = new RectF();
     private final RiverScenery scenery;
     private final Fx.Particles fx = new Fx.Particles();
     private android.graphics.LinearGradient skyShader;
@@ -72,8 +104,12 @@ final class RegattaGame extends GameView {
     private double fireworksUntil;
     private double nextFirework;
     private float cheer;
-    private static final String[] SHELF_NAMES = {"GOLD", "SILVER", "BRONZE", "B FINAL WINS", "SEASON TITLES", "PROMOTIONS"};
-    private static final int[] SHELF_TINT = {0xFFF5C518, 0xFFC9D2DC, 0xFFCD7F32, 0xFF6F8CFF, 0xFF35D0BA, 0xFFB48CFF};
+    private static final String[] SHELF_NAMES = {"GOLD", "SILVER", "BRONZE", "B FINAL WINS",
+            "SEASON TITLES", "PROMOTIONS", "GRAND FINALS"};
+    private static final int[] SHELF_TINT = {0xFFF5C518, 0xFFC9D2DC, 0xFFCD7F32, 0xFF6F8CFF,
+            0xFF35D0BA, 0xFFB48CFF, 0xFFFF8A4C};
+    /** Where each shelf-two trophy lives in {@link #cabinet}; grand finals were appended at 12. */
+    private static final int[] SHELF_SLOT = {0, 1, 2, 3, 4, 5, 12};
     private static final int[] PARTY = {0xFFF5C518, 0xFFF0655D, 0xFF35D0BA, 0xFF6F8CFF, 0xFFFFFFFF};
 
     /* ---------- the race on the water ---------- */
@@ -120,13 +156,59 @@ final class RegattaGame extends GameView {
     private final int[] ladderPts = new int[NCREWS + 1];   // index NCREWS is you
     private final int[] ladderOrder = new int[NCREWS + 1];
     private int ladderRank;
+    /** Points won on each day of this week, so the table can show a day grid and a form strip. */
+    private final int[] seasonDayPts = new int[7];
+    private final int[][] seasonRivalDay = new int[NCREWS][7];
+    /** Counting up bars in the table, eased from zero each time it is opened. */
+    private final float[] ladderBar = new float[NCREWS + 1];
+    /** Every crew's points per day of this week, you at index NCREWS; built off the frame loop. */
+    private final int[][] dayGrid = new int[NCREWS + 1][7];
+    private double ladderOpenedAt;
+
+    /* ---------- qualification for the grand final ---------- */
+
+    private int daysRaced;
+    private boolean qualified;
+    private boolean grandDay;
+    /** A practice run of the grand-final course, chosen from the pill once the day is done. */
+    private boolean exhibition;
+
+    /* ---------- the grudge ---------- */
+
+    private int nemesis = -1;
+    private int grudgeSettledMask;
+    private int grudgeLane = -1;     // the nemesis's lane in this race, or -1
+    private float grudgeNeedle;
+    private float grudgeLive;
+    private double grudgeFlashUntil;
+    private String grudgeNote = "";
+
+    /* ---------- off-season training ---------- */
+
+    private long trainWeek;
+    private double trainMetres;
+    private int carriedPoints;
+    private double lastTrainMark;
+    private double trainSaveAt;
+
+    /* ---------- the medal ceremony ---------- */
+
+    private double ceremonyFrom;
+    private int ceremonyMedal = -1;         // 0 gold, 1 silver, 2 bronze, -1 none
+    private final int[] podium = new int[3];  // crew per place, -1 is you
+    private boolean ceremonyBurst;
+    private double ceremonyFirework;
 
     /* ---------- records and trophies ---------- */
 
     private final int[] h2hWins = new int[NCREWS];
     private final int[] h2hLosses = new int[NCREWS];
-    /** gold, silver, bronze, B-final wins, season titles, promotions, then A-final wins per division. */
-    private final int[] cabinet = new int[6 + 6];
+    /**
+     * gold, silver, bronze, B-final wins, season titles, promotions, then A-final wins per
+     * division (6..11), then grand-final wins (12). Appended, never reordered - the stored string
+     * is read by index and an older one simply stops short.
+     */
+    private final int[] cabinet = new int[6 + 6 + 1];
 
     RegattaGame(Context context, PersonalBests bests) {
         super(context);
@@ -162,9 +244,17 @@ final class RegattaGame extends GameView {
         division = Math.max(0, Math.min(DIVISIONS.length - 1, Math.round(bests.get("regatta.division", 0f))));
         loadRecords();
         loadCabinet();
+        loadGrudge();
         seasonNews = "";
+        loadTraining();
         loadSeason();
         ranked = Math.round(bests.get("regatta.day", -1f)) != today();
+        if (ranked) {
+            // The exhibition pill only exists once the day's ranked regatta is rowed, and the flag
+            // outlives start(). Left set across a midnight rollover it would have sent a ranked,
+            // unqualified day straight to the grand final for double points, with no heat.
+            exhibition = false;
+        }
         seedBase = today() * 7919L + division * 31L + (ranked ? 0 : 1000L + practiceRun * 97L);
         overlay = Overlay.NONE;
         outcome = "";
@@ -174,16 +264,46 @@ final class RegattaGame extends GameView {
         confettiUntil = 0;
         fireworksUntil = 0;
         nextFirework = 0;
+        grudgeNote = "";
+        grudgeFlashUntil = 0;
+        lastTrainMark = 0;
+        trainSaveAt = 0;
         if (!seasonNews.isEmpty()) {
             confettiUntil = seasonNewsColor == ACCENT ? 4.0 : 0;
         }
+        daysRaced = Integer.bitCount(seasonMask & 0x7F);
+        qualified = daysRaced >= QUALIFY_DAYS;
+        grandDay = dayOfWeek(today()) == 6 && qualified;
+        recomputeLadder();
+        pickNemesis();
+        grudgeNeedle = grudgeTarget();
         drawDay();
-        if (ranked && resumeFinal()) {
+        if (ranked && grandDay) {
+            setupGrand();
+        } else if (ranked && resumeFinal()) {
             outcome = "HEAT DONE EARLIER - " + ordinal(heatPlacing) + ". ON TO THE FINAL";
+        } else if (exhibition) {
+            setupGrand();
         } else {
             setupRace(Stage.HEAT);
         }
-        recomputeLadder();
+    }
+
+    @Override
+    protected void onStop() {
+        saveTraining();
+    }
+
+    /** The grand final: you against the three crews leading this week's ladder. */
+    private void setupGrand() {
+        int n = 0;
+        for (int i = 0; i <= NCREWS && n < 3; i++) {
+            int e = ladderOrder[i];
+            if (e != NCREWS) {
+                laneCrew[n++] = e;
+            }
+        }
+        setupRace(Stage.GRAND);
     }
 
     /** Splits the seven crews into your heat (three) and the other heat (four), and times the other heat. */
@@ -209,8 +329,9 @@ final class RegattaGame extends GameView {
     /** A crew's 500 m time in a given race of today's regatta: deterministic, so the day is fixed. */
     private double crewTime(int crew, Stage s) {
         java.util.Random r = new java.util.Random(seedBase * 13 + s.ordinal() * 101 + crew * 7);
+        double lift = s == Stage.A_FINAL ? 1.01 : s == Stage.GRAND ? 1.025 : 1.0;
         double speed = profile.typicalSpeed() * FACTOR[division] * (1 + STRENGTH[crew])
-                * (0.985 + r.nextDouble() * 0.03) * (s == Stage.A_FINAL ? 1.01 : 1.0);
+                * (0.985 + r.nextDouble() * 0.03) * lift;
         return RACE_METERS / Math.max(1.0, speed);
     }
 
@@ -231,24 +352,33 @@ final class RegattaGame extends GameView {
         stage = s;
         phase = Phase.READY;
         aheadKnown = false;
+        grudgeLane = -1;
         for (int i = 0; i < 3; i++) {
             finishTimes[i] = crewTime(laneCrew[i], s);
             rivalX[i] = 0f;
             int k = laneCrew[i];
             laneName[i] = CREWS[k] + "  " + h2hWins[k] + "-" + h2hLosses[k];
+            if (k == nemesis) {
+                grudgeLane = i;
+            }
         }
-        if (s != Stage.HEAT) {
+        if (grudgeLane >= 0) {
+            // The grudge outranks every other pre-race line: this is the crew you came for.
+            callout = "GRUDGE RACE  ·  " + CREWS[nemesis] + "  " + h2hWins[nemesis] + "-" + h2hLosses[nemesis];
+            calloutColor = CREW_COLORS[nemesis];
+            calloutUntil = sessionSeconds + 3.2;
+        } else if (s != Stage.HEAT) {
             // The crew with the best record against you gets the pre-race line.
-            int nemesis = laneCrew[0];
+            int worst = laneCrew[0];
             for (int i = 1; i < 3; i++) {
                 int k = laneCrew[i];
-                if (h2hLosses[k] - h2hWins[k] > h2hLosses[nemesis] - h2hWins[nemesis]) {
-                    nemesis = k;
+                if (h2hLosses[k] - h2hWins[k] > h2hLosses[worst] - h2hWins[worst]) {
+                    worst = k;
                 }
             }
-            if (h2hLosses[nemesis] > 0) {
-                callout = CREWS[nemesis] + " HAVE BEATEN YOU " + h2hLosses[nemesis] + "x";
-                calloutColor = CREW_COLORS[nemesis];
+            if (h2hLosses[worst] > 0) {
+                callout = CREWS[worst] + " HAVE BEATEN YOU " + h2hLosses[worst] + "x";
+                calloutColor = CREW_COLORS[worst];
                 calloutUntil = sessionSeconds + 4.0;
             }
         }
@@ -364,19 +494,22 @@ final class RegattaGame extends GameView {
                 placing++;
             }
         }
-        boolean a = stage == Stage.A_FINAL;
-        int dayPlace = (a ? 0 : 4) + placing;   // 1..8
-        int pts = POINTS[dayPlace - 1];
+        boolean grand = stage == Stage.GRAND;
+        boolean a = stage == Stage.A_FINAL || grand;
+        int pts = grand ? GRAND_POINTS[placing - 1] : POINTS[(a ? 0 : 4) + placing - 1];
         finishTime = t;
+        buildPodium(t);
         bests.recordLowest("time." + RACE_METERS, (float) t);
         if (ranked) {
             recordHeadToHead(t);
+            resolveGrudge(t);
             bests.putFloat("regatta.day", today());
             // Season points for everyone who raced today: you and all seven crews.
             int dow = dayOfWeek(today());
             if ((seasonMask & (1 << dow)) == 0) {
                 seasonMask |= 1 << dow;
                 seasonPoints += pts;
+                seasonDayPts[dow] = pts;
                 for (int i = 0; i < 3; i++) {
                     int place = 1;
                     for (int j = 0; j < 3; j++) {
@@ -387,18 +520,36 @@ final class RegattaGame extends GameView {
                     if (t < finishTimes[i]) {
                         place++;
                     }
-                    seasonRivalActual[laneCrew[i]] += POINTS[(a ? 0 : 4) + place - 1];
+                    seasonRivalDay[laneCrew[i]][dow] +=
+                            grand ? GRAND_POINTS[place - 1] : POINTS[(a ? 0 : 4) + place - 1];
                 }
+                // The four crews not in your race row the other final of the day.
                 double[] ot = new double[4];
-                int[] oc = otherFinal.clone();
-                for (int i = 0; i < 4; i++) {
-                    ot[i] = crewTime(oc[i], a ? Stage.B_FINAL : Stage.A_FINAL);
+                int[] oc = new int[4];
+                if (grand) {
+                    // Everyone outside the grand final rows the consolation, in ladder order.
+                    int n = 0;
+                    for (int i = 0; i <= NCREWS && n < 4; i++) {
+                        int e = ladderOrder[i];
+                        if (e != NCREWS && e != laneCrew[0] && e != laneCrew[1] && e != laneCrew[2]) {
+                            oc[n++] = e;   // already in ladder order, so no sort is needed
+                        }
+                    }
+                } else {
+                    System.arraycopy(otherFinal, 0, oc, 0, 4);
+                    for (int i = 0; i < 4; i++) {
+                        ot[i] = crewTime(oc[i], a ? Stage.B_FINAL : Stage.A_FINAL);
+                    }
+                    sortByTime(oc, ot);
                 }
-                sortByTime(oc, ot);
+                // You rowed the A final or the grand, so they rowed the lesser one, and vice versa.
                 for (int i = 0; i < 4; i++) {
-                    seasonRivalActual[oc[i]] += POINTS[(a ? 4 : 0) + i];
+                    seasonRivalDay[oc[i]][dow] += POINTS[(a ? 4 : 0) + i];
                 }
+                syncRivalTotals();
                 saveSeason();
+                daysRaced = Integer.bitCount(seasonMask & 0x7F);
+                qualified = daysRaced >= QUALIFY_DAYS;
             }
             // The cabinet.
             if (a && placing <= 3) {
@@ -408,27 +559,45 @@ final class RegattaGame extends GameView {
                 cabinet[6 + division]++;
                 bests.recordHighest("regatta.golds", cabinet[0]);
             }
+            if (grand && placing == 1) {
+                cabinet[12]++;
+                bests.recordHighest("regatta.grands", cabinet[12]);
+            }
             if (!a && placing == 1) {
                 cabinet[3]++;
             }
             saveCabinet();
             bests.recordHighest("regatta.best", division + 1);
             recomputeLadder();
-            outcome = (a ? "A FINAL " : "B FINAL ") + ordinal(placing) + "  ·  +" + pts + " PTS  ·  "
-                    + ordinal(ladderRank) + " ON THE WEEK'S LADDER";
+            outcome = (grand ? "GRAND FINAL " : a ? "A FINAL " : "B FINAL ") + ordinal(placing)
+                    + "  ·  +" + pts + " PTS  ·  " + ordinal(ladderRank) + " ON THE WEEK'S LADDER";
             outcome2 = ladderRank <= 2 ? "IN THE PROMOTION ZONE" : ladderRank >= 7 ? "IN THE RELEGATION ZONE" : "";
         } else {
-            outcome = "PRACTICE - TODAY'S RANKED REGATTA IS DONE";
+            outcome = (exhibition ? "EXHIBITION GRAND FINAL - " : "PRACTICE - ") + "TODAY'S RANKED REGATTA IS DONE";
             outcome2 = "";
         }
         boolean gold = a && placing == 1;
         confettiUntil = sessionSeconds + (placing == 1 ? 5.0 : 1.2);
         fireworksUntil = gold ? sessionSeconds + 6.0 : 0;
-        callout = gold ? "REGATTA CHAMPIONS!" : placing == 1 ? "B FINAL WON" : a && placing <= 3 ? "ON THE PODIUM"
+        callout = grand && placing == 1 ? "SEASON CHAMPIONS!" : gold ? "REGATTA CHAMPIONS!"
+                : placing == 1 ? "B FINAL WON" : a && placing <= 3 ? "ON THE PODIUM"
                 : placing == 4 ? "LAST PLACE" : "FINISHED";
         calloutColor = placing == 1 ? 0xFFF5C518 : placing == 4 ? BAD : WARN;
         calloutUntil = sessionSeconds + 3.5;
-        phase = Phase.DONE;
+        // The ceremony: every final is worth standing on the pontoon for, ranked or exhibition.
+        ceremonyMedal = a && placing <= 3 ? placing - 1 : -1;
+        ceremonyFrom = sessionSeconds;
+        ceremonyBurst = false;
+        ceremonyFirework = 0;
+        phase = Phase.CEREMONY;
+    }
+
+    /** Places 1-3 of the final just rowed, as crew indexes with -1 for you. */
+    private void buildPodium(double t) {
+        int[] crews = {laneCrew[0], laneCrew[1], laneCrew[2], -1};
+        double[] times = {finishTimes[0], finishTimes[1], finishTimes[2], t};
+        sortByTime(crews, times);
+        System.arraycopy(crews, 0, podium, 0, 3);
     }
 
     private void recordHeadToHead(double t) {
@@ -499,13 +668,23 @@ final class RegattaGame extends GameView {
         bests.putString("regatta.cabinet", sb.toString());
     }
 
-    /** Loads the week's season, first settling any week that has ended since it was last seen. */
+    /**
+     * Loads the week's season, first settling any week that has ended since it was last seen.
+     *
+     * <p>Format: {@code week|yourPoints|daysMask|rivalTotals(7)|yourDayPoints(7)|rivalDayPoints(49)}.
+     * The last two fields were appended in 3.23.0 for the day grid in the table; a season written
+     * by an older build stops after the totals and its days are spread evenly over the days raced.
+     */
     private void loadSeason() {
         long week = weekOf(today());
         seasonWeek = week;
-        seasonPoints = 0;
+        seasonPoints = carriedPoints;   // pre-season training starts a new week ahead
         seasonMask = 0;
         java.util.Arrays.fill(seasonRivalActual, 0);
+        java.util.Arrays.fill(seasonDayPts, 0);
+        for (int k = 0; k < NCREWS; k++) {
+            java.util.Arrays.fill(seasonRivalDay[k], 0);
+        }
         String s = bests.getString("regatta.season");
         if (s != null) {
             try {
@@ -518,12 +697,20 @@ final class RegattaGame extends GameView {
                 for (int k = 0; k < NCREWS; k++) {
                     actual[k] = Integer.parseInt(r[k]);
                 }
+                int[] yourDays = new int[7];
+                int[][] rivalDays = new int[NCREWS][7];
+                readDayGrid(p, storedMask, actual, yourDays, rivalDays, storedPoints);
                 if (storedWeek == week) {
                     seasonPoints = storedPoints;
                     seasonMask = storedMask;
                     System.arraycopy(actual, 0, seasonRivalActual, 0, NCREWS);
+                    System.arraycopy(yourDays, 0, seasonDayPts, 0, 7);
+                    for (int k = 0; k < NCREWS; k++) {
+                        System.arraycopy(rivalDays[k], 0, seasonRivalDay[k], 0, 7);
+                    }
+                    syncRivalTotals();   // the grid is the truth; the totals field follows it
                 } else if (storedWeek < week) {
-                    settleSeason(storedWeek, storedPoints, storedMask, actual);
+                    settleSeason(storedWeek, storedPoints, storedMask, rivalDays);
                 }
             } catch (RuntimeException ignored) {
                 // A damaged season starts fresh this week.
@@ -532,7 +719,49 @@ final class RegattaGame extends GameView {
         saveSeason();
     }
 
+    /** Fills the day grids from the stored string, or spreads the totals when it predates them. */
+    private void readDayGrid(String[] p, int mask, int[] actual, int[] yourDays, int[][] rivalDays,
+                             int storedPoints) {
+        int days = Math.max(1, Integer.bitCount(mask & 0x7F));
+        if (p.length >= 6) {
+            String[] y = p[4].split(",");
+            String[] g = p[5].split(",");
+            if (y.length >= 7 && g.length >= NCREWS * 7) {
+                for (int d = 0; d < 7; d++) {
+                    yourDays[d] = Integer.parseInt(y[d]);
+                }
+                for (int k = 0; k < NCREWS; k++) {
+                    for (int d = 0; d < 7; d++) {
+                        rivalDays[k][d] = Integer.parseInt(g[k * 7 + d]);
+                    }
+                }
+                return;
+            }
+        }
+        for (int d = 0; d < 7; d++) {
+            if ((mask & (1 << d)) == 0) {
+                continue;
+            }
+            yourDays[d] = storedPoints / days;
+            for (int k = 0; k < NCREWS; k++) {
+                rivalDays[k][d] = actual[k] / days;
+            }
+        }
+    }
+
+    /** Rival week totals are the sum of their day grid; kept for the older field in the string. */
+    private void syncRivalTotals() {
+        for (int k = 0; k < NCREWS; k++) {
+            int sum = 0;
+            for (int d = 0; d < 7; d++) {
+                sum += seasonRivalDay[k][d];
+            }
+            seasonRivalActual[k] = sum;
+        }
+    }
+
     private void saveSeason() {
+        syncRivalTotals();
         StringBuilder sb = new StringBuilder();
         sb.append(seasonWeek).append('|').append(seasonPoints).append('|').append(seasonMask).append('|');
         for (int k = 0; k < NCREWS; k++) {
@@ -541,23 +770,38 @@ final class RegattaGame extends GameView {
             }
             sb.append(seasonRivalActual[k]);
         }
+        sb.append('|');
+        for (int d = 0; d < 7; d++) {
+            if (d > 0) {
+                sb.append(',');
+            }
+            sb.append(seasonDayPts[d]);
+        }
+        sb.append('|');
+        for (int k = 0; k < NCREWS; k++) {
+            for (int d = 0; d < 7; d++) {
+                if (k + d > 0) {
+                    sb.append(',');
+                }
+                sb.append(seasonRivalDay[k][d]);
+            }
+        }
         bests.putString("regatta.season", sb.toString());
     }
 
     /** The end of a week: top two up, bottom two down, a title for first. A week not raced holds. */
-    private void settleSeason(long week, int you, int mask, int[] actual) {
+    private void settleSeason(long week, int you, int mask, int[][] rivalDays) {
         if (mask == 0) {
-            seasonNews = "LAST WEEK NOT RACED - STAYING IN " + DIVISIONS[division];
+            seasonNews = "LAST WEEK NOT RACED - STAYING IN " + DIVISIONS[division]
+                    + (carriedPoints > 0 ? "  ·  PRE-SEASON +" + carriedPoints : "");
             seasonNewsColor = DIM;
             return;
         }
         int rank = 1;
         for (int k = 0; k < NCREWS; k++) {
-            int total = actual[k];
+            int total = 0;
             for (int d = 0; d < 7; d++) {
-                if ((mask & (1 << d)) == 0) {
-                    total += simulatedPoints(week, d, k);
-                }
+                total += (mask & (1 << d)) != 0 ? rivalDays[k][d] : simulatedPoints(week, d, k);
             }
             if (total > you) {
                 rank++;
@@ -582,6 +826,9 @@ final class RegattaGame extends GameView {
             seasonNews = title + "LAST WEEK: " + ordinal(rank) + " OF 8 - STAYING IN " + DIVISIONS[division];
             seasonNewsColor = rank == 1 ? ACCENT : WARN;
         }
+        if (carriedPoints > 0) {
+            seasonNews += "  ·  PRE-SEASON +" + carriedPoints;
+        }
         bests.putFloat("regatta.division", division);
         bests.recordHighest("regatta.best", division + 1);
         saveCabinet();
@@ -605,13 +852,17 @@ final class RegattaGame extends GameView {
     private void recomputeLadder() {
         int dow = dayOfWeek(today());
         for (int k = 0; k < NCREWS; k++) {
-            int total = seasonRivalActual[k];
-            for (int d = 0; d < dow; d++) {
-                if ((seasonMask & (1 << d)) == 0) {
-                    total += simulatedPoints(seasonWeek, d, k);
-                }
+            int total = 0;
+            for (int d = 0; d < 7; d++) {
+                int pts = (seasonMask & (1 << d)) != 0 ? seasonRivalDay[k][d]
+                        : d < dow ? simulatedPoints(seasonWeek, d, k) : 0;
+                dayGrid[k][d] = pts;
+                total += pts;
             }
             ladderPts[k] = total;
+        }
+        for (int d = 0; d < 7; d++) {
+            dayGrid[NCREWS][d] = (seasonMask & (1 << d)) != 0 ? seasonDayPts[d] : 0;
         }
         ladderPts[NCREWS] = seasonPoints;
         for (int i = 0; i <= NCREWS; i++) {
@@ -636,6 +887,162 @@ final class RegattaGame extends GameView {
 
     private static String ordinal(int n) {
         return n == 1 ? "1ST" : n == 2 ? "2ND" : n == 3 ? "3RD" : n + "TH";
+    }
+
+    /* =====================================================================
+     * The grudge
+     * ===================================================================== */
+
+    /**
+     * Your nemesis: the crew furthest ahead of you head to head, among those whose grudge is still
+     * open. With nothing to go on yet it is whoever you have met most, and failing that the crew at
+     * the top of the division - there is always someone to chase.
+     */
+    private void pickNemesis() {
+        int best = -1;
+        int bestScore = Integer.MIN_VALUE;
+        for (int k = 0; k < NCREWS; k++) {
+            if ((grudgeSettledMask & (1 << k)) != 0) {
+                continue;
+            }
+            int meetings = h2hWins[k] + h2hLosses[k];
+            // Deficit first, then the crew you have raced most, then the strongest.
+            int score = (h2hLosses[k] - h2hWins[k]) * 100 + meetings * 4 + (NCREWS - k);
+            if (score > bestScore) {
+                bestScore = score;
+                best = k;
+            }
+        }
+        nemesis = best < 0 ? 0 : best;
+    }
+
+    /**
+     * True while the current nemesis is still a live rivalry. Once every crew has been settled
+     * {@link #pickNemesis()} has nobody left and falls back to a crew whose grudge is already won,
+     * so the settle path must ask this before banking another lifetime grudge.
+     */
+    private boolean grudgeOpen() {
+        return nemesis >= 0 && (grudgeSettledMask & (1 << nemesis)) == 0;
+    }
+
+    /** Where the needle belongs: -1 all theirs, +1 all yours, from the head-to-head. */
+    private float grudgeTarget() {
+        if (nemesis < 0) {
+            return 0f;
+        }
+        int d = h2hWins[nemesis] - h2hLosses[nemesis];
+        return Math.max(-1f, Math.min(1f, d / (float) GRUDGE_TARGET));
+    }
+
+    /** After a ranked race the nemesis was in: settle it, reopen it, or let it run on. */
+    private void resolveGrudge(double t) {
+        if (grudgeLane < 0 || nemesis < 0) {
+            return;
+        }
+        boolean beat = t <= finishTimes[grudgeLane];
+        int d = h2hWins[nemesis] - h2hLosses[nemesis];
+        grudgeFlashUntil = sessionSeconds + 3.0;
+        if (beat && d >= GRUDGE_TARGET && grudgeOpen()) {
+            grudgeSettledMask |= 1 << nemesis;
+            bests.putFloat("regatta.grudges", bests.get("regatta.grudges", 0f) + 1f);
+            grudgeNote = "GRUDGE SETTLED:  " + CREWS[nemesis] + "  " + h2hWins[nemesis] + "-" + h2hLosses[nemesis];
+            saveGrudge();
+            grudgeLane = -1;   // the meter now belongs to whoever comes next
+            pickNemesis();
+            grudgeNeedle = grudgeTarget();
+        } else {
+            if (!beat) {
+                // They beat you again, so the rivalry is live whatever was settled before.
+                grudgeSettledMask &= ~(1 << nemesis);
+                saveGrudge();
+            }
+            grudgeNote = (beat ? "GRUDGE:  YOU LEAD " : "GRUDGE:  THEY LEAD ")
+                    + CREWS[nemesis] + "  " + h2hWins[nemesis] + "-" + h2hLosses[nemesis];
+        }
+    }
+
+    private void saveGrudge() {
+        bests.putString("regatta.settled", String.valueOf(grudgeSettledMask));
+    }
+
+    private void loadGrudge() {
+        grudgeSettledMask = 0;
+        String s = bests.getString("regatta.settled");
+        if (s != null) {
+            try {
+                grudgeSettledMask = Integer.parseInt(s.trim()) & 0x7F;
+            } catch (RuntimeException ignored) {
+                // A damaged mask just reopens every grudge.
+            }
+        }
+    }
+
+    /* =====================================================================
+     * Off-season training
+     * ===================================================================== */
+
+    /**
+     * Metres rowed outside the ranked races bank toward next week's ladder. A point costs
+     * {@value #TRAIN_SECONDS_PER_POINT} seconds of rowing at the rower's own typical speed, so it
+     * is the same seven minutes of work whoever is on the machine, and the week's carry is capped
+     * at {@link #TRAIN_CAP} - training feeds a season, it never replaces racing it.
+     */
+    private double trainMetresPerPoint() {
+        return Math.max(600.0, profile.typicalSpeed() * TRAIN_SECONDS_PER_POINT);
+    }
+
+    private void loadTraining() {
+        long week = weekOf(today());
+        trainWeek = week;
+        trainMetres = 0;
+        carriedPoints = 0;
+        String s = bests.getString("regatta.training");
+        if (s != null) {
+            try {
+                String[] p = s.split("\\|");
+                long storedWeek = Long.parseLong(p[0]);
+                double metres = Double.parseDouble(p[1]);
+                int storedCarry = p.length > 2 ? Integer.parseInt(p[2]) : 0;
+                if (storedWeek == week) {
+                    trainMetres = metres;
+                    carriedPoints = storedCarry;
+                } else {
+                    // The week turned over: last week's training becomes this week's head start.
+                    carriedPoints = Math.min(TRAIN_CAP, (int) (metres / trainMetresPerPoint()));
+                }
+            } catch (RuntimeException ignored) {
+                // Damaged training just starts the bank again.
+            }
+        }
+        saveTraining();
+    }
+
+    private void saveTraining() {
+        bests.putString("regatta.training",
+                trainWeek + "|" + Math.round(trainMetres) + "|" + carriedPoints);
+    }
+
+    /** Called every frame: metres rowed while not inside a ranked race go into the bank. */
+    private void accrueTraining() {
+        if (lastTrainMark <= 0) {
+            lastTrainMark = sessionMeters;
+            return;
+        }
+        double delta = sessionMeters - lastTrainMark;
+        lastTrainMark = sessionMeters;
+        if (delta <= 0 || (ranked && phase == Phase.RACING)) {
+            return;   // a ranked race is the season, not the off-season
+        }
+        trainMetres += delta;
+        if (sessionSeconds > trainSaveAt) {
+            trainSaveAt = sessionSeconds + 20.0;
+            saveTraining();
+        }
+    }
+
+    /** Points this week's training will carry into next week, and the metres toward the next one. */
+    private int trainingPoints() {
+        return Math.min(TRAIN_CAP, (int) (trainMetres / trainMetresPerPoint()));
     }
 
     /* =====================================================================
@@ -666,14 +1073,30 @@ final class RegattaGame extends GameView {
         }
         float x = e.getX();
         float y = e.getY();
+        if (phase == Phase.CEREMONY) {
+            // Skippable from a second in, so a stray tap at the finish cannot swallow it.
+            if (sessionSeconds - ceremonyFrom > 1.0) {
+                phase = Phase.DONE;
+            }
+            return true;
+        }
         if (phase != Phase.RACING) {
             if (btnLadder.contains(x, y)) {
                 overlay = overlay == Overlay.LADDER ? Overlay.NONE : Overlay.LADDER;
                 recomputeLadder();
+                ladderOpenedAt = overlay == Overlay.LADDER ? sessionSeconds : 0;
+                java.util.Arrays.fill(ladderBar, 0f);
                 return true;
             }
             if (btnCabinet.contains(x, y)) {
                 overlay = overlay == Overlay.CABINET ? Overlay.NONE : Overlay.CABINET;
+                return true;
+            }
+            if (!ranked && !btnGrand.isEmpty() && btnGrand.contains(x, y)) {
+                // The grand-final course as an exhibition, so it can be rowed without waiting a week.
+                exhibition = !exhibition;
+                practiceRun++;
+                start();
                 return true;
             }
         }
@@ -704,10 +1127,12 @@ final class RegattaGame extends GameView {
         if (w == 0 || h == 0) {
             return;
         }
+        accrueTraining();
         boolean racing = phase == Phase.RACING;
-        double t = racing || phase == Phase.DONE || phase == Phase.RESULTS ? sessionSeconds - raceStart : 0;
+        boolean ended = phase == Phase.DONE || phase == Phase.RESULTS || phase == Phase.CEREMONY;
+        double t = racing || ended ? sessionSeconds - raceStart : 0;
         double you = racing ? sessionMeters - startMeters : 0;
-        if (phase == Phase.DONE || phase == Phase.RESULTS) {
+        if (ended) {
             t = finishTime;
             you = RACE_METERS;
         }
@@ -725,7 +1150,7 @@ final class RegattaGame extends GameView {
             you = 0;
         }
         boolean finalsDay = stage != Stage.HEAT;
-        boolean grand = stage == Stage.A_FINAL;
+        boolean grand = stage == Stage.A_FINAL || stage == Stage.GRAND;
 
         float waterTop = h * 0.24f;
         float waterBottom = h * 0.86f;
@@ -779,9 +1204,13 @@ final class RegattaGame extends GameView {
         int ahead = 0;
         double d2 = 0;          // the 2nd-furthest crew: the qualifying line in a heat
         double nextAhead = Double.MAX_VALUE;
+        double grudgeGap = 0;   // metres you are up on the nemesis, when they are in this race
         for (int i = 0; i < 3; i++) {
             double d = crewDistance(i, t);
             sortScratch[i] = d;
+            if (i == grudgeLane) {
+                grudgeGap = you - d;
+            }
             if (d > you) {
                 ahead++;
                 nextAhead = Math.min(nextAhead, d);
@@ -823,7 +1252,8 @@ final class RegattaGame extends GameView {
         double a0 = sortScratch[0], a1 = sortScratch[1], a2 = sortScratch[2];
         d2 = Math.max(Math.min(a0, a1), Math.min(Math.max(a0, a1), a2));
 
-        float cheerTarget = phase == Phase.DONE ? (placing == 1 ? 1f : 0.3f)
+        float cheerTarget = phase == Phase.CEREMONY ? 1f
+                : phase == Phase.DONE ? (placing == 1 ? 1f : 0.3f)
                 : racing ? (ahead == 0 ? 1f : ahead == 1 ? 0.6f : 0.15f) : finalsDay ? 0.35f : 0f;
         cheer += (cheerTarget - cheer) * Math.min(1f, 2f * dt);
         float yourY = lanesTop + laneH * 3.5f;
@@ -851,11 +1281,16 @@ final class RegattaGame extends GameView {
         }
 
         drawHud(c, w, h, waterTop, t, you, ahead, d2, nextAhead);
+        drawGrudge(c, w, h, dt, grudgeGap, racing);
+        drawTraining(c, w, h);
         if (phase == Phase.RESULTS) {
             drawHeatResults(c, w, h);
         }
-        if (phase != Phase.RACING) {
+        if (phase != Phase.RACING && phase != Phase.CEREMONY) {
             drawButtons(c, w);
+        }
+        if (phase == Phase.CEREMONY) {
+            drawCeremony(c, w, h, dt);
         }
         if (overlay == Overlay.LADDER) {
             drawLadder(c, w, h);
@@ -873,24 +1308,28 @@ final class RegattaGame extends GameView {
     }
 
     private String stageName() {
-        return stage == Stage.HEAT ? "HEAT" : stage == Stage.A_FINAL ? "A FINAL" : "B FINAL";
+        return stage == Stage.HEAT ? "HEAT" : stage == Stage.A_FINAL ? "A FINAL"
+                : stage == Stage.GRAND ? (ranked ? "GRAND FINAL" : "GRAND FINAL (EXHIBITION)") : "B FINAL";
     }
 
     private void drawHud(Canvas c, float w, float h, float waterTop, double t, double you, int ahead,
                          double d2, double nextAhead) {
+        boolean gold = stage == Stage.A_FINAL || stage == Stage.GRAND;
         bold(c, DIVISIONS[division] + "  ·  " + stageName(), dp(18f), dp(34f), 20f,
-                stage == Stage.A_FINAL ? 0xFFF5C518 : ACCENT, Paint.Align.LEFT);
+                stage == Stage.GRAND ? 0xFFFF8A4C : gold ? 0xFFF5C518 : ACCENT, Paint.Align.LEFT);
         String sub = (ranked ? "TODAY'S RANKED REGATTA" : "PRACTICE") + "  ·  " + RACE_METERS + " m  ·  "
-                + (stage == Stage.HEAT ? "top two reach the A final" : stage == Stage.A_FINAL
+                + (stage == Stage.GRAND ? "24 / 18 / 14 / 10 season points"
+                : stage == Stage.HEAT ? "top two reach the A final" : stage == Stage.A_FINAL
                 ? "12 / 9 / 7 / 5 season points" : "4 / 3 / 2 / 1 season points");
         label(c, sub, dp(18f), dp(52f), 10f, FAINT, Paint.Align.LEFT);
         String week = "WEEK: " + ordinal(ladderRank) + " OF 8  ·  " + seasonPoints + " PTS  ·  "
                 + (6 - dayOfWeek(today())) + " DAYS LEFT";
         label(c, week, dp(18f), dp(68f), 10f, ladderRank <= 2 ? ACCENT : ladderRank >= 7 ? BAD : DIM, Paint.Align.LEFT);
+        drawQualifyStrip(c, dp(18f), dp(80f));
 
         String big;
         int col;
-        int pos = phase == Phase.DONE ? placing : ahead + 1;
+        int pos = phase == Phase.DONE || phase == Phase.CEREMONY ? placing : ahead + 1;
         if (phase == Phase.READY) {
             big = "TAKE A STROKE";
             col = DIM;
@@ -915,6 +1354,15 @@ final class RegattaGame extends GameView {
                     stake = String.format(java.util.Locale.US, "OUT  ·  %.0f m to a qualifying place", d2 - you);
                     stakeCol = BAD;
                 }
+            } else if (stage == Stage.GRAND) {
+                if (ahead == 0) {
+                    stake = "HOLD 1ST  ·  " + GRAND_POINTS[0] + " PTS AND THE SEASON";
+                    stakeCol = 0xFFFF8A4C;
+                } else {
+                    stake = String.format(java.util.Locale.US, "%.0f m to %s  ·  %d PTS", nextAhead - you,
+                            ordinal(ahead), GRAND_POINTS[ahead - 1]);
+                    stakeCol = WARN;
+                }
             } else {
                 int base = stage == Stage.A_FINAL ? 0 : 4;
                 if (ahead == 0) {
@@ -929,6 +1377,9 @@ final class RegattaGame extends GameView {
         } else if (phase == Phase.READY && !seasonNews.isEmpty() && stage == Stage.HEAT) {
             stake = seasonNews;
             stakeCol = seasonNewsColor;
+        } else if (phase == Phase.READY && stage == Stage.GRAND) {
+            stake = "THE TOP THREE: " + CREWS[laneCrew[0]] + ", " + CREWS[laneCrew[1]] + ", " + CREWS[laneCrew[2]];
+            stakeCol = 0xFFFF8A4C;
         } else if (phase == Phase.READY) {
             stake = stage == Stage.HEAT ? "HEAT: " + CREWS[laneCrew[0]] + ", " + CREWS[laneCrew[1]] + ", " + CREWS[laneCrew[2]]
                     : stageName() + ": row to start" + (outcome.isEmpty() ? "" : "  ·  " + outcome);
@@ -955,6 +1406,172 @@ final class RegattaGame extends GameView {
         btnLadder.set(btnCabinet.left - dp(10f) - bw, top, btnCabinet.left - dp(10f), top + bh);
         drawPill(c, btnLadder, "LADDER", overlay == Overlay.LADDER);
         drawPill(c, btnCabinet, "TROPHIES", overlay == Overlay.CABINET);
+        if (!ranked) {
+            // Once the day's ranked regatta is rowed, the grand-final course is open as a practice.
+            float gw = dp(140f);
+            btnGrand.set(btnLadder.left - dp(10f) - gw, top, btnLadder.left - dp(10f), top + bh);
+            drawPill(c, btnGrand, exhibition ? "EXHIBITION ON" : "GRAND FINAL", exhibition);
+        } else {
+            btnGrand.setEmpty();
+        }
+    }
+
+    /**
+     * The week's seven days as pips: filled for a day raced, and a ring on Sunday once the
+     * {@value #QUALIFY_DAYS} qualifying days are in and the grand final is on.
+     */
+    private void drawQualifyStrip(Canvas c, float x, float y) {
+        float pip = dp(11f);
+        float gap = dp(5f);
+        int dow = dayOfWeek(today());
+        for (int d = 0; d < 7; d++) {
+            float px = x + d * (pip + gap);
+            boolean raced = (seasonMask & (1 << d)) != 0;
+            boolean isToday = d == dow;
+            boolean sunday = d == 6;
+            rect.set(px, y, px + pip, y + pip);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(raced ? ACCENT : isToday ? 0x552F4055 : 0x33202B3A);
+            c.drawRoundRect(rect, dp(3f), dp(3f), paint);
+            if (raced) {
+                // The points won that day, so the strip doubles as your own results row.
+                bold(c, num(seasonDayPts[d]), px + pip / 2f, y + pip - dp(2.5f), 7.5f,
+                        0xFF0A0E14, Paint.Align.CENTER);
+            }
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.2f));
+            paint.setColor(sunday && qualified ? 0xFFFF8A4C : isToday ? ACCENT : 0x445D6B80);
+            c.drawRoundRect(rect, dp(3f), dp(3f), paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
+        float tx = x + 7 * (pip + gap) + dp(8f);
+        String text;
+        int col;
+        if (grandDay) {
+            text = ranked ? "QUALIFIED  ·  THIS IS THE GRAND FINAL"
+                    : "QUALIFIED  ·  TODAY'S GRAND FINAL IS ROWED";
+            col = 0xFFFF8A4C;
+        } else if (dow == 6) {
+            // Sunday with no grand final: either the days never came in, or the third one only
+            // landed today, which is too late. Saying "qualified" here would be a lie either way.
+            text = "NO GRAND FINAL THIS WEEK  ·  " + daysRaced + " of " + QUALIFY_DAYS + " days by Sunday";
+            col = BAD;
+        } else if (qualified) {
+            text = "QUALIFIED  ·  SUNDAY IS THE GRAND FINAL";
+            col = 0xFFFF8A4C;
+        } else {
+            int need = QUALIFY_DAYS - daysRaced;
+            text = "QUALIFYING  ·  " + daysRaced + " of " + QUALIFY_DAYS + " days  ·  " + need
+                    + (need == 1 ? " more day" : " more days") + " for the grand final";
+            col = WARN;
+        }
+        label(c, text, tx, y + pip - dp(1.5f), 10f, col, Paint.Align.LEFT);
+    }
+
+    /**
+     * The grudge meter: the nemesis's colours against yours, a needle sitting on the head-to-head
+     * and leaning live with the metres between you whenever they are in this race.
+     */
+    private void drawGrudge(Canvas c, float w, float h, float dt, double gap, boolean racing) {
+        if (nemesis < 0 || phase == Phase.CEREMONY) {
+            return;
+        }
+        // Full swing at about three seconds of the rower's own boat speed, so a stroke moves it.
+        double swing = Math.max(4.0, profile.typicalSpeed() * 3.0);
+        float live = grudgeLane >= 0 ? (float) Math.max(-1, Math.min(1, gap / swing)) : 0f;
+        grudgeLive += (live - grudgeLive) * Math.min(1f, 5f * dt);
+        float target = grudgeLane >= 0 && racing
+                ? grudgeTarget() * 0.55f + grudgeLive * 0.45f : grudgeTarget();
+        grudgeNeedle += (target - grudgeNeedle) * Math.min(1f, 4f * dt);
+
+        float bw = dp(330f);
+        float bh = dp(16f);
+        float x0 = dp(18f);
+        float y0 = h - dp(74f);
+        int col = CREW_COLORS[nemesis];
+        boolean flash = sessionSeconds < grudgeFlashUntil;
+        float pulse = flash ? 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 9) : 0f;
+
+        bold(c, "GRUDGE  ·  " + CREWS[nemesis], x0, y0 - dp(6f), 11f,
+                flash && pulse > 0.5f ? 0xFFFFFFFF : col, Paint.Align.LEFT);
+        label(c, "you " + h2hWins[nemesis] + " - " + h2hLosses[nemesis] + " them"
+                        + (grudgeLane >= 0 ? String.format(java.util.Locale.US, "   ·   %+.0f m now", gap) : ""),
+                x0 + bw, y0 - dp(6f), 10f, grudgeLane >= 0 ? TEXT : DIM, Paint.Align.RIGHT);
+
+        barRect.set(x0, y0, x0 + bw, y0 + bh);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xCC16202E);
+        c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        // Their half in their colour, yours in the boat's teal, meeting at the needle.
+        float mid = x0 + bw / 2f;
+        float nx = mid + grudgeNeedle * (bw / 2f - dp(10f));
+        paint.setColor((col & 0x00FFFFFF) | 0x66000000);
+        c.drawRect(x0 + dp(2f), y0 + dp(3f), Math.max(x0 + dp(2f), nx), y0 + bh - dp(3f), paint);
+        paint.setColor(0x6635D0BA);
+        c.drawRect(Math.min(x0 + bw - dp(2f), nx), y0 + dp(3f), x0 + bw - dp(2f), y0 + bh - dp(3f), paint);
+        // The target marks: settle the grudge by leading them by GRUDGE_TARGET.
+        paint.setColor(0x66FFFFFF);
+        c.drawRect(mid - dp(0.6f), y0 + dp(1f), mid + dp(0.6f), y0 + bh - dp(1f), paint);
+        paint.setColor(0x88F5C518);
+        float winX = mid + (bw / 2f - dp(10f));
+        c.drawRect(winX - dp(1.5f), y0, winX + dp(1.5f), y0 + bh, paint);
+        // The needle itself.
+        if (flash) {
+            Fx.glow(c, nx, y0 + bh / 2f, dp(34f), (0x40 + (int) (pulse * 0x60)) << 24 | 0x00F5C518);
+        }
+        paint.setColor(grudgeNeedle >= 0 ? ACCENT : col);
+        path.rewind();
+        path.moveTo(nx, y0 - dp(4f));
+        path.lineTo(nx + dp(6f), y0 + bh / 2f);
+        path.lineTo(nx, y0 + bh + dp(4f));
+        path.lineTo(nx - dp(6f), y0 + bh / 2f);
+        path.close();
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(0x66FFFFFF);
+        c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        paint.setStyle(Paint.Style.FILL);
+
+        String note = !grudgeNote.isEmpty() && sessionSeconds < grudgeFlashUntil ? grudgeNote
+                : grudgeLane >= 0 ? "THEY ARE IN THIS RACE - BEAT THEM"
+                : !grudgeOpen() ? "every grudge in this division is settled"
+                : "lead them by " + GRUDGE_TARGET + " to settle it";
+        label(c, note, x0, y0 + bh + dp(14f), 10f,
+                !grudgeNote.isEmpty() && flash ? 0xFFF5C518 : grudgeLane >= 0 ? col : FAINT, Paint.Align.LEFT);
+    }
+
+    /** Off-season training: what this week's extra metres will be worth on next week's ladder. */
+    private void drawTraining(Canvas c, float w, float h) {
+        float per = (float) trainMetresPerPoint();
+        int pts = trainingPoints();
+        float frac = pts >= TRAIN_CAP ? 1f : (float) ((trainMetres % per) / per);
+        float bw = dp(250f);
+        float x1 = w - dp(18f);
+        float x0 = x1 - bw;
+        float y0 = h - dp(74f);
+        float bh = dp(10f);
+        bold(c, "OFF-SEASON TRAINING", x0, y0 - dp(6f), 11f, BLUE, Paint.Align.LEFT);
+        label(c, pts > 0 ? "+" + pts + " PTS NEXT WEEK" : "keep rowing", x1, y0 - dp(6f), 10f,
+                pts > 0 ? ACCENT : DIM, Paint.Align.RIGHT);
+        barRect.set(x0, y0, x1, y0 + bh);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xCC16202E);
+        c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        paint.setColor(pts >= TRAIN_CAP ? 0xFFF5C518 : BLUE);
+        barRect.set(x0, y0, x0 + Math.max(dp(2f), bw * frac), y0 + bh);
+        c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        // Ticks for each point banked, so progress is countable at a glance.
+        paint.setColor(0x66FFFFFF);
+        for (int i = 1; i < TRAIN_CAP; i++) {
+            float tx = x0 + bw * (i / (float) TRAIN_CAP);
+            c.drawRect(tx - dp(0.5f), y0, tx + dp(0.5f), y0 + bh, paint);
+        }
+        String text = pts >= TRAIN_CAP
+                ? "banked in full  ·  " + Math.round(trainMetres) + " m this week"
+                : Math.round(trainMetres) + " m  ·  " + Math.round(per - (trainMetres % per)) + " m to the next point";
+        label(c, text + (carriedPoints > 0 ? "   ·   brought in +" + carriedPoints : ""),
+                x1, y0 + bh + dp(14f), 10f, FAINT, Paint.Align.RIGHT);
     }
 
     private void drawPill(Canvas c, RectF r, String text, boolean on) {
@@ -1015,38 +1632,162 @@ final class RegattaGame extends GameView {
                 : "row to start the final, or tap", cx, rect.bottom - dp(20f), 11f, DIM, Paint.Align.CENTER);
     }
 
+    private static final String[] DAY_LETTER = {"M", "T", "W", "T", "F", "S", "S"};
+
+    /**
+     * Small counts as ready-made strings. The day grid prints up to 56 numbers a frame while the
+     * table is open, and the qualify strip prints seven on every frame of a race; {@code
+     * String.valueOf} on each of those is garbage the tablet does not need to collect.
+     */
+    private static final String[] SMALL_NUM = new String[25];
+
+    static {
+        for (int i = 0; i < SMALL_NUM.length; i++) {
+            SMALL_NUM[i] = Integer.toString(i);
+        }
+    }
+
+    private static String num(int n) {
+        return n >= 0 && n < SMALL_NUM.length ? SMALL_NUM[n] : Integer.toString(n);
+    }
+
+    /**
+     * The season points table: every crew's Monday-to-Sunday day grid (which doubles as their form
+     * strip), the head-to-head, and a bar that counts up from zero each time the table is opened.
+     */
     private void drawLadder(Canvas c, float w, float h) {
-        float pw = Math.min(w - dp(40f), dp(560f));
-        float ph = Math.min(h - dp(40f), dp(380f));
+        float pw = Math.min(w - dp(40f), dp(900f));
+        float ph = Math.min(h - dp(30f), dp(470f));
         panel(c, w, h, pw, ph);
         float cx = w / 2f;
-        float y = rect.top + dp(32f);
-        bold(c, DIVISIONS[division] + " DIVISION  ·  THIS WEEK", cx, y, 17f, ACCENT, Paint.Align.CENTER);
-        label(c, "top two promoted, bottom two relegated on Monday  ·  " + (6 - dayOfWeek(today())) + " days left",
-                cx, y + dp(18f), 10f, FAINT, Paint.Align.CENTER);
-        float row = Math.min(dp(32f), (rect.bottom - y - dp(40f)) / 8f);
+        float y = rect.top + dp(30f);
+        int dow = dayOfWeek(today());
+        bold(c, DIVISIONS[division] + " DIVISION  ·  SEASON POINTS", cx, y, 17f, ACCENT, Paint.Align.CENTER);
+        label(c, "top two promoted, bottom two relegated on Monday  ·  " + (6 - dow) + " days left"
+                        + "  ·  " + QUALIFY_DAYS + " race days qualify you for Sunday's grand final",
+                cx, y + dp(16f), 10f, FAINT, Paint.Align.CENTER);
+
+        float xRank = rect.left + dp(30f);
+        float xName = rect.left + dp(52f);
+        float cell = Math.min(dp(24f), pw * 0.022f);
+        float xDays = rect.left + pw * 0.40f;
+        float xH2h = xDays + cell * 7 + dp(18f);
+        float xBar0 = xH2h + dp(72f);
+        float xBar1 = rect.right - dp(56f);
+        float head = y + dp(34f);
+        for (int d = 0; d < 7; d++) {
+            label(c, DAY_LETTER[d], xDays + cell * (d + 0.5f), head, 9f,
+                    d == dow ? ACCENT : d == 6 && qualified ? 0xFFFF8A4C : FAINT, Paint.Align.CENTER);
+        }
+        label(c, "H2H", xH2h, head, 9f, FAINT, Paint.Align.LEFT);
+        label(c, "POINTS", xBar1 + dp(48f), head, 9f, FAINT, Paint.Align.RIGHT);
+
+        int best = 1;
+        for (int i = 0; i <= NCREWS; i++) {
+            best = Math.max(best, ladderPts[i]);
+        }
+        float open = ladderOpenedAt > 0 ? (float) Math.min(1.0, (sessionSeconds - ladderOpenedAt) / 0.7) : 1f;
+        float row = Math.min(dp(34f), (rect.bottom - head - dp(48f)) / 8f);
         for (int i = 0; i <= NCREWS; i++) {
             int e = ladderOrder[i];
-            float ry = y + dp(38f) + i * row;
+            float ry = head + dp(10f) + i * row;
             boolean youRow = e == NCREWS;
             int zone = i < 2 ? 0x2235D0BA : i >= 6 ? 0x22F0655D : 0;
             if (zone != 0 || youRow) {
+                paint.setStyle(Paint.Style.FILL);
                 paint.setColor(youRow ? 0x4435D0BA : zone);
                 c.drawRect(rect.left + dp(16f), ry, rect.right - dp(16f), ry + row - dp(3f), paint);
             }
             float ty = ry + row * 0.66f;
-            bold(c, String.valueOf(i + 1), rect.left + dp(34f), ty, 13f, i < 2 ? ACCENT : i >= 6 ? BAD : DIM, Paint.Align.CENTER);
+            bold(c, num(i + 1), xRank, ty, 13f, i < 2 ? ACCENT : i >= 6 ? BAD : DIM, Paint.Align.CENTER);
+            int tint = youRow ? ACCENT : CREW_COLORS[e];
+            if (!youRow) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(tint);
+                c.drawCircle(xName + dp(6f), ty - dp(4.5f), dp(5f), paint);
+            }
+            bold(c, youRow ? "YOU" : CREWS[e], xName + (youRow ? 0 : dp(16f)), ty, 13f,
+                    youRow ? ACCENT : e == nemesis ? tint : TEXT, Paint.Align.LEFT);
+            if (!youRow && e == nemesis) {
+                // Measure with the paint that just drew the name: textPaint still carries the 13dp
+                // bold the row was drawn at, where boardText is 11dp and put the tag on top of
+                // the longest crew name.
+                label(c, "NEMESIS", xName + dp(16f) + textPaint.measureText(CREWS[e]) + dp(14f), ty, 8.5f,
+                        tint, Paint.Align.LEFT);
+            }
+            // The day grid, which is also the form strip: filled where they scored, hollow where not.
+            int daysOn = 0;
+            for (int d = 0; d < 7; d++) {
+                int pts = dayPointsFor(e, d);
+                boolean known = d < dow || (seasonMask & (1 << d)) != 0;
+                if (pts > 0) {
+                    daysOn++;
+                }
+                float px = xDays + cell * d;
+                // barRect, never rect: panel() left the panel's bounds in rect and they are still needed.
+                barRect.set(px + dp(1.5f), ry + dp(5f), px + cell - dp(1.5f), ry + row - dp(8f));
+                paint.setStyle(Paint.Style.FILL);
+                if (!known) {
+                    paint.setColor(0x22202B3A);
+                } else if (pts <= 0) {
+                    paint.setColor(0x33202B3A);
+                } else {
+                    // Brighter with more points: 1 pt barely shows, a win is solid.
+                    int alpha = 0x44 + Math.min(0xBB, pts * 12);
+                    paint.setColor((alpha << 24) | (tint & 0x00FFFFFF));
+                }
+                c.drawRoundRect(barRect, dp(2f), dp(2f), paint);
+                if (known && pts > 0) {
+                    bold(c, num(pts), barRect.centerX(), barRect.bottom - dp(3f), 8f,
+                            pts >= 9 ? 0xFF0A0E14 : TEXT, Paint.Align.CENTER);
+                }
+            }
             if (youRow) {
-                bold(c, "YOU", rect.left + dp(60f), ty, 13f, ACCENT, Paint.Align.LEFT);
+                label(c, daysOn + "/" + QUALIFY_DAYS + (qualified ? " QUAL" : " days"), xH2h, ty, 10f,
+                        qualified ? 0xFFFF8A4C : WARN, Paint.Align.LEFT);
             } else {
-                paint.setColor(CREW_COLORS[e]);
-                c.drawCircle(rect.left + dp(64f), ty - dp(4.5f), dp(5f), paint);
-                bold(c, CREWS[e], rect.left + dp(78f), ty, 13f, TEXT, Paint.Align.LEFT);
-                label(c, "you " + h2hWins[e] + "-" + h2hLosses[e], rect.left + pw * 0.62f, ty, 10.5f,
+                label(c, h2hWins[e] + "-" + h2hLosses[e], xH2h, ty, 10.5f,
                         h2hWins[e] >= h2hLosses[e] ? DIM : BAD, Paint.Align.LEFT);
             }
-            bold(c, ladderPts[e] + " pts", rect.right - dp(28f), ty, 13f, youRow ? ACCENT : TEXT, Paint.Align.RIGHT);
+            // The bar counts up when the table opens, so the order arrives rather than just sits there.
+            float full = (xBar1 - xBar0) * (ladderPts[e] / (float) best);
+            ladderBar[e] += (full * open - ladderBar[e]) * 0.25f;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0x33202B3A);
+            barRect.set(xBar0, ty - dp(9f), xBar1, ty - dp(1f));
+            c.drawRoundRect(barRect, dp(4f), dp(4f), paint);
+            paint.setColor((0xCC << 24) | (tint & 0x00FFFFFF));
+            barRect.set(xBar0, ty - dp(9f), xBar0 + Math.max(dp(3f), ladderBar[e]), ty - dp(1f));
+            c.drawRoundRect(barRect, dp(4f), dp(4f), paint);
+            bold(c, num(ladderPts[e]), xBar1 + dp(48f), ty, 13f, youRow ? ACCENT : TEXT, Paint.Align.RIGHT);
         }
+        // What the week still hangs on.
+        int promoGap = ladderPts[ladderOrder[1]] - seasonPoints;
+        int relGap = seasonPoints - ladderPts[ladderOrder[6]];
+        String foot = ladderRank <= 2
+                ? "IN THE PROMOTION ZONE  ·  " + Math.max(0, seasonPoints - ladderPts[ladderOrder[2]]) + " pts of cushion"
+                : promoGap > 0 ? promoGap + " pts from promotion" : "level on points for promotion";
+        if (ladderRank >= 7) {
+            foot = "IN THE RELEGATION ZONE  ·  " + Math.max(0, ladderPts[ladderOrder[5]] - seasonPoints)
+                    + " pts to safety";
+        } else if (relGap >= 0 && ladderRank == 6) {
+            foot += "  ·  " + relGap + " pts above the drop";
+        }
+        bold(c, foot, cx, rect.bottom - dp(24f), 12f,
+                ladderRank <= 2 ? ACCENT : ladderRank >= 7 ? BAD : WARN, Paint.Align.CENTER);
+        label(c, "off-season training banked: " + Math.round(trainMetres) + " m  ·  +" + trainingPoints()
+                        + " pts start next season" + (carriedPoints > 0 ? "  ·  +" + carriedPoints + " brought into this one" : "")
+                        + "  ·  tap anywhere to close",
+                cx, rect.bottom - dp(8f), 9.5f, FAINT, Paint.Align.CENTER);
+    }
+
+    /**
+     * Points a crew scored on day {@code d} of this week, read from the grid built by
+     * {@link #recomputeLadder()}. It is read every frame while the table is open, so it must not
+     * call {@link #simulatedPoints} - that allocates a Random, which has no business in a frame.
+     */
+    private int dayPointsFor(int e, int d) {
+        return dayGrid[e][d];
     }
 
     private void drawCabinet(Canvas c, float w, float h) {
@@ -1082,10 +1823,11 @@ final class RegattaGame extends GameView {
                 bold(c, "x" + n, x, shelf1 - dp(74f) + bob, 12f, 0xFFF5C518, Paint.Align.CENTER);
             }
         }
-        // Shelf two: medals, B-final plates, season titles and promotions.
-        for (int i = 0; i < 6; i++) {
-            float x = rect.left + dp(24f) + slot * (i + 0.5f);
-            int n = cabinet[i];
+        // Shelf two: medals, B-final plates, season titles, promotions and grand finals.
+        float slot2 = (pw - dp(48f)) / SHELF_NAMES.length;
+        for (int i = 0; i < SHELF_NAMES.length; i++) {
+            float x = rect.left + dp(24f) + slot2 * (i + 0.5f);
+            int n = cabinet[SHELF_SLOT[i]];
             int col = n > 0 ? SHELF_TINT[i] : 0x33FFFFFF;
             float swing = n > 0 ? (float) Math.sin(sessionSeconds * 1.6 + i) * dp(3f) : 0f;
             if (i < 3) {
@@ -1114,7 +1856,7 @@ final class RegattaGame extends GameView {
                 c.drawPath(path, paint);
                 paint.setColor(0x55000000);
                 c.drawCircle(x, shelf2 - dp(28f), dp(7f), paint);
-            } else {
+            } else if (i == 5) {
                 // A promotion pennant on a stick, flying.
                 paint.setColor(0xFF8D9BB0);
                 c.drawRect(x - dp(1.5f), shelf2 - dp(52f), x + dp(1.5f), shelf2, paint);
@@ -1125,12 +1867,268 @@ final class RegattaGame extends GameView {
                 path.close();
                 paint.setColor(col);
                 c.drawPath(path, paint);
+            } else {
+                // The grand final: a star on a plinth, turning slowly when it has been won.
+                paint.setColor(0xFF6E7A8C);
+                c.drawRect(x - dp(14f), shelf2 - dp(8f), x + dp(14f), shelf2, paint);
+                float spin = n > 0 ? (float) (sessionSeconds * 0.8) : 0f;
+                paint.setColor(col);
+                path.rewind();
+                for (int v = 0; v < 10; v++) {
+                    double ang = spin + v * Math.PI / 5 - Math.PI / 2;
+                    float rr = (v & 1) == 0 ? dp(22f) : dp(9f);
+                    float sx = x + (float) Math.cos(ang) * rr;
+                    float sy = shelf2 - dp(30f) + (float) Math.sin(ang) * rr;
+                    if (v == 0) {
+                        path.moveTo(sx, sy);
+                    } else {
+                        path.lineTo(sx, sy);
+                    }
+                }
+                path.close();
+                if (n > 0) {
+                    Fx.glow(c, x, shelf2 - dp(30f), dp(40f), 0x44FF8A4C);
+                }
+                c.drawPath(path, paint);
             }
             label(c, SHELF_NAMES[i], x, shelf2 + dp(22f), 9f, n > 0 ? TEXT : FAINT, Paint.Align.CENTER);
-            bold(c, String.valueOf(n), x + dp(26f), shelf2 - dp(46f), 12f, n > 0 ? col : FAINT, Paint.Align.LEFT);
+            bold(c, num(n), x + dp(26f), shelf2 - dp(46f), 12f, n > 0 ? col : FAINT, Paint.Align.LEFT);
         }
         label(c, "A-final wins by division above  ·  tap anywhere to close", cx, rect.bottom - dp(10f), 9.5f,
                 FAINT, Paint.Align.CENTER);
+    }
+
+    /* =====================================================================
+     * The medal ceremony
+     * ===================================================================== */
+
+    private static final String[] MEDAL_NAMES = {"GOLD", "SILVER", "BRONZE"};
+    private static final int[] MEDAL_TINT = {0xFFF5C518, 0xFFC9D2DC, 0xFFCD7F32};
+
+    /** Smoothstep from 0 at {@code from} to 1 at {@code to}. */
+    private static float ease(double from, double to, double t) {
+        double p = (t - from) / (to - from);
+        p = p < 0 ? 0 : p > 1 ? 1 : p;
+        return (float) (p * p * (3 - 2 * p));
+    }
+
+    /**
+     * The ceremony: the pontoon goes dark, the podium rises, the three crews walk on and step up,
+     * a medal comes down on its ribbon, the flags climb and the sky goes up. About ten seconds,
+     * skippable with a tap after the first one.
+     */
+    private void drawCeremony(Canvas c, float w, float h, float dt) {
+        double t = sessionSeconds - ceremonyFrom;
+        if (t > 11.0) {
+            phase = Phase.DONE;
+            return;
+        }
+        boolean gold = ceremonyMedal == 0;
+        float lights = ease(0, 0.6, t);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((int) (0xE2 * lights) << 24);
+        c.drawRect(0, 0, w, h, paint);
+
+        float deck = h * 0.80f;
+        float cx = w / 2f;
+
+        // Two spotlights sweeping the pontoon from the roof of the boathouse.
+        for (int s = 0; s < 2; s++) {
+            float sx = s == 0 ? w * 0.18f : w * 0.82f;
+            float aim = cx + (float) Math.sin(sessionSeconds * (0.7 + s * 0.23) + s * 2.1) * w * 0.20f;
+            path.rewind();
+            path.moveTo(sx, 0);
+            path.lineTo(aim - dp(120f), deck);
+            path.lineTo(aim + dp(120f), deck);
+            path.close();
+            paint.setColor((int) (0x18 * lights) << 24 | 0x00FFF3D0);
+            c.drawPath(path, paint);
+        }
+
+        // The stand behind: a crowd on its feet the whole way through.
+        drawCeremonyStand(c, w, deck - dp(150f), lights);
+
+        // The pontoon deck.
+        paint.setColor(0xFF23303F);
+        c.drawRect(0, deck, w, deck + dp(16f), paint);
+        paint.setColor(0xFF16202E);
+        c.drawRect(0, deck + dp(16f), w, h, paint);
+
+        // Three flagpoles, flags climbing once the medal has landed.
+        float raise = ease(5.0, 6.6, t);
+        for (int p = 0; p < 3; p++) {
+            int place = p == 0 ? 1 : p == 1 ? 0 : 2;     // silver, gold, bronze across
+            float px = cx + (place == 0 ? 0 : place == 1 ? -dp(215f) : dp(215f));
+            float poleTop = deck - dp(250f);
+            paint.setColor(0xFF9AA7B8);
+            c.drawRect(px - dp(2f), poleTop, px + dp(2f), deck, paint);
+            int who = podium[place];
+            int col = who < 0 ? ACCENT : CREW_COLORS[who];
+            float height = place == 0 ? 1f : place == 1 ? 0.72f : 0.5f;
+            float fy = deck - dp(60f) - (deck - dp(60f) - poleTop) * raise * height;
+            float ripple = (float) Math.sin(sessionSeconds * 3 + p) * dp(3f) * raise;
+            path.rewind();
+            path.moveTo(px + dp(2f), fy);
+            path.lineTo(px + dp(56f), fy + dp(4f) + ripple);
+            path.lineTo(px + dp(56f), fy + dp(30f) + ripple);
+            path.lineTo(px + dp(2f), fy + dp(34f));
+            path.close();
+            paint.setColor((((int) (0xFF * raise)) << 24) | (col & 0x00FFFFFF));
+            c.drawPath(path, paint);
+        }
+
+        // The podium: three blocks sliding up out of the deck.
+        float rise = ease(0.4, 1.7, t);
+        float bw = dp(150f);
+        for (int place = 0; place < 3; place++) {
+            float px = cx + (place == 0 ? 0 : place == 1 ? -bw - dp(14f) : bw + dp(14f));
+            float bh = place == 0 ? dp(104f) : place == 1 ? dp(72f) : dp(52f);
+            float top = deck - bh * rise;
+            boolean mine = podium[place] < 0;
+            paint.setColor(mine ? 0xFF1E4F49 : 0xFF2B3A4D);
+            c.drawRect(px - bw / 2f, top, px + bw / 2f, deck, paint);
+            paint.setColor(mine ? 0x8835D0BA : 0x33FFFFFF);
+            c.drawRect(px - bw / 2f, top, px + bw / 2f, top + dp(5f), paint);
+            if (rise > 0.5f) {
+                bold(c, num(place + 1), px, deck - bh * rise * 0.45f, 26f,
+                        mine ? ACCENT : 0x66FFFFFF, Paint.Align.CENTER);
+            }
+        }
+
+        // The crews walk on from the wings, then step up onto their block.
+        float walk = ease(1.5, 2.8, t);
+        float step = ease(2.8, 3.3, t);
+        for (int place = 0; place < 3; place++) {
+            float px = cx + (place == 0 ? 0 : place == 1 ? -bw - dp(14f) : bw + dp(14f));
+            float bh = place == 0 ? dp(104f) : place == 1 ? dp(72f) : dp(52f);
+            float fromX = place == 1 ? -dp(120f) : w + dp(120f);
+            float x = fromX + (px - fromX) * walk;
+            float feet = deck - bh * rise * step;
+            // A little bounce as they come on, and a hop onto the block.
+            float bounce = walk < 1f ? Math.abs((float) Math.sin(t * 9)) * dp(6f) : 0f;
+            int who = podium[place];
+            boolean mine = who < 0;
+            drawCeremonyRower(c, x, feet - bounce, mine ? 1.12f : 1f, mine ? ACCENT : CREW_COLORS[who],
+                    place == 0 && t > 3.4);
+            if (step > 0.9f) {
+                bold(c, mine ? "YOU" : CREWS[who], x, feet - dp(86f), 11f,
+                        mine ? ACCENT : CREW_COLORS[who], Paint.Align.CENTER);
+            }
+        }
+
+        // The medal comes down on its ribbon and settles round your neck.
+        if (ceremonyMedal >= 0) {
+            int myPlace = 0;
+            for (int p = 0; p < 3; p++) {
+                if (podium[p] < 0) {
+                    myPlace = p;
+                }
+            }
+            float mx = cx + (myPlace == 0 ? 0 : myPlace == 1 ? -bw - dp(14f) : bw + dp(14f));
+            float mbh = myPlace == 0 ? dp(104f) : myPlace == 1 ? dp(72f) : dp(52f);
+            float neck = deck - mbh * rise - dp(54f);
+            float drop = ease(3.4, 4.8, t);
+            float my = -dp(40f) + (neck + dp(40f)) * drop;
+            int tint = MEDAL_TINT[Math.min(2, ceremonyMedal)];
+            paint.setColor(0xFFB33A3A);
+            paint.setStrokeWidth(dp(3f));
+            paint.setStyle(Paint.Style.STROKE);
+            c.drawLine(mx - dp(9f), my - dp(26f), mx, my, paint);
+            c.drawLine(mx + dp(9f), my - dp(26f), mx, my, paint);
+            paint.setStyle(Paint.Style.FILL);
+            float glint = 0.6f + 0.4f * (float) Math.sin(sessionSeconds * 4);
+            Fx.glow(c, mx, my, dp(46f), ((int) (0x50 * glint) << 24) | (tint & 0x00FFFFFF));
+            paint.setColor(tint);
+            c.drawCircle(mx, my, dp(15f), paint);
+            paint.setColor(0x44000000);
+            c.drawCircle(mx, my, dp(9f), paint);
+            if (drop >= 1f && !ceremonyBurst) {
+                ceremonyBurst = true;
+                fx.burst(mx, my, 44, dp(230f), 1.3f, dp(3f), tint, true);
+            }
+        }
+
+        // Fireworks over the water for a win, confetti for anything else.
+        if (t > 4.8 && sessionSeconds > ceremonyFirework) {
+            ceremonyFirework = sessionSeconds + (gold ? 0.35 : 0.9) + Math.random() * 0.3;
+            fx.burst(w * (0.1f + (float) Math.random() * 0.8f), h * (0.1f + (float) Math.random() * 0.3f),
+                    gold ? 40 : 22, dp(210f), 1.2f, dp(2.6f), PARTY[(int) (Math.random() * PARTY.length)], true);
+        }
+        fx.draw(c);   // again, because the scrim above was drawn over the pass in render()
+
+        // The words, last so nothing draws over them.
+        float words = ease(4.9, 5.6, t);
+        if (words > 0.01f) {
+            int alpha = (int) (0xFF * words) << 24;
+            String head = ceremonyMedal >= 0 ? MEDAL_NAMES[ceremonyMedal] + " MEDAL"
+                    : stage == Stage.B_FINAL ? "B FINAL PRESENTATION" : "PRESENTATION";
+            bold(c, head, cx, h * 0.14f, 34f,
+                    alpha | ((ceremonyMedal >= 0 ? MEDAL_TINT[ceremonyMedal] : TEXT) & 0x00FFFFFF), Paint.Align.CENTER);
+            bold(c, DIVISIONS[division] + "  ·  " + stageName() + "  ·  " + clock(finishTime), cx, h * 0.19f, 14f,
+                    alpha | (TEXT & 0x00FFFFFF), Paint.Align.CENTER);
+            if (!outcome.isEmpty()) {
+                bold(c, outcome, cx, h * 0.235f, 13f, alpha | (ACCENT & 0x00FFFFFF), Paint.Align.CENTER);
+            }
+            if (!grudgeNote.isEmpty()) {
+                bold(c, grudgeNote, cx, h * 0.28f, 12f, alpha | (0xFFF5C518 & 0x00FFFFFF), Paint.Align.CENTER);
+            }
+        }
+        if (t > 6.5) {
+            label(c, "tap to continue", cx, h - dp(16f), 11f, DIM, Paint.Align.CENTER);
+        }
+    }
+
+    /** A standing crowd behind the podium, on its feet from the first second. */
+    private void drawCeremonyStand(Canvas c, float w, float baseY, float lights) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((int) (0xFF * lights) << 24 | 0x00101A26);
+        c.drawRect(0, baseY - dp(10f), w, baseY + dp(150f), paint);
+        float gap = dp(19f);
+        for (int row = 0; row < 3; row++) {
+            float y = baseY + row * dp(16f);
+            for (float x = gap * 0.5f + (row & 1) * gap * 0.5f; x < w; x += gap) {
+                int k = (int) (x / gap) + row * 31;
+                float jump = (float) Math.abs(Math.sin(sessionSeconds * 6.5 + k * 1.3)) * dp(5f);
+                paint.setColor((int) (0xFF * lights) << 24 | (PARTY[k % PARTY.length] & 0x00FFFFFF));
+                c.drawRect(x - dp(4f), y - dp(13f) - jump, x + dp(4f), y - jump, paint);
+                paint.setColor((int) (0xFF * lights) << 24 | 0x00F1C27D);
+                c.drawCircle(x, y - dp(17f) - jump, dp(3.4f), paint);
+            }
+        }
+    }
+
+    /** One rower on the podium: a figure with an oar, arms up when they have won. */
+    private void drawCeremonyRower(Canvas c, float x, float feet, float s, int col, boolean armsUp) {
+        paint.setStyle(Paint.Style.FILL);
+        float lift = armsUp ? (float) Math.abs(Math.sin(sessionSeconds * 2.4)) * dp(3f) * s : 0f;
+        float y = feet - lift;
+        // Legs.
+        paint.setColor(0xFF1B2533);
+        c.drawRect(x - dp(9f) * s, y - dp(26f) * s, x - dp(3f) * s, y, paint);
+        c.drawRect(x + dp(3f) * s, y - dp(26f) * s, x + dp(9f) * s, y, paint);
+        // Body.
+        paint.setColor(col);
+        c.drawRect(x - dp(12f) * s, y - dp(58f) * s, x + dp(12f) * s, y - dp(24f) * s, paint);
+        paint.setColor(0x33000000);
+        c.drawRect(x - dp(12f) * s, y - dp(40f) * s, x + dp(12f) * s, y - dp(36f) * s, paint);
+        // Arms: raised for the winner, otherwise down at the sides.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(4f) * s);
+        paint.setColor(0xFFF1C27D);
+        if (armsUp) {
+            float sway = (float) Math.sin(sessionSeconds * 3.2) * dp(4f) * s;
+            c.drawLine(x - dp(10f) * s, y - dp(54f) * s, x - dp(20f) * s + sway, y - dp(84f) * s, paint);
+            c.drawLine(x + dp(10f) * s, y - dp(54f) * s, x + dp(20f) * s + sway, y - dp(84f) * s, paint);
+        } else {
+            c.drawLine(x - dp(11f) * s, y - dp(54f) * s, x - dp(15f) * s, y - dp(30f) * s, paint);
+            c.drawLine(x + dp(11f) * s, y - dp(54f) * s, x + dp(15f) * s, y - dp(30f) * s, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        // Head.
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(x, y - dp(66f) * s, dp(9f) * s, paint);
+        paint.setColor(col);
+        c.drawRect(x - dp(9f) * s, y - dp(74f) * s, x + dp(9f) * s, y - dp(70f) * s, paint);
     }
 
     /** A two-handled cup standing on {@code base}. */
@@ -1192,22 +2190,23 @@ final class RegattaGame extends GameView {
         float gap = dp(420f);
         double scroll = you * ppm * 0.55;
         float off = (float) (scroll % gap);
-        String text = grand ? "A FINAL" : "B FINAL";
-        String text2 = DIVISIONS[division] + " REGATTA";
+        boolean top = stage == Stage.GRAND;
+        String text = top ? "GRAND FINAL" : grand ? "A FINAL" : "B FINAL";
+        String text2 = top ? "SEASON DECIDER" : DIVISIONS[division] + " REGATTA";
         for (float x = -off; x < w + gap; x += gap) {
             int k = (int) Math.floor((x + scroll) / gap + 0.5);
             String t = (k & 1) == 0 ? text : text2;
             float half = dp((k & 1) == 0 ? 60f : 86f);
-            float top = bankTop - dp(38f);
+            float bannerTop = bankTop - dp(38f);
             float bottom = bankTop - dp(14f);
             paint.setColor(0xFFDDDDDD);
-            c.drawRect(x - half - dp(2f), top - dp(4f), x - half + dp(1f), bankTop + dp(8f), paint);
-            c.drawRect(x + half - dp(1f), top - dp(4f), x + half + dp(2f), bankTop + dp(8f), paint);
+            c.drawRect(x - half - dp(2f), bannerTop - dp(4f), x - half + dp(1f), bankTop + dp(8f), paint);
+            c.drawRect(x + half - dp(1f), bannerTop - dp(4f), x + half + dp(2f), bankTop + dp(8f), paint);
             float billow = (float) Math.sin(sessionSeconds * 2.2 + k) * dp(2f);
-            paint.setColor(grand ? 0xFFF5C518 : 0xFF6F8CFF);
-            c.drawRect(x - half, top, x + half, bottom + billow, paint);
+            paint.setColor(top ? 0xFFFF8A4C : grand ? 0xFFF5C518 : 0xFF6F8CFF);
+            c.drawRect(x - half, bannerTop, x + half, bottom + billow, paint);
             paint.setColor(grand ? 0xFFB33A3A : 0xFFFFFFFF);
-            c.drawRect(x - half, top, x + half, top + dp(3f), paint);
+            c.drawRect(x - half, bannerTop, x + half, bannerTop + dp(3f), paint);
             bold(c, t, x, bottom - dp(6f) + billow * 0.5f, 12f, grand ? 0xFF1A1A1A : 0xFFFFFFFF, Paint.Align.CENTER);
         }
     }

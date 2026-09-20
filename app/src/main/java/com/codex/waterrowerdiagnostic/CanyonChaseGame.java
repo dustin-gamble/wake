@@ -26,12 +26,27 @@ import android.view.MotionEvent;
  *   <li>The centre is your own pace (half the profile's typical, half the last 20 s), and the
  *   width is the profile's low-high spread, so "right" means a little above what you hold.</li>
  *   <li>Pace is averaged over ~1.2 s, so the coast between two strokes does not swing the craft.</li>
- *   <li>A position bar at the bottom shows where you are, the walls, and the fork spire.</li>
+ *   <li>A position bar at the bottom shows where you are, the walls, and the fork spires.</li>
  * </ul>
  *
- * <p>Forks: every ~400 m a rock spire splits the canyon. LEFT is a squeezed shortcut that gains
- * 12 m on the hunter; RIGHT is the wide road. The side you are on when the spire starts is the
- * road you take, and inside, the spire is a wall like any other.
+ * <p>Forks: every ~400 m rock splits the canyon. LEFT is a squeezed shortcut that gains 12 m on the
+ * hunter; RIGHT is the wide road. Once the SLOT ROUTE is unlocked the rock comes as two spires with
+ * a gap between them: thread the middle and you gain 26 m. The side you are on when the rock starts
+ * is the road you take, and inside, the rock is a wall like any other.
+ *
+ * <p>The race upgrades (this build), shared with FLY through {@link CanyonRouteMap}:
+ * <ul>
+ *   <li><b>Time-trial gates.</b> A timing arch every {@link #CHECK_METRES}; each split is medalled
+ *   against the rower's own speeds, and so is the whole run to the exit ({@code chase.exit}).</li>
+ *   <li><b>A rival</b> runs the same canyon ahead of you - the thing you are chasing while the
+ *   hunter chases you - rubber-banded so the race is live at the line, and it taunts on every lead
+ *   change.</li>
+ *   <li><b>Boost</b> is earned by taking a timing gate clean (no rock touched since the last one).
+ *   Spending it throws you down the canyon, pushes the hunter back and makes you rock-proof while
+ *   it burns.</li>
+ *   <li><b>A route map</b> top left, with the branches still locked and what they cost.</li>
+ *   <li><b>A photo finish</b> at the canyon exit against the rival.</li>
+ * </ul>
  *
  * <p>The light moves from afternoon to dusk along the run ({@link CanyonFlightGame.Daylight}).
  *
@@ -46,10 +61,32 @@ final class CanyonChaseGame extends GameView {
     private static final float FOCAL = 26f;
     /** Metres from the wall at which the craft scrapes. */
     private static final float WALL_MARGIN = 3f;
-    private static final float SPIRE = 3f;            // half-width of a fork's spire
+    private static final float SPIRE = 3f;            // half-width of a single fork spire
+    /**
+     * With the slot open: two spires this far either side of the line, this wide. Sized against
+     * the 24 m of usable canyon so all three roads are real - about 4 m of open lane either side
+     * of the rock and an 8 m slot down the middle. A slot fork does NOT squeeze the left wall;
+     * with the squeeze as well the shortcut lane came out 1.5 m wide, which is not a road.
+     */
+    private static final float SLOT_OFFSET = 6.5f;
+    private static final float SLOT_HALF = 1.5f;
+    /** How close to rock the craft may come. */
+    private static final float ROCK_MARGIN = 1f;
     private static final float SQUEEZE = 2f;          // how far the shortcut's outer wall closes in
     private static final float FORK_LEN = 90f;
     private static final float SHORTCUT_GAIN = 12f;
+    private static final float SLOT_GAIN = 26f;
+    /** The canyon has an end: reach it and the chase is over, with a photo at the line. */
+    private static final float EXIT_METRES = 2000f;
+    private static final float CHECK_METRES = 400f;
+    private static final float BOOST_PER_CHARGE = 1.3f;
+    /** Metres the gap must actually swing before the lead is called changed. */
+    private static final float LEAD_HYSTERESIS = 5f;
+
+    private static final int LEFT_ROAD = 0;
+    private static final int RIGHT_ROAD = 1;
+    private static final int SLOT_ROAD = 2;
+    private static final String[] ROAD_NAMES = {"SHORTCUT", "WIDE", "SLOT"};
 
     private final PersonalBests bests;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -57,11 +94,15 @@ final class CanyonChaseGame extends GameView {
     private final Fx.Particles fx = new Fx.Particles();
     private final Fx.Shake shake = new Fx.Shake();
     private final java.util.Random rng = new java.util.Random();
+    private final CanyonRouteMap map;
+    private final int[] forkChoices = new int[12];
+    private int forksTaken;
     // 3.19.5 scenery: mesas on the horizon, vultures, wall strata, boulders, dust behind the craft.
     private double dustClock;
 
     private boolean started;
     private boolean over;
+    private boolean finished;
     private double runStart;
     /** Session clock at the first stroke: the hunter speeds up with run time, not session time. */
     private double runStartSeconds;
@@ -74,15 +115,22 @@ final class CanyonChaseGame extends GameView {
     private double scrapeUntil;
     private int scrapes;
     private int shortcuts;
-    private double bestGap;
+    private int score;
     /** Pace averaged over ~1.2 s, and over ~20 s. */
     private float smoothSpeed;
     private float recentSpeed;
 
     private double forkStart;
     private double forkEnd;
-    /** 0 undecided, -1 shortcut (left), +1 wide road (right). */
-    private int forkSide;
+    /** True when this fork is the two-spire version with a slot down the middle. */
+    private boolean forkSlot;
+    /** -1 undecided, else LEFT_ROAD / RIGHT_ROAD / SLOT_ROAD. */
+    private int forkRoad = -1;
+
+    /** Spires at one distance: centres and half width, written by {@link #bands}. */
+    private final float[] bandC = new float[2];
+    private float bandHalf;
+    private int bandCount;
 
     private String popupText = "";
     private int popupColor = TEXT;
@@ -93,15 +141,74 @@ final class CanyonChaseGame extends GameView {
     private float skyT = -1f;
     private float skyHorizon;
 
+    /* ---------- the race ---------- */
+
+    private int tier;
+    /**
+     * The score {@link #tier} was decided from, read once at the start of the run. The route map
+     * is drawn from this rather than the live score: points earned mid-run do not put a slot in
+     * the rock until the next run, so a padlock opening on screen would be a lie.
+     */
+    private float unlockScore;
+    private int pointMul = 1;
+    private float dayOffset;
+
+    private float nextCheckAt;
+    private int checkIndex;
+    private double lastCheckSeconds;
+    private boolean cleanSinceCheck = true;
+    private int golds;
+    private int silvers;
+    private int bronzes;
+
+    private int boostCharges;
+    private int boostCapacity = 3;
+    private double boostUntil;
+    private double boostFullSince;
+    private double boostMetres;
+    private float boostGlow;
+    private float boostHitX;
+    private float boostHitY;
+    private float boostHitW;
+    private float boostHitH;
+
+    /** The rival craft: the thing ahead, while the hunter is the thing behind. */
+    private double rivalX;
+    private float rivalSpeed;
+    private double rivalSurgeUntil;
+    private double rivalNextSurge;
+    private String rivalTaunt = "";
+    private double rivalTauntUntil;
+    private boolean rivalWasAhead;
+    private int tauntSeq;
+
+    private double finishSeconds;
+    private float finishMargin;
+    private int finishMedal = CanyonRouteMap.NO_MEDAL;
+    private double finishAt;
+    private boolean photo;
+    /**
+     * The finish card's text and the footer's best time, built once rather than reformatted every
+     * frame: {@link CanyonRouteMap#time} runs a Formatter, and the footer drew one 60 times a
+     * second for a figure that only changes when a run ends.
+     */
+    private String finishTitle = "";
+    private String finishTimeText = "";
+    private String finishLine1 = "";
+    private String finishLine2 = "";
+    private String bestExitText = "--";
+
     CanyonChaseGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        this.map = new CanyonRouteMap(context.getResources().getDisplayMetrics().density);
     }
 
     @Override
     protected void onStart() {
         started = false;
         over = false;
+        finished = false;
         x = 0;
         lateral = 0f;
         lateralVel = 0f;
@@ -109,15 +216,51 @@ final class CanyonChaseGame extends GameView {
         hunterGap = 55;
         scrapes = 0;
         shortcuts = 0;
-        bestGap = 0;
+        score = 0;
         smoothSpeed = 0f;
         recentSpeed = (float) profile.typicalSpeed();
         rng.setSeed(31);
+        unlockScore = bests.get("chase.score", 0f);
+        tier = CanyonRouteMap.tiers(unlockScore);
+        boostCapacity = tier >= 2 ? 4 : 3;
+        pointMul = tier >= 3 ? 2 : 1;
+        dayOffset = tier >= 3 ? 760f : 0f;
+        boostCharges = 0;
+        boostUntil = 0;
+        boostFullSince = 0;
+        boostMetres = 0;
+        boostGlow = 0f;
         forkStart = 260;
         forkEnd = forkStart + FORK_LEN;
-        forkSide = 0;
+        forkSlot = tier >= 1;
+        forkRoad = -1;
+        forksTaken = 0;
+        for (int i = 0; i < forkChoices.length; i++) {
+            forkChoices[i] = -1;
+        }
+        nextCheckAt = CHECK_METRES;
+        checkIndex = 0;
+        lastCheckSeconds = 0;
+        cleanSinceCheck = true;
+        golds = 0;
+        silvers = 0;
+        bronzes = 0;
+        rivalX = 60;
+        rivalSpeed = (float) profile.typicalSpeed();
+        rivalSurgeUntil = 0;
+        rivalNextSurge = 18;
+        rivalTauntUntil = 0;
+        rivalWasAhead = true;
+        tauntSeq = 0;
+        photo = false;
+        finishTitle = "";
+        finishTimeText = "";
+        finishLine1 = "";
+        finishLine2 = "";
+        bestExitText = bests.has("chase.exit") ? CanyonRouteMap.time(bests.get("chase.exit", 0f)) : "--";
         popupUntil = 0;
         lastPhase = 0;
+        map.collapse();
     }
 
     @Override
@@ -127,14 +270,30 @@ final class CanyonChaseGame extends GameView {
             runStart = sessionMeters;
             runStartSeconds = sessionSeconds;
             recentSpeed = Math.max(boat.value(), (float) profile.lowSpeed());
+            rivalX = 60;
+            rivalNextSurge = sessionSeconds + 18;
+            lastCheckSeconds = activeSeconds;
         }
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_DOWN && over) {
-            start();
-            return true;
+        if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            if (over || finished) {
+                start();
+                return true;
+            }
+            float tx = e.getX();
+            float ty = e.getY();
+            if (map.tap(tx, ty)) {
+                invalidate();
+                return true;
+            }
+            if (boostHitW > 0 && tx >= boostHitX - dp(10f) && tx <= boostHitX + boostHitW + dp(10f)
+                    && ty >= boostHitY - dp(14f) && ty <= boostHitY + boostHitH + dp(14f)) {
+                fireBoost();
+                return true;
+            }
         }
         return super.onTouchEvent(e);
     }
@@ -144,7 +303,7 @@ final class CanyonChaseGame extends GameView {
         return (float) (Math.sin(metres / 46.0) * 9.5 + Math.sin(metres / 17.0) * 3.2);
     }
 
-    /** 0 outside the fork, rising to 1 over 12 m at each end, so the spire is a wedge. */
+    /** 0 outside the fork, rising to 1 over 12 m at each end, so the rock is a wedge. */
     private float forkRamp(double m) {
         if (m < forkStart || m > forkEnd) {
             return 0f;
@@ -152,9 +311,40 @@ final class CanyonChaseGame extends GameView {
         return Math.max(0f, Math.min(1f, (float) Math.min(m - forkStart, forkEnd - m) / 12f));
     }
 
-    /** Distance from the line to the left wall; the shortcut squeezes it. */
+    /** The spires at a distance: one centred, or two with the slot between them. */
+    private void bands(double m) {
+        float ramp = forkRamp(m);
+        if (ramp <= 0f) {
+            bandCount = 0;
+            bandHalf = 0f;
+            return;
+        }
+        if (forkSlot) {
+            bandC[0] = -SLOT_OFFSET;
+            bandC[1] = SLOT_OFFSET;
+            bandHalf = SLOT_HALF * ramp;
+            bandCount = 2;
+        } else {
+            bandC[0] = 0f;
+            bandHalf = SPIRE * ramp;
+            bandCount = 1;
+        }
+    }
+
+    /** Distance from the line to the left wall; the plain shortcut squeezes it, the slot does not. */
     private float leftWall(double m) {
-        return CANYON_HALF - SQUEEZE * forkRamp(m);
+        return CANYON_HALF - (forkSlot ? 0f : SQUEEZE) * forkRamp(m);
+    }
+
+    /** Where the middle of each road through the fork sits, in metres off the racing line. */
+    private float roadCentre(int road) {
+        float leftLimit = -(CANYON_HALF - (forkSlot ? 0f : SQUEEZE) - WALL_MARGIN);
+        float rightLimit = CANYON_HALF - WALL_MARGIN;
+        if (road == SLOT_ROAD) {
+            return 0f;
+        }
+        float edge = (forkSlot ? SLOT_OFFSET + SLOT_HALF : SPIRE) + ROCK_MARGIN;
+        return road == LEFT_ROAD ? (leftLimit - edge) / 2f : (rightLimit + edge) / 2f;
     }
 
     /** The pace that puts you on the line: half the profile's typical, half what you have held lately. */
@@ -191,6 +381,92 @@ final class CanyonChaseGame extends GameView {
         popupUntil = sessionSeconds + 1.6;
     }
 
+    /* ---------- boost ---------- */
+
+    private void fireBoost() {
+        if (boostCharges <= 0 || boosting() || !started || over || finished) {
+            return;
+        }
+        boostUntil = sessionSeconds + BOOST_PER_CHARGE * boostCharges;
+        hunterGap = Math.min(90, hunterGap + 4 * boostCharges);
+        boostCharges = 0;
+        boostFullSince = 0;
+        shake.kick(dp(6f));
+        popup("BOOST", 0xFFFF8A3D);
+    }
+
+    private boolean boosting() {
+        return sessionSeconds < boostUntil;
+    }
+
+    private float boostSpeed() {
+        return (float) profile.typicalSpeed() * (tier >= 2 ? 1.5f : 1.1f);
+    }
+
+    /* ---------- the rival ---------- */
+
+    private void stepRival(float dt) {
+        if (sessionSeconds > rivalNextSurge) {
+            rivalSurgeUntil = sessionSeconds + 7;
+            rivalNextSurge = sessionSeconds + 20 + rng.nextFloat() * 12f;
+            rivalTaunt = CanyonRouteMap.taunt(CanyonRouteMap.TAUNT_SURGE_KIND, tauntSeq++);
+            rivalTauntUntil = sessionSeconds + 2.6;
+        }
+        float base = (float) profile.typicalSpeed() * 0.97f;
+        float target = base * (sessionSeconds < rivalSurgeUntil ? 1.2f : 1f);
+        target += (float) Math.max(-0.7, Math.min(0.7, (x - rivalX) * 0.012));
+        rivalSpeed += (target - rivalSpeed) * Math.min(1f, dt * 1.2f);
+        rivalX += rivalSpeed * dt;
+        // A Schmitt trigger, not a bare comparison: the rubber band keeps the two of you within a
+        // metre or two, and your distance comes from a coasted speed that dips between strokes, so
+        // a plain `rivalX > x` flips several times a stroke near parity - and each flip paid +10.
+        boolean ahead = rivalWasAhead ? rivalX > x - LEAD_HYSTERESIS : rivalX > x + LEAD_HYSTERESIS;
+        if (ahead != rivalWasAhead) {
+            rivalWasAhead = ahead;
+            rivalTaunt = CanyonRouteMap.taunt(ahead ? CanyonRouteMap.TAUNT_AHEAD_KIND
+                    : CanyonRouteMap.TAUNT_BEHIND_KIND, tauntSeq++);
+            rivalTauntUntil = sessionSeconds + 2.8;
+            if (!ahead) {
+                score += 10 * pointMul;
+                popup("PAST THE RIVAL  +" + (10 * pointMul), ACCENT);
+            } else {
+                popup("THE RIVAL IS PAST YOU", 0xFFE8557F);
+            }
+        }
+    }
+
+    private void finishRun() {
+        finished = true;
+        finishSeconds = Math.max(0.1, activeSeconds);
+        finishMedal = CanyonRouteMap.medal(finishSeconds, EXIT_METRES, profile);
+        finishMargin = (float) (x - rivalX);
+        photo = Math.abs(finishMargin) <= 12f;
+        finishAt = sessionSeconds;
+        score += 20 * pointMul;
+        if (finishMargin > 0) {
+            score += 20 * pointMul;
+        }
+        shake.kick(dp(8f));
+        bests.recordLowest("chase.exit", (float) finishSeconds);
+        saveRecords();
+        // The card's text, built once: it is a still picture, not an animation.
+        boolean won = finishMargin > 0;
+        bestExitText = bests.has("chase.exit") ? CanyonRouteMap.time(bests.get("chase.exit", 0f)) : "--";
+        finishTitle = photo ? "PHOTO FINISH" : won ? "YOU BEAT THE RIVAL OUT" : "THE RIVAL GOT OUT FIRST";
+        finishTimeText = CanyonRouteMap.time(finishSeconds);
+        finishLine1 = scrapes + " scrapes  ·  " + shortcuts + " shortcuts  ·  " + golds + " gold  ·  score " + score;
+        String best = bests.has("chase.exit") ? "  ·  best " + bestExitText : "";
+        finishLine2 = (won ? "won by " : "lost by ")
+                + String.format(java.util.Locale.US, "%.1f m", Math.abs(finishMargin))
+                + best + "  ·  tap to run it again";
+    }
+
+    private void saveRecords() {
+        bests.recordHighest("chase.distance", (float) x);
+        bests.recordHighest("chase.score", score);
+        bests.recordHighest("chase.gold", golds);
+    }
+
     @Override
     protected void render(Canvas c, float dt) {
         float w = getWidth();
@@ -199,10 +475,15 @@ final class CanyonChaseGame extends GameView {
             return;
         }
         float speed = boat.value();
-        if (started && !over) {
-            x = sessionMeters - runStart;
+        boolean live = started && !over && !finished;
+        if (live) {
+            if (boosting()) {
+                boostMetres += boostSpeed() * dt;
+            }
+            x = sessionMeters - runStart + boostMetres;
             recentSpeed += (speed - recentSpeed) * Math.min(1f, dt / 20f);
         }
+        boostGlow += ((boosting() ? 1f : 0f) - boostGlow) * Math.min(1f, dt * 5f);
         smoothSpeed += (speed - smoothSpeed) * Math.min(1f, dt / 1.2f);
 
         // Lateral: eased toward the target, so it feels like a craft, not a cursor.
@@ -217,26 +498,67 @@ final class CanyonChaseGame extends GameView {
 
         float centre = centreAt(x);
         float offLine = lateral;
-        float ramp = forkRamp(x);
-        float spire = SPIRE * ramp;
         float leftLimit = -(leftWall(x) - WALL_MARGIN);
         float rightLimit = CANYON_HALF - WALL_MARGIN;
         boolean wallHit = offLine < leftLimit || offLine > rightLimit;
-        boolean spireHit = forkSide != 0 && ramp > 0.05f
-                && (forkSide < 0 ? offLine > -(spire + 1.5f) : offLine < spire + 1.5f);
-        boolean scraping = wallHit || spireHit;
-        float nearWall = Math.max(0f, 1f - Math.min(offLine - leftLimit, rightLimit - offLine) / 4f);
-
-        if (started && !over) {
-            // Fork: the side you are on when the spire begins is the road you take.
-            if (forkSide == 0 && x >= forkStart) {
-                forkSide = offLine < 0 ? -1 : 1;
-                popup(forkSide < 0 ? "SHORTCUT  -  MIND THE WALLS" : "WIDE ROAD", forkSide < 0 ? 0xFFF5C518 : ACCENT);
+        bands(x);
+        boolean spireHit = false;
+        int hitBand = -1;
+        for (int i = 0; i < bandCount; i++) {
+            if (Math.abs(offLine - bandC[i]) < bandHalf + ROCK_MARGIN) {
+                spireHit = true;
+                hitBand = i;
+                break;
             }
-            if (forkSide != 0 && x > forkEnd) {
-                if (forkSide < 0) {
+        }
+        boolean scraping = (wallHit || spireHit) && !boosting();
+        // Clamped to 1: pinned past a wall this ran over 1, and the alpha built from it
+        // ((int)(n*8)*16) then overflowed past 255 and wrapped the warning glow back to faint.
+        float nearWall = Math.max(0f, Math.min(1f,
+                1f - Math.min(offLine - leftLimit, rightLimit - offLine) / 4f));
+
+        if (live) {
+            stepRival(dt);
+            if (boostCharges >= boostCapacity && !boosting()) {
+                if (boostFullSince == 0) {
+                    boostFullSince = sessionSeconds;
+                } else if (sessionSeconds - boostFullSince > 5) {
+                    fireBoost();
+                }
+            } else if (boostCharges < boostCapacity) {
+                boostFullSince = 0;
+            }
+            // Fork: the road you are lined up with when the rock begins is the road you take.
+            if (forkRoad < 0 && x >= forkStart) {
+                int roads = forkSlot ? 3 : 2;
+                int best = LEFT_ROAD;
+                float bestGapM = Float.MAX_VALUE;
+                for (int r = 0; r < roads; r++) {
+                    float gap = Math.abs(roadCentre(r) - offLine);
+                    if (gap < bestGapM) {
+                        bestGapM = gap;
+                        best = r;
+                    }
+                }
+                forkRoad = best;
+                if (forksTaken < forkChoices.length) {
+                    forkChoices[forksTaken++] = best;
+                }
+                popup(best == SLOT_ROAD ? "THE SLOT  -  THREAD IT"
+                                : best == LEFT_ROAD ? "SHORTCUT  -  MIND THE WALLS" : "WIDE ROAD",
+                        best == RIGHT_ROAD ? ACCENT : 0xFFF5C518);
+            }
+            if (forkRoad >= 0 && x > forkEnd) {
+                if (forkRoad == SLOT_ROAD) {
+                    hunterGap += SLOT_GAIN;
+                    shortcuts++;
+                    score += 12 * pointMul;
+                    popup("THREADED THE SLOT  +" + Math.round(SLOT_GAIN) + " m", 0xFFFF8A3D);
+                    fx.burst(w / 2f, h * 0.7f, 30, dp(200f), 0.6f, dp(3f), 0xFFFF8A3D, false);
+                } else if (forkRoad == LEFT_ROAD) {
                     hunterGap += SHORTCUT_GAIN;
                     shortcuts++;
+                    score += 5 * pointMul;
                     popup("SHORTCUT  +" + Math.round(SHORTCUT_GAIN) + " m", 0xFFF5C518);
                     fx.burst(w / 2f, h * 0.7f, 26, dp(180f), 0.6f, dp(3f), 0xFFF5C518, false);
                 } else {
@@ -244,28 +566,59 @@ final class CanyonChaseGame extends GameView {
                 }
                 forkStart = forkEnd + 300 + rng.nextFloat() * 200;
                 forkEnd = forkStart + FORK_LEN;
-                forkSide = 0;
+                forkSlot = tier >= 1;
+                forkRoad = -1;
             }
             if (scraping && sessionSeconds > scrapeUntil) {
                 scrapeUntil = sessionSeconds + 0.6;
                 scrapes++;
+                cleanSinceCheck = false;
                 hunterGap -= 7;
                 shake.kick(dp(12f));
-                // Knocked back off the rock, toward open canyon.
-                float away = spireHit ? forkSide : (offLine > 0 ? -1 : 1);
+                // Knocked back off the rock, toward the nearest open lane.
+                float away = spireHit ? (offLine > bandC[Math.max(0, hitBand)] ? 1f : -1f)
+                        : (offLine > 0 ? -1f : 1f);
                 lateral += away * 2.5f;
-                float side = spireHit ? -forkSide : Math.signum(offLine);
-                fx.burst(w * 0.5f + side * w * (spireHit ? 0.08f : 0.34f), h * 0.62f, 22, dp(170f), 0.5f,
+                fx.burst(w * 0.5f + away * w * (spireHit ? 0.08f : 0.34f), h * 0.62f, 22, dp(170f), 0.5f,
                         dp(3.5f), 0xFFD89A3A, false);
+            }
+            // Timing gates: the split medalled against this rower's own speeds, and a clean one
+            // (no rock since the last gate) charges the boost.
+            while (x >= nextCheckAt && nextCheckAt < EXIT_METRES) {
+                double split = Math.max(0.1, activeSeconds - lastCheckSeconds);
+                lastCheckSeconds = activeSeconds;
+                checkIndex++;
+                int medal = CanyonRouteMap.medal(split, CHECK_METRES, profile);
+                if (medal == CanyonRouteMap.GOLD) {
+                    golds++;
+                    score += 6 * pointMul;
+                } else if (medal == CanyonRouteMap.SILVER) {
+                    silvers++;
+                    score += 4 * pointMul;
+                } else if (medal == CanyonRouteMap.BRONZE) {
+                    bronzes++;
+                    score += 2 * pointMul;
+                }
+                String extra = "";
+                if (cleanSinceCheck && boostCharges < boostCapacity) {
+                    boostCharges++;
+                    extra = "  ·  CLEAN, BOOST " + boostCharges + "/" + boostCapacity;
+                }
+                cleanSinceCheck = true;
+                popup("CP " + checkIndex + "  " + CanyonRouteMap.MEDAL_NAME[medal] + "  "
+                        + CanyonRouteMap.time(split) + extra, CanyonRouteMap.MEDAL_COLOR[medal]);
+                fx.burst(w / 2f, h * 0.66f, 22, dp(170f), 0.6f, dp(3f), CanyonRouteMap.MEDAL_COLOR[medal], false);
+                nextCheckAt += CHECK_METRES;
             }
             // The hunter holds a little under the rower's own low pace and creeps faster.
             float hunterSpeed = (float) (profile.lowSpeed() * 0.85) + (float) (sessionSeconds - runStartSeconds) / 240f;
-            hunterGap += (speed - hunterSpeed) * dt;
+            hunterGap += (speed + (boosting() ? boostSpeed() : 0f) - hunterSpeed) * dt;
             hunterGap = Math.min(90, hunterGap);
-            bestGap = Math.max(bestGap, x);
             if (hunterGap <= 0) {
                 over = true;
-                bests.recordHighest("chase.distance", (float) x);
+                saveRecords();
+            } else if (x >= EXIT_METRES) {
+                finishRun();
             }
         }
         shake.step(dt);
@@ -273,7 +626,7 @@ final class CanyonChaseGame extends GameView {
 
         float danger = (float) Math.max(0, 1 - hunterGap / 26.0);
         float horizon = h * 0.30f;
-        float dayT = CanyonFlightGame.Daylight.progress(x);
+        float dayT = CanyonFlightGame.Daylight.progress(x + dayOffset);
         float dusk = CanyonFlightGame.Daylight.shade(dayT);
         int phase = CanyonFlightGame.Daylight.phaseIndex(dayT);
         if (phase != lastPhase) {
@@ -364,10 +717,10 @@ final class CanyonChaseGame extends GameView {
             path.close();
             c.drawPath(path, paint);
 
-            float spN = SPIRE * forkRamp(x + zNear);
-            float spF = SPIRE * forkRamp(x + zFar);
+            float rampN = forkRamp(x + zNear);
+            float rampF = forkRamp(x + zFar);
             // Racing line down the middle: dashes you can aim at. Not through a spire.
-            if (i % 2 == 0 && spN <= 0f && spF <= 0f) {
+            if (i % 2 == 0 && rampN <= 0f && rampF <= 0f) {
                 paint.setColor(0x99FFE28A);
                 float mNear = w / 2f + cNear * sNear * k;
                 float mFar = w / 2f + cFar * sFar * k;
@@ -403,45 +756,53 @@ final class CanyonChaseGame extends GameView {
                 paint.setColor(0x33FFFFFF);
                 c.drawOval(bx - br * 0.9f, yNear - br * 1.15f, bx - br * 0.1f, yNear - br * 0.6f, paint);
             }
-            // The fork's spire: a rock slab down the middle, drawn with its visible faces only.
-            if (spN > 0.05f || spF > 0.05f) {
-                float aLN = w / 2f + (cNear - spN) * sNear * k;
-                float aRN = w / 2f + (cNear + spN) * sNear * k;
-                float aLF = w / 2f + (cFar - spF) * sFar * k;
-                float aRF = w / 2f + (cFar + spF) * sFar * k;
-                float hN = wallHNear * 0.8f;
-                float hF = wallHFar * 0.8f;
-                if (cNear - spN > 0) {
-                    paint.setColor(blend(wall, 0xFF000000, 0.3f));
+            // The fork's rock: one slab, or two with the slot between them.
+            if (rampN > 0.02f || rampF > 0.02f) {
+                int slabs = forkSlot ? 2 : 1;
+                float halfN = (forkSlot ? SLOT_HALF : SPIRE) * rampN;
+                float halfF = (forkSlot ? SLOT_HALF : SPIRE) * rampF;
+                for (int sb = 0; sb < slabs; sb++) {
+                    float off = forkSlot ? (sb == 0 ? -SLOT_OFFSET : SLOT_OFFSET) : 0f;
+                    float aLN = w / 2f + (cNear + off - halfN) * sNear * k;
+                    float aRN = w / 2f + (cNear + off + halfN) * sNear * k;
+                    float aLF = w / 2f + (cFar + off - halfF) * sFar * k;
+                    float aRF = w / 2f + (cFar + off + halfF) * sFar * k;
+                    float hN = wallHNear * 0.8f;
+                    float hF = wallHFar * 0.8f;
+                    if (cNear + off - halfN > 0) {
+                        paint.setColor(blend(wall, 0xFF000000, 0.3f));
+                        path.reset();
+                        path.moveTo(aLN, yNear);
+                        path.lineTo(aLF, yFar);
+                        path.lineTo(aLF, yFar - hF);
+                        path.lineTo(aLN, yNear - hN);
+                        path.close();
+                        c.drawPath(path, paint);
+                    }
+                    if (cNear + off + halfN < 0) {
+                        paint.setColor(blend(wall, 0xFF000000, 0.1f));
+                        path.reset();
+                        path.moveTo(aRN, yNear);
+                        path.lineTo(aRF, yFar);
+                        path.lineTo(aRF, yFar - hF);
+                        path.lineTo(aRN, yNear - hN);
+                        path.close();
+                        c.drawPath(path, paint);
+                    }
+                    paint.setColor(blend(wall, 0xFFFFD9A8, 0.25f * (1f - dusk)));
                     path.reset();
-                    path.moveTo(aLN, yNear);
-                    path.lineTo(aLF, yFar);
+                    path.moveTo(aLN, yNear - hN);
                     path.lineTo(aLF, yFar - hF);
-                    path.lineTo(aLN, yNear - hN);
-                    path.close();
-                    c.drawPath(path, paint);
-                }
-                if (cNear + spN < 0) {
-                    paint.setColor(blend(wall, 0xFF000000, 0.1f));
-                    path.reset();
-                    path.moveTo(aRN, yNear);
-                    path.lineTo(aRF, yFar);
                     path.lineTo(aRF, yFar - hF);
                     path.lineTo(aRN, yNear - hN);
                     path.close();
                     c.drawPath(path, paint);
                 }
-                paint.setColor(blend(wall, 0xFFFFD9A8, 0.25f * (1f - dusk)));
-                path.reset();
-                path.moveTo(aLN, yNear - hN);
-                path.lineTo(aLF, yFar - hF);
-                path.lineTo(aRF, yFar - hF);
-                path.lineTo(aRN, yNear - hN);
-                path.close();
-                c.drawPath(path, paint);
             }
         }
+        drawCheckpoints(c, w, h, horizon, camLat);
         drawForkSigns(c, w, h, horizon, camLat);
+        drawRival(c, w, h, horizon, camLat);
 
         // Your craft near the bottom, banking.
         // Clamped: pinned against a wall the craft used to be drawn far off-screen (seen on the
@@ -451,8 +812,8 @@ final class CanyonChaseGame extends GameView {
         float shipY = h * 0.80f;
         c.save();
         c.rotate(bank, shipX, shipY);
-        Fx.glow(c, shipX, shipY, dp(52f), 0x3535D0BA);
-        paint.setColor(scraping ? BAD : ACCENT);
+        Fx.glow(c, shipX, shipY, dp(52f), boostGlow > 0.2f ? 0x66FF8A3D : 0x3535D0BA);
+        paint.setColor(scraping ? BAD : boostGlow > 0.2f ? 0xFFFFD36A : ACCENT);
         path.reset();
         path.moveTo(shipX, shipY - dp(26f));
         path.lineTo(shipX - dp(34f), shipY + dp(14f));
@@ -462,16 +823,16 @@ final class CanyonChaseGame extends GameView {
         path.lineTo(shipX + dp(34f), shipY + dp(14f));
         path.close();
         c.drawPath(path, paint);
-        // Thrust, longer with speed.
+        // Thrust, longer with speed and much longer on boost.
         paint.setColor(0xFFFFD36A);
-        float thrust = dp(8f) + speed * dp(9f);
+        float thrust = dp(8f) + speed * dp(9f) + boostGlow * dp(60f);
         c.drawRect(shipX - dp(6f), shipY + dp(14f), shipX + dp(6f), shipY + dp(14f) + thrust, paint);
         paint.setColor(0xFFFF7A3D);
         c.drawRect(shipX - dp(3f), shipY + dp(14f), shipX + dp(3f), shipY + dp(14f) + thrust * 0.6f, paint);
         c.restore();
         // Dust thrown up behind the craft, more with speed.
         dustClock += dt;
-        if (started && !over && speed > 1.5f && dustClock > 0.05) {
+        if (live && speed > 1.5f && dustClock > 0.05) {
             dustClock = 0;
             for (int j = 0; j < 2; j++) {
                 fx.spawn(shipX + (float) (Math.random() - 0.5) * dp(40f), shipY + dp(20f),
@@ -483,11 +844,11 @@ final class CanyonChaseGame extends GameView {
         c.restore();
 
         // Close to a wall: its side of the screen warms, before the scrape.
-        if (started && !over && nearWall > 0.05f) {
+        if (live && nearWall > 0.05f) {
             boolean rightSide = rightLimit - offLine < offLine - leftLimit;
-            Fx.glow(c, rightSide ? w : 0f, h * 0.6f, w * 0.3f, ((int) (nearWall * 8) * 16 << 24) | 0xF0655D);
+            Fx.glow(c, rightSide ? w : 0f, h * 0.6f, w * 0.3f, ((int) (nearWall * 15) * 16 << 24) | 0xF0655D);
         }
-        Fx.speedLines(c, paint, w, h, speed, sessionSeconds, dp(1f));
+        Fx.speedLines(c, paint, w, h, speed + boostGlow * 3f, sessionSeconds, dp(1f));
         Fx.vignette(c, w, h, 0.3f + danger * 0.6f, danger > 0.15f ? 0x7A0A0A : 0x000000);
 
         // Rear-view mirror: the hunter, larger as it closes.
@@ -495,6 +856,7 @@ final class CanyonChaseGame extends GameView {
         float mh = dp(58f);
         float mx = w / 2f - mw / 2f;
         float my = dp(8f);
+        paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xCC0A0E14);
         c.drawRoundRect(mx, my, mx + mw, my + mh, dp(6f), dp(6f), paint);
         paint.setColor(danger > 0.4f ? BAD : 0xFF2A3648);
@@ -516,6 +878,18 @@ final class CanyonChaseGame extends GameView {
         paint.setColor(0xFFF5C518);
         c.drawCircle(hx - hs * 0.35f, hy - hs * 0.25f, Math.max(dp(1.5f), hs * 0.16f), paint);
         c.drawCircle(hx + hs * 0.35f, hy - hs * 0.25f, Math.max(dp(1.5f), hs * 0.16f), paint);
+        // The rival shows in the mirror too once you are past it.
+        if (!rivalWasAhead && started) {
+            float rs = dp(5f);
+            float rx = mx + mw * 0.2f;
+            paint.setColor(0xFFE8557F);
+            path.reset();
+            path.moveTo(rx, hy - rs);
+            path.lineTo(rx - rs * 1.2f, hy + rs * 0.6f);
+            path.lineTo(rx + rs * 1.2f, hy + rs * 0.6f);
+            path.close();
+            c.drawPath(path, paint);
+        }
         label(c, "BEHIND YOU", mx + mw / 2f, my + dp(11f), 7.5f, FAINT, Paint.Align.CENTER);
 
         // HUD.
@@ -527,11 +901,16 @@ final class CanyonChaseGame extends GameView {
         } else if (over) {
             big = "CAUGHT";
             col = BAD;
+        } else if (finished) {
+            big = "";
+            col = TEXT;
         } else {
             big = Math.round(hunterGap) + " m";
             col = hunterGap > 40 ? ACCENT : hunterGap > 18 ? WARN : BAD;
         }
-        bold(c, big, w / 2f, my + mh + dp(26f), started && !over ? 34f : 20f, col, Paint.Align.CENTER);
+        if (big.length() > 0) {
+            bold(c, big, w / 2f, my + mh + dp(26f), started && !over ? 34f : 20f, col, Paint.Align.CENTER);
+        }
         boolean sensor = hasSteering();
         double toFork = forkStart - x;
         String cap;
@@ -542,19 +921,30 @@ final class CanyonChaseGame extends GameView {
         } else if (over) {
             cap = "ran " + Math.round(x) + " m  ·  " + scrapes + " scrapes  ·  " + shortcuts + " shortcuts  ·  tap to run again";
             capCol = BAD;
+        } else if (finished) {
+            cap = "";
+            capCol = TEXT;
+        } else if (boosting()) {
+            cap = "BOOST  -  NOTHING CAN TOUCH YOU";
+            capCol = 0xFFFF8A3D;
         } else if (scraping) {
-            cap = spireHit ? "ON THE SPIRE" : "SCRAPING THE WALL";
+            cap = spireHit ? "ON THE ROCK" : "SCRAPING THE WALL";
             capCol = BAD;
-        } else if (forkSide == 0 && toFork < 90) {
+        } else if (forkRoad < 0 && toFork < 90) {
             cap = "FORK IN " + Math.max(0, Math.round(toFork)) + " m  ·  "
-                    + (sensor ? "STEER LEFT FOR THE SHORTCUT, RIGHT FOR THE WIDE ROAD"
-                    : "EASE OFF FOR THE SHORTCUT, PULL FOR THE WIDE ROAD");
+                    + (forkSlot
+                    ? (sensor ? "LEFT SHORTCUT, CENTRE SLOT, RIGHT WIDE" : "EASE OFF FOR THE SHORTCUT, HOLD YOUR PACE FOR THE SLOT")
+                    : (sensor ? "STEER LEFT FOR THE SHORTCUT, RIGHT FOR THE WIDE ROAD"
+                    : "EASE OFF FOR THE SHORTCUT, PULL FOR THE WIDE ROAD"));
             capCol = 0xFFF5C518;
-        } else if (forkSide < 0) {
+        } else if (forkRoad == SLOT_ROAD) {
+            cap = sensor ? "THE SLOT - DEAD STRAIGHT" : "THE SLOT - HOLD EXACTLY THIS PACE";
+            capCol = 0xFFFF8A3D;
+        } else if (forkRoad == LEFT_ROAD) {
             cap = sensor ? "SHORTCUT - HOLD IT STRAIGHT" : "SHORTCUT - HOLD THIS EASY PACE";
             capCol = 0xFFF5C518;
-        } else if (Math.abs(offLine) < 3f || forkSide > 0) {
-            cap = forkSide > 0 ? "WIDE ROAD - KEEP RIGHT OF THE SPIRE" : "ON THE LINE";
+        } else if (Math.abs(offLine) < 3f || forkRoad == RIGHT_ROAD) {
+            cap = forkRoad == RIGHT_ROAD ? "WIDE ROAD - KEEP RIGHT OF THE ROCK" : "ON THE LINE";
             capCol = ACCENT;
         } else if (sensor) {
             cap = offLine > 0 ? "STEER LEFT" : "STEER RIGHT";
@@ -563,25 +953,85 @@ final class CanyonChaseGame extends GameView {
             cap = offLine > 0 ? "EASE OFF TO COME LEFT" : "PULL HARDER TO GO RIGHT";
             capCol = FAINT;
         }
-        bold(c, cap, w / 2f, my + mh + dp(42f), 11f, capCol, Paint.Align.CENTER);
+        if (cap.length() > 0) {
+            bold(c, cap, w / 2f, my + mh + dp(42f), 11f, capCol, Paint.Align.CENTER);
+        }
+        // The race against the rival, and how much canyon is left.
+        if (started && !finished && !over) {
+            float lead = (float) (x - rivalX);
+            label(c, (lead >= 0 ? "LEADING BY " + Math.round(lead) + " m" : "RIVAL AHEAD BY " + Math.round(-lead) + " m")
+                            + "   ·   " + Math.max(0, Math.round(EXIT_METRES - x)) + " m TO THE EXIT   ·   "
+                            + golds + "G " + silvers + "S " + bronzes + "B",
+                    w / 2f, my + mh + dp(58f), 9f, lead >= 0 ? ACCENT : 0xFFE8557F, Paint.Align.CENTER);
+        }
+        if (sessionSeconds < rivalTauntUntil) {
+            bold(c, rivalTaunt, w / 2f, h * 0.34f, 16f, 0xFFFF9ABF, Paint.Align.CENTER);
+        }
         if (sessionSeconds < popupUntil) {
             float rise = (float) (1.6 - (popupUntil - sessionSeconds)) * dp(24f);
             bold(c, popupText, w / 2f, h * 0.5f - rise, 24f, popupColor, Paint.Align.CENTER);
         }
 
         drawPositionBar(c, w, h, offLine, leftLimit, rightLimit, sensor);
+        drawBoostMeter(c, w, h);
+        float mapW = Math.min(dp(230f), w * 0.28f);
+        map.draw(c, dp(16f), dp(20f), mapW, (float) (x / EXIT_METRES), forkChoices,
+                Math.max(5, forksTaken), ROAD_NAMES, unlockScore,
+                (int) (EXIT_METRES / CHECK_METRES) - 1, checkIndex, golds);
 
         float fy = h - dp(12f);
         float col3 = w / 3f;
         stat(c, col3 * 0.5f, fy, Math.round(x) + " m", "RUN");
-        stat(c, col3 * 1.5f, fy, String.valueOf(scrapes), "SCRAPES");
-        stat(c, col3 * 2.5f, fy, bests.has("chase.distance")
-                ? Math.round(bests.get("chase.distance", 0)) + " m" : "--", "BEST");
-        label(c, CanyonFlightGame.Daylight.phaseName(phase), w - dp(14f), dp(22f), 8.5f, 0xFFFFC27A, Paint.Align.RIGHT);
+        stat(c, col3 * 1.5f, fy, String.valueOf(score), "SCORE");
+        stat(c, col3 * 2.5f, fy, bestExitText, "BEST EXIT");
+        label(c, CanyonFlightGame.Daylight.phaseName(phase) + "  ·  " + clock(activeSeconds),
+                w - dp(14f), dp(22f), 8.5f, 0xFFFFC27A, Paint.Align.RIGHT);
+
+        if (finished) {
+            float age = (float) (sessionSeconds - finishAt);
+            map.photoFinish(c, w, h, Math.max(0f, 1f - age / 0.45f), finishTitle, finishMedal,
+                    finishTimeText, finishLine1, finishLine2,
+                    ACCENT, 0xFFE8557F, finishMargin, finishSeconds);
+        }
+    }
+
+    /** The boost meter: charges from clean timing gates, tap to spend them. */
+    private void drawBoostMeter(Canvas c, float w, float h) {
+        float bw = dp(168f);
+        float bh = dp(16f);
+        float bx = dp(16f);
+        float by = h - dp(104f);
+        boostHitX = bx;
+        boostHitY = by;
+        boostHitW = bw;
+        boostHitH = bh;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xAA0A0E14);
+        c.drawRoundRect(bx - dp(8f), by - dp(16f), bx + bw + dp(8f), by + bh + dp(8f), dp(6f), dp(6f), paint);
+        float cell = (bw - dp(4f) * (boostCapacity - 1)) / boostCapacity;
+        for (int i = 0; i < boostCapacity; i++) {
+            float cx = bx + i * (cell + dp(4f));
+            boolean lit = i < boostCharges;
+            paint.setColor(lit ? 0xFFFF8A3D : 0x332A3648);
+            c.drawRoundRect(cx, by, cx + cell, by + bh, dp(3f), dp(3f), paint);
+            if (lit) {
+                Fx.glow(c, cx + cell / 2f, by + bh / 2f, dp(24f), 0x55FF8A3D);
+            }
+        }
+        if (boosting()) {
+            float left = (float) ((boostUntil - sessionSeconds) / (BOOST_PER_CHARGE * boostCapacity));
+            paint.setColor(0xFFFFD36A);
+            c.drawRoundRect(bx, by, bx + bw * Math.max(0f, Math.min(1f, left)), by + bh, dp(3f), dp(3f), paint);
+        }
+        String hint = boosting() ? "BOOSTING" : boostCharges > 0 ? "TAP TO BOOST"
+                : cleanSinceCheck ? "CLEAN - THE NEXT GATE CHARGES THE BOOST" : "ROCK TOUCHED - NO CHARGE THIS GATE";
+        label(c, hint, bx, by - dp(4f), 8.5f,
+                boosting() ? 0xFFFFD36A : boostCharges > 0 ? 0xFFFF8A3D : cleanSinceCheck ? ACCENT : FAINT,
+                Paint.Align.LEFT);
     }
 
     /**
-     * Where you are across the canyon, as a bar: walls, the spire when a fork is near, your
+     * Where you are across the canyon, as a bar: walls, the rock when a fork is near, your
      * craft, and for pace steering the speed that would put you on the line.
      */
     private void drawPositionBar(Canvas c, float w, float h, float offLine, float leftLimit, float rightLimit,
@@ -601,12 +1051,16 @@ final class CanyonChaseGame extends GameView {
         paint.setColor(0xFFD89A3A);
         c.drawRect(bx, by - dp(6f), sl, by + dp(6f), paint);
         c.drawRect(sr, by - dp(6f), bx + bw, by + dp(6f), paint);
-        // The spire's middle, from 120 m before a fork to its end.
-        if (forkSide != 0 || forkStart - x < 120) {
-            float half = SPIRE + 1.5f;
-            paint.setColor(forkSide == 0 ? 0xAAF5C518 : 0xFFD89A3A);
-            c.drawRect(bx + (-half + CANYON_HALF) / span * bw, by - dp(6f),
-                    bx + (half + CANYON_HALF) / span * bw, by + dp(6f), paint);
+        // The rock, from 120 m before a fork to its end.
+        if (forkRoad >= 0 || forkStart - x < 120) {
+            int slabs = forkSlot ? 2 : 1;
+            float half = (forkSlot ? SLOT_HALF : SPIRE) + ROCK_MARGIN;
+            paint.setColor(forkRoad < 0 ? 0xAAF5C518 : 0xFFD89A3A);
+            for (int i = 0; i < slabs; i++) {
+                float off = forkSlot ? (i == 0 ? -SLOT_OFFSET : SLOT_OFFSET) : 0f;
+                c.drawRect(bx + (off - half + CANYON_HALF) / span * bw, by - dp(6f),
+                        bx + (off + half + CANYON_HALF) / span * bw, by + dp(6f), paint);
+            }
         }
         paint.setColor(0x88FFE28A);
         c.drawRect(w / 2f - dp(1f), by - dp(8f), w / 2f + dp(1f), by + dp(8f), paint);
@@ -620,9 +1074,87 @@ final class CanyonChaseGame extends GameView {
         label(c, hint, w / 2f, by - dp(13f), 8f, FAINT, Paint.Align.CENTER);
     }
 
-    /** Two signs at the mouth of the next fork, drawn in perspective as it approaches. */
+    /** Timing arches down the canyon, and the chequered exit at the end of it. */
+    private void drawCheckpoints(Canvas c, float w, float h, float horizon, float camLat) {
+        float k = w * 0.05f;
+        for (int i = 1; i * CHECK_METRES <= EXIT_METRES; i++) {
+            float at = i * CHECK_METRES;
+            float z = (float) (at - x);
+            if (z < 2f || z > SEGMENTS * SEG_LEN * 0.85f) {
+                continue;
+            }
+            boolean exit = at >= EXIT_METRES - 0.5f;
+            float s = FOCAL / z;
+            float y = horizon + s * h * 0.34f;
+            float cc = centreAt(at) - camLat;
+            float lx = w / 2f + (cc - leftWall(at)) * s * k;
+            float rx = w / 2f + (cc + CANYON_HALF) * s * k;
+            float top = y - s * h * 0.62f;
+            paint.setStyle(Paint.Style.FILL);
+            int col = exit ? 0xFFF2F2EE : 0xFFF5C518;
+            // Posts and lintel.
+            float post = Math.max(dp(2f), s * dp(9f));
+            paint.setColor(col);
+            c.drawRect(lx - post, top, lx + post, y, paint);
+            c.drawRect(rx - post, top, rx + post, y, paint);
+            c.drawRect(lx, top - post * 2f, rx, top + post, paint);
+            // A light curtain to fly through.
+            paint.setColor((col & 0x00FFFFFF) | 0x22000000);
+            c.drawRect(lx, top, rx, y, paint);
+            if (exit) {
+                for (int q = 0; q * (rx - lx) / 10f < rx - lx; q++) {
+                    paint.setColor((q % 2 == 0) ? 0xFFF2F2EE : 0xFF1B1526);
+                    float qx = lx + q * (rx - lx) / 10f;
+                    c.drawRect(qx, top - post * 4f, qx + (rx - lx) / 10f, top - post * 2f, paint);
+                }
+                if (s * 26f > 7f) {
+                    bold(c, "CANYON EXIT", (lx + rx) / 2f, top - post * 6f, Math.min(20f, s * 26f), 0xFFF2F2EE,
+                            Paint.Align.CENTER);
+                }
+            } else if (s * 22f > 7f) {
+                bold(c, "CP " + i, (lx + rx) / 2f, top - post * 3f, Math.min(18f, s * 22f), col, Paint.Align.CENTER);
+            }
+        }
+    }
+
+    /** The rival craft ahead of you, drawn in perspective, with whatever it is shouting back. */
+    private void drawRival(Canvas c, float w, float h, float horizon, float camLat) {
+        float z = (float) (rivalX - x);
+        if (z < 2.5f || z > SEGMENTS * SEG_LEN * 0.9f) {
+            return;
+        }
+        float s = FOCAL / z;
+        float k = w * 0.05f;
+        // It runs the racing line, weaving a little.
+        float lat = (float) Math.sin(rivalX / 33.0) * 4.5f;
+        float rx = w / 2f + (centreAt(rivalX) + lat - camLat) * s * k;
+        float ry = horizon + s * h * 0.34f - s * h * 0.06f;
+        float size = Math.max(dp(5f), s * dp(34f));
+        paint.setStyle(Paint.Style.FILL);
+        Fx.glow(c, rx, ry, size * 2.2f, 0x44E8557F);
+        paint.setColor(0xFFE8557F);
+        path.reset();
+        path.moveTo(rx, ry - size);
+        path.lineTo(rx - size * 1.3f, ry + size * 0.55f);
+        path.lineTo(rx - size * 0.4f, ry + size * 0.22f);
+        path.lineTo(rx, ry + size * 0.62f);
+        path.lineTo(rx + size * 0.4f, ry + size * 0.22f);
+        path.lineTo(rx + size * 1.3f, ry + size * 0.55f);
+        path.close();
+        c.drawPath(path, paint);
+        paint.setColor(0xFFFFD36A);
+        c.drawRect(rx - size * 0.22f, ry + size * 0.55f, rx + size * 0.22f, ry + size * 1.1f, paint);
+        // Dust it kicks up.
+        paint.setColor(0x55C89A6A);
+        c.drawOval(rx - size * 1.6f, ry + size * 0.5f, rx + size * 1.6f, ry + size * 1.4f, paint);
+        if (size > dp(9f)) {
+            label(c, Math.round(z) + " m", rx, ry - size * 1.4f, 9f, 0xFFFF9ABF, Paint.Align.CENTER);
+        }
+    }
+
+    /** Signs at the mouth of the next fork, drawn in perspective as it approaches. */
     private void drawForkSigns(Canvas c, float w, float h, float horizon, float camLat) {
-        if (forkSide != 0) {
+        if (forkRoad >= 0) {
             return;
         }
         float z = (float) (forkStart - x);
@@ -633,22 +1165,25 @@ final class CanyonChaseGame extends GameView {
         float k = w * 0.05f;
         float y = horizon + s * h * 0.34f - s * h * 0.35f;
         float cx = w / 2f + (centreAt(forkStart) - camLat) * s * k;
-        float off = (SPIRE + 7f) * s * k;
         float size = Math.max(7f, Math.min(20f, s * 26f));
         float bwid = dp(size * 7f);
         float bht = dp(size * 1.9f);
-        for (int side = -1; side <= 1; side += 2) {
-            float sx = cx + side * off;
+        int roads = forkSlot ? 3 : 2;
+        for (int r = 0; r < roads; r++) {
+            float sx = cx + roadCentre(r) * s * k;
+            int col = r == LEFT_ROAD ? 0xFFF5C518 : r == SLOT_ROAD ? 0xFFFF8A3D : ACCENT;
+            String text = r == LEFT_ROAD ? "< SHORTCUT +12m"
+                    : r == SLOT_ROAD ? "SLOT +26m" : "WIDE ROAD >";
+            float bwr = r == SLOT_ROAD ? bwid * 0.62f : bwid;
+            paint.setStyle(Paint.Style.FILL);
             paint.setColor(0xDD1A1016);
-            c.drawRoundRect(sx - bwid / 2f, y - bht / 2f, sx + bwid / 2f, y + bht / 2f, dp(4f), dp(4f), paint);
-            int col = side < 0 ? 0xFFF5C518 : ACCENT;
+            c.drawRoundRect(sx - bwr / 2f, y - bht / 2f, sx + bwr / 2f, y + bht / 2f, dp(4f), dp(4f), paint);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(Math.max(1f, dp(size * 0.12f)));
             paint.setColor(col);
-            c.drawRoundRect(sx - bwid / 2f, y - bht / 2f, sx + bwid / 2f, y + bht / 2f, dp(4f), dp(4f), paint);
+            c.drawRoundRect(sx - bwr / 2f, y - bht / 2f, sx + bwr / 2f, y + bht / 2f, dp(4f), dp(4f), paint);
             paint.setStyle(Paint.Style.FILL);
-            bold(c, side < 0 ? "< SHORTCUT +12m" : "WIDE ROAD >", sx, y + dp(size * 0.35f), size, col,
-                    Paint.Align.CENTER);
+            bold(c, text, sx, y + dp(size * 0.35f), r == SLOT_ROAD ? size * 0.85f : size, col, Paint.Align.CENTER);
         }
     }
 

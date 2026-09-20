@@ -32,6 +32,26 @@ import android.view.MotionEvent;
  *       over the race, worth up to about four percent. Tap a lane (or tilt the handle sensor) to move
  *       into it; a crew already there swaps into yours. Recordings do not feel today's water.</li>
  * </ul>
+ *
+ * <p>The second round of RACE upgrades (3.22.x), again in the base so every opponent gets them:
+ * <ul>
+ *   <li><b>A handicap that learns.</b> The field starts a few metres up the course (or behind it) so
+ *       the race is decided in the last minute rather than in the first. The stagger is carried in
+ *       {@code race.hcp.*} and moves by 60% of the margin of the last race, clamped to -15%/+30% of
+ *       the distance. It is shown on a chip you can tap off, and it never touches your own metres, so
+ *       {@code time.<m>} and the recordings stay comparable.</li>
+ *   <li><b>A best-of-three series across the week.</b> Every finished race scores a point; first to
+ *       two takes the week. Pips on the HUD, a scoreboard at the finish, and Monday clears it.</li>
+ *   <li><b>Push prompts.</b> A crew lifting 5% above its own recent pace for more than a second is
+ *       "making a move": an 18 s window opens with a bar that fills as you answer it. Matching the
+ *       move counts; ignoring it does not.</li>
+ *   <li><b>Split-by-split afterwards.</b> The finish has a second page: every 500 m against the
+ *       reference crew with a gain/loss bar, where the race was won and lost, and a 12x replay of the
+ *       two boats along the course.</li>
+ *   <li><b>Beat a crew and they join yours.</b> Recruited crews row in your boat (drawn, and they
+ *       shout at the pushes and the sprint) and each one hands the field another 12 m of stagger, so
+ *       the racing stays honest as the crew grows. Kept in {@code race.crew}.</li>
+ * </ul>
  */
 class PaceBoatGame extends GameView {
 
@@ -59,6 +79,8 @@ class PaceBoatGame extends GameView {
     protected static final int SAY_CHATTER = 6;
     protected static final int SAY_WON = 7;
     protected static final int SAY_LOST = 8;
+    /** A crew announcing its own move, when a push prompt opens. */
+    protected static final int SAY_MOVE = 9;
 
     /** "+2.8%" style tags for the lane boost, -5.0% to +5.0% in tenths, built once. */
     private static final String[] BOOST_TEXT = new String[101];
@@ -144,6 +166,73 @@ class PaceBoatGame extends GameView {
     private int bubbleCrew = -1;
     private double bubbleUntil;
     private double lastTauntAt = -100;
+
+    /* ---------- handicap, series, pushes, crew ---------- */
+
+    /** What one recruited crew is worth to the field's stagger. Three mates = 36 m, about 9 s. */
+    private static final float MATE_METRES = 12f;
+    private static final int MAX_MATES = 3;
+    private static final float PUSH_SECONDS = 18f;
+    private static final int[] MATE_COLORS = {0xFFB48CFF, 0xFFF0655D, 0xFFF5C518};
+    private static final String[] MATE_LINES = {
+            "WITH YOU!", "SEND IT!", "LENGTH! LENGTH!", "WE'VE GOT THIS.", "LEGS NOW!", "HOLD THE RATIO!"};
+
+    private boolean handicapOn = true;
+    /** Metres the field starts up the course. Negative puts them behind the line. */
+    private float handicapMetres;
+    private float mateMetres;
+    private float handicapShown;
+    private float handicapNext;
+    private float nextFieldMetres;
+    /**
+     * The first 500 m marker the field actually rows through. A learned stagger at 2000 m or 5000 m
+     * can be more than 500 m, and a marker behind the field's start line was never raced - timing it
+     * at the gun made the first split read "+120 s" and the analysis blame a 500 nobody rowed.
+     */
+    private int fieldFirstSplit = 1;
+
+    private long seriesWeek;
+    private int seriesYou;
+    private int seriesThem;
+    private int seriesPipPop = -1;
+    private boolean seriesPipMine;
+    private boolean seriesDecided;
+    private String seriesLine = "";
+
+    private final double[] crewSpeedAvg = new double[MAX_CREWS];
+    private final double[] crewMoveFor = new double[MAX_CREWS];
+    private double yourSpeedAvg;
+    private int pushCrew = -1;
+    private double pushUntil;
+    private double pushBase;
+    private double pushSum;
+    private double pushTime;
+    private double pushCooldownUntil;
+    private int pushesCalled;
+    private int pushesAnswered;
+    private String pushResult = "";
+    private String pushTitle = "";
+    private double pushResultUntil;
+    private boolean pushResultGood;
+
+    private final java.util.ArrayList<String> mates = new java.util.ArrayList<>();
+    private String mateStrip = "";
+    private String recruited;
+    private double recruitAnim;
+    private String mateBubble = "";
+    private double mateBubbleUntil;
+
+    // The finish has two pages: the result, then the split-by-split analysis.
+    private int finishPage;
+    private float analysisT;
+    private double replayT;
+    private int analysisCrew = -1;
+    private final double[] analysisSplit = new double[MAX_SPLITS + 1];
+    private final boolean[] analysisProjected = new boolean[MAX_SPLITS + 1];
+    /** Segment k began behind the field's start line, so there is nothing to compare it with. */
+    private final boolean[] analysisPreStart = new boolean[MAX_SPLITS + 1];
+    private String analysisWon = "";
+    private String analysisLost = "";
 
     // Results, built once at the finish.
     private int finishPlace;
@@ -252,6 +341,158 @@ class PaceBoatGame extends GameView {
             currentAmp[l] = 0.6f + (float) Math.random() * 0.4f;
         }
         windSeed = Math.random() * Math.PI * 2;
+
+        // The handicap, the crew and the week's series.
+        loadMates();
+        handicapMetres = clampHandicap(bests.get(handicapKey(), 0f));
+        handicapNext = handicapMetres;
+        mateMetres = mates.size() * MATE_METRES;
+        handicapShown = handicap();
+        syncHandicap();
+        // The field's timing starts at the first marker ahead of its start line.
+        for (int i = 0; i < MAX_CREWS; i++) {
+            crewNextSplit[i] = fieldFirstSplit;
+        }
+        loadSeries();
+        finishPage = 0;
+        analysisT = 0f;
+        replayT = 0;
+        analysisCrew = -1;
+        recruited = null;
+        recruitAnim = 0;
+        mateBubbleUntil = 0;
+        pushCrew = -1;
+        pushResultUntil = 0;
+        pushCooldownUntil = 0;
+        pushesCalled = 0;
+        pushesAnswered = 0;
+        yourSpeedAvg = profile.typicalSpeed();
+        for (int i = 0; i < MAX_CREWS; i++) {
+            crewSpeedAvg[i] = 0;
+            crewMoveFor[i] = 0;
+        }
+        for (int k = 0; k <= MAX_SPLITS; k++) {
+            analysisSplit[k] = -1;
+            analysisProjected[k] = false;
+            analysisPreStart[k] = false;
+        }
+    }
+
+    /**
+     * Re-derives everything that depends on the size of the head start. Called when the race is set
+     * up and whenever the chip changes it, so nothing is left describing a stagger that is no longer
+     * being raced.
+     */
+    private void syncHandicap() {
+        float start = Math.max(0f, handicap());
+        fieldFirstSplit = Math.min(MAX_SPLITS + 1, (int) Math.floor(start / 500.0) + 1);
+        onHandicapChanged();
+    }
+
+    /** The head start changed: subclasses re-solve anything they worked out from it. */
+    protected void onHandicapChanged() {
+    }
+
+    /** Where the learned stagger is kept. Subclasses split it per opponent. */
+    protected String handicapKey() {
+        return "race.hcp." + raceMeters;
+    }
+
+    /** Where the week's best-of-three is kept. Subclasses split it per opponent. */
+    protected String seriesKey() {
+        return "race.series";
+    }
+
+    /** True if beating this crew should recruit it. */
+    protected boolean crewRecruitable(int i) {
+        return false;
+    }
+
+    /**
+     * Metres of stagger the field starts with: what the last races taught, plus 12 m for every crew
+     * that has joined yours. It is added to the crews' distance only - your own metres are untouched,
+     * so a handicapped race still sets an honest {@code time.<m>}.
+     */
+    protected final float handicap() {
+        return handicapOn ? handicapMetres + mateMetres : 0f;
+    }
+
+    private float clampHandicap(float v) {
+        return Math.max(-raceMeters * 0.15f, Math.min(raceMeters * 0.30f, v));
+    }
+
+    /** Monday-start week number. Epoch day 0 was a Thursday; plain arithmetic, as Android 9 has no floorMod(long,int). */
+    private static long weekNow() {
+        long now = System.currentTimeMillis();
+        long day = (now + java.util.TimeZone.getDefault().getOffset(now)) / 86400000L;
+        long d = day + 3;
+        return d >= 0 ? d / 7 : (d - 6) / 7;
+    }
+
+    private void loadMates() {
+        mates.clear();
+        String saved = bests.getString("race.crew");
+        if (saved != null && !saved.isEmpty()) {
+            for (String s : saved.split(",")) {
+                if (!s.isEmpty() && mates.size() < MAX_MATES) {
+                    mates.add(s);
+                }
+            }
+        }
+        buildMateStrip();
+    }
+
+    private void saveMates() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < mates.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(mates.get(i));
+        }
+        bests.putString("race.crew", sb.toString());
+        buildMateStrip();
+    }
+
+    /** Built when the crew changes, never in a frame. */
+    private void buildMateStrip() {
+        if (mates.isEmpty()) {
+            mateStrip = "";
+            return;
+        }
+        StringBuilder sb = new StringBuilder("YOUR CREW: ");
+        for (int i = 0; i < mates.size(); i++) {
+            if (i > 0) {
+                sb.append("  ·  ");
+            }
+            sb.append(mates.get(i));
+        }
+        mateStrip = sb.toString();
+    }
+
+    private void loadSeries() {
+        seriesWeek = weekNow();
+        seriesYou = 0;
+        seriesThem = 0;
+        String s = bests.getString(seriesKey());
+        if (s != null) {
+            String[] p = s.split("\\|");
+            if (p.length == 3) {
+                try {
+                    if (Long.parseLong(p[0]) == seriesWeek) {
+                        seriesYou = Math.max(0, Math.min(3, Integer.parseInt(p[1])));
+                        seriesThem = Math.max(0, Math.min(3, Integer.parseInt(p[2])));
+                    }
+                } catch (NumberFormatException ignored) {
+                    // A key written by an older build: start the week fresh.
+                }
+            }
+        }
+        seriesDecided = seriesYou >= 2 || seriesThem >= 2;
+        seriesPipPop = -1;
+        seriesLine = seriesDecided
+                ? (seriesYou >= 2 ? "SERIES WON THIS WEEK" : "SERIES LOST - MONDAY RESETS IT")
+                : "BEST OF 3  ·  RACE " + Math.min(3, seriesYou + seriesThem + 1);
     }
 
     @Override
@@ -327,9 +568,9 @@ class PaceBoatGame extends GameView {
         return null;
     }
 
-    /** Where the crew is, water included. */
+    /** Where the crew is: its own metres, the water it has felt, and the handicap it started with. */
     protected final double crewDistance(int i) {
-        return crewMeters(i) + crewWater[i];
+        return crewMeters(i) + crewWater[i] + handicap();
     }
 
     /** When the crew crossed (or will cross) the line. Recordings override with the recorded time. */
@@ -480,8 +721,11 @@ class PaceBoatGame extends GameView {
         String delta;
         int color;
         if (crew < 0) {
-            delta = "LEAD";
-            color = ACCENT;
+            // No crew time here is one of two different things: you are genuinely first through the
+            // marker, or the field started past it and never raced this one.
+            boolean headStart = k < fieldFirstSplit;
+            delta = headStart ? "HEAD START" : "LEAD";
+            color = headStart ? DIM : ACCENT;
         } else {
             double d = youSplit[k] - crew;
             delta = String.format(java.util.Locale.US, "%s%.1f s", d <= 0 ? "−" : "+", Math.abs(d));
@@ -491,7 +735,8 @@ class PaceBoatGame extends GameView {
                 PersonalBests.formatPace((float) seg), delta);
         splitRowColor[k] = color;
         if (k == splitBannerSplit && sessionSeconds < splitBannerUntil) {
-            splitBannerSub = crew < 0 ? "FIRST THROUGH THE MARKER"
+            splitBannerSub = crew < 0
+                    ? (k < fieldFirstSplit ? "THE FIELD STARTED PAST THIS MARKER" : "FIRST THROUGH THE MARKER")
                     : (youSplit[k] <= crew ? "AHEAD OF " : "BEHIND ") + crewName(whoScratch[0]) + " BY "
                     + String.format(java.util.Locale.US, "%.1f s", Math.abs(youSplit[k] - crew));
         }
@@ -503,7 +748,21 @@ class PaceBoatGame extends GameView {
     public boolean onTouchEvent(MotionEvent event) {
         if (event.getAction() == MotionEvent.ACTION_DOWN) {
             if (state == State.FINISHED) {
-                start();
+                // First tap opens the split-by-split page, the second starts the next race.
+                if (finishPage == 0 && splitCount() >= 1) {
+                    finishPage = 1;
+                    analysisT = 0f;
+                    replayT = 0;
+                } else {
+                    start();
+                }
+                return true;
+            }
+            // The handicap chip: tap to race level, tap again to put the stagger back.
+            if (event.getY() < dp(42f) && Math.abs(event.getX() - getWidth() * 0.42f) < dp(80f)) {
+                handicapOn = !handicapOn;
+                // A recording's finish is solved from the head start, so it has to be solved again.
+                syncHandicap();
                 return true;
             }
             float h = getHeight();
@@ -674,6 +933,7 @@ class PaceBoatGame extends GameView {
         // Your own oars follow your own stroke, set here rather than inherited.
         river.setStrokePhase(strokePhase());
         river.drawBoat(c, yourX, laneYou, boatLen, ACCENT, speed, false);
+        drawMates(c, yourX, laneYou);
         river.drawSpray(c);
         Fx.glow(c, yourX, laneYou, dp(50f), 0x2A35D0BA);
 
@@ -688,6 +948,7 @@ class PaceBoatGame extends GameView {
                     crewIsRecording(i) ? DIM : crewColor(i), Paint.Align.CENTER);
         }
         drawBubble(c, w, waterTop, waterBottom);
+        drawMateBubble(c, yourX, laneYou);
         drawLaneTags(c, waterTop, waterBottom);
         if (sessionSeconds < calloutUntil) {
             bold(c, callout, w / 2f, waterTop + span * 0.5f, 30f, calloutColor, Paint.Align.CENTER);
@@ -697,6 +958,9 @@ class PaceBoatGame extends GameView {
         }
 
         drawHud(c, w, h, hudH, speed, gap, lead);
+        drawRaceChips(c, w, dt);
+        // Last in the HUD band, so nothing draws over a live push call.
+        drawPush(c, w, hudH);
 
         // Progress bar along the top of the water.
         float pct = Math.min(1f, (float) (raceDistance() / raceMeters));
@@ -704,8 +968,10 @@ class PaceBoatGame extends GameView {
         accentPaint.setStrokeWidth(dp(3f));
         c.drawLine(0, waterTop, w * pct, waterTop, accentPaint);
 
-        if (state == State.FINISHED) {
-            drawFinish(c, w, h);
+        if (state == State.FINISHED && finishPage == 1) {
+            drawSplitAnalysis(c, w, h, dt);
+        } else if (state == State.FINISHED) {
+            drawFinish(c, w, h, dt);
             if (resultWon) {
                 if (Math.random() < 0.8) {
                     fx.spawn((float) Math.random() * w, -dp(10f), (float) (Math.random() - 0.5) * dp(80f),
@@ -773,7 +1039,9 @@ class PaceBoatGame extends GameView {
             if (near >= 0) {
                 say(near, SAY_SPRINT, true);
             }
+            sayMate(3);
         }
+        stepPushes(dt, crews, speed, you);
         // Passes, one crew at a time, with hysteresis so a boat sitting level does not chatter.
         for (int i = 0; i < crews; i++) {
             double g = you - crewDistance(i);
@@ -796,6 +1064,90 @@ class PaceBoatGame extends GameView {
             state = State.FINISHED;
             onRaceFinished(finishTime, resultWon);
         }
+    }
+
+    /**
+     * A crew making a move, and whether you answer it.
+     *
+     * <p>A move is a crew holding 5% above its own eight-second average for more than a second -
+     * measured against itself, so a fast crew does not read as permanently attacking. The window is
+     * 18 s and is scored on your own speed over it against your twelve-second average at the moment
+     * it opened, which is the only fair comparison when every rower's numbers are different.
+     */
+    private void stepPushes(float dt, int crews, float speed, double you) {
+        yourSpeedAvg += (speed - yourSpeedAvg) * Math.min(1.0, dt / 12.0);
+        for (int i = 0; i < crews; i++) {
+            double cs = crewSpeed(i);
+            if (crewSpeedAvg[i] <= 0) {
+                crewSpeedAvg[i] = cs;
+            }
+            crewSpeedAvg[i] += (cs - crewSpeedAvg[i]) * Math.min(1.0, dt / 8.0);
+            boolean moving = cs > 0.5 && cs > crewSpeedAvg[i] * 1.05 && crewFinish[i] < 0;
+            // Capped: without it a crew that has been lifting through a long cooldown fires a push
+            // the instant the cooldown lapses, however long ago the move actually was.
+            crewMoveFor[i] = moving ? Math.min(3.0, crewMoveFor[i] + dt) : Math.max(0, crewMoveFor[i] - dt * 2);
+            if (pushCrew < 0 && crewMoveFor[i] > 1.2 && sessionSeconds > pushCooldownUntil
+                    && !sprinting && you > 60 && raceMeters - you > 150) {
+                startPush(i);
+            }
+        }
+        if (pushCrew >= 0) {
+            pushSum += speed * dt;
+            pushTime += dt;
+            if (sessionSeconds >= pushUntil || sprinting || crewFinish[pushCrew] >= 0) {
+                endPush();
+            }
+        }
+    }
+
+    private void startPush(int crew) {
+        pushCrew = crew;
+        pushUntil = sessionSeconds + PUSH_SECONDS;
+        pushBase = Math.max(0.8, yourSpeedAvg);
+        pushSum = 0;
+        pushTime = 0;
+        pushesCalled++;
+        crewMoveFor[crew] = 0;
+        pushResultUntil = 0;
+        pushTitle = crewName(crew) + " ARE MOVING  -  PUSH!";
+        say(crew, SAY_MOVE, true);
+        sayMate(pushesCalled);
+        if (crewX[crew] > 0f) {
+            fx.burst(crewX[crew], lastYouY, 20, dp(150f), 0.8f, dp(2.8f), crewColor(crew), true);
+        }
+    }
+
+    private void endPush() {
+        // Cut short by the sprint or by the crew finishing: too little of the window to judge, so it
+        // is withdrawn rather than scored as a miss.
+        if (pushTime < 4.0) {
+            pushCrew = -1;
+            pushesCalled = Math.max(0, pushesCalled - 1);
+            pushCooldownUntil = sessionSeconds + 10;
+            return;
+        }
+        double avg = pushSum / pushTime;
+        pushResultGood = avg >= pushBase * 1.02;
+        if (pushResultGood) {
+            pushesAnswered++;
+            pushResult = "PUSH ANSWERED  ·  " + pace(avg);
+            fx.burst(lastYouX, lastYouY, 26, dp(180f), 0.9f, dp(3f), 0xFF35D0BA, true);
+            sayMate(pushesAnswered + 2);
+        } else {
+            pushResult = "THE MOVE WENT UNANSWERED";
+        }
+        pushResultUntil = sessionSeconds + 2.8;
+        pushCooldownUntil = sessionSeconds + 22;
+        pushCrew = -1;
+    }
+
+    /** One of your own crew shouting from your boat. Never talks over itself. */
+    private void sayMate(int seed) {
+        if (mates.isEmpty() || sessionSeconds < mateBubbleUntil) {
+            return;
+        }
+        mateBubble = MATE_LINES[Math.abs(seed * 7 + mates.size() * 3) % MATE_LINES.length];
+        mateBubbleUntil = sessionSeconds + 2.2;
     }
 
     private int nearestCrew(double you) {
@@ -929,6 +1281,160 @@ class PaceBoatGame extends GameView {
         }
     }
 
+    /** The crews that have joined you, rowing behind you in your own boat. */
+    private void drawMates(Canvas c, float x, float y) {
+        int n = mates.size();
+        if (n == 0) {
+            return;
+        }
+        float ph = strokePhase();
+        scenePaint.setStyle(Paint.Style.FILL);
+        for (int m = 0; m < n; m++) {
+            float mx = x - dp(24f) - m * dp(19f) + ph * dp(5f);
+            float my = y - dp(1f) + (float) Math.sin(sessionSeconds * 3 + m) * dp(1.5f);
+            // The oar first, so the rower sits over it.
+            float a = (float) (Math.PI * (0.22 + 0.48 * ph));
+            scenePaint.setStrokeWidth(dp(2f));
+            scenePaint.setStyle(Paint.Style.STROKE);
+            scenePaint.setColor(0xAAE6EDF7);
+            c.drawLine(mx, my, mx - (float) Math.cos(a) * dp(17f), my + (float) Math.sin(a) * dp(17f), scenePaint);
+            scenePaint.setStyle(Paint.Style.FILL);
+            scenePaint.setColor(0xFF0B1322);
+            c.drawCircle(mx, my, dp(6.5f), scenePaint);
+            scenePaint.setColor(MATE_COLORS[m % MATE_COLORS.length]);
+            c.drawCircle(mx, my, dp(5f), scenePaint);
+        }
+    }
+
+    /** A shout from your own boat: your crew, at the pushes and the sprint. */
+    private void drawMateBubble(Canvas c, float x, float y) {
+        if (mates.isEmpty() || sessionSeconds >= mateBubbleUntil || state == State.FINISHED) {
+            return;
+        }
+        float bx = x - dp(40f);
+        float by = y - dp(46f);
+        float half = bubblePaint.measureText(mateBubble) / 2f + dp(9f);
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(0xF2E8FBF6);
+        rect.set(bx - half, by - dp(22f), bx + half, by);
+        c.drawRoundRect(rect, dp(9f), dp(9f), scenePaint);
+        c.drawCircle(bx + dp(10f), by + dp(4f), dp(4f), scenePaint);
+        scenePaint.setStyle(Paint.Style.STROKE);
+        scenePaint.setStrokeWidth(dp(2f));
+        scenePaint.setColor(ACCENT);
+        c.drawRoundRect(rect, dp(9f), dp(9f), scenePaint);
+        scenePaint.setStyle(Paint.Style.FILL);
+        bubblePaint.setColor(0xFF10312A);
+        c.drawText(mateBubble, bx, by - dp(7f), bubblePaint);
+    }
+
+    /**
+     * The push prompt: a crew is making a move, and you have eighteen seconds to answer it. The bar
+     * fills from your own average at the moment it opened to four percent above it.
+     */
+    private void drawPush(Canvas c, float w, float hudH) {
+        if (state != State.RACING) {
+            return;
+        }
+        float cx = w / 2f;
+        // Sits in the band between the gap figure and the water, clear of the boats.
+        float y = hudH - dp(58f);
+        if (pushCrew < 0) {
+            if (sessionSeconds < pushResultUntil) {
+                bold(c, pushResult, cx, y + dp(20f), 16f, pushResultGood ? ACCENT : BAD, Paint.Align.CENTER);
+            }
+            return;
+        }
+        int crew = Math.min(pushCrew, crewCount() - 1);
+        float left = (float) Math.max(0, pushUntil - sessionSeconds);
+        float avg = pushTime > 0.3 ? (float) (pushSum / pushTime) : 0f;
+        float fill = Math.max(0f, Math.min(1f, (float) ((avg / pushBase - 1.0) / 0.04)));
+        float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 9);
+        rect.set(cx - dp(165f), y, cx + dp(165f), y + dp(54f));
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(0xD90A0E14);
+        c.drawRoundRect(rect, dp(10f), dp(10f), scenePaint);
+        scenePaint.setStyle(Paint.Style.STROKE);
+        scenePaint.setStrokeWidth(dp(2f));
+        scenePaint.setColor((((int) (130 + 120 * pulse)) << 24) | (crewColor(crew) & 0x00FFFFFF));
+        c.drawRoundRect(rect, dp(10f), dp(10f), scenePaint);
+        scenePaint.setStyle(Paint.Style.FILL);
+        bold(c, pushTitle, cx, y + dp(17f), 15f * (1f + 0.03f * pulse), crewColor(crew), Paint.Align.CENTER);
+        float bw = dp(290f);
+        float bx = cx - bw / 2f;
+        float by = y + dp(25f);
+        scenePaint.setColor(0x44FFFFFF);
+        c.drawRect(bx, by, bx + bw, by + dp(8f), scenePaint);
+        scenePaint.setColor(fill >= 1f ? 0xFF35D0BA : fill > 0.4f ? 0xFFF5C518 : 0xFFF0655D);
+        c.drawRect(bx, by, bx + bw * fill, by + dp(8f), scenePaint);
+        // The window running out, under the response bar.
+        scenePaint.setColor(0x66FFFFFF);
+        c.drawRect(bx, by + dp(11f), bx + bw * (left / PUSH_SECONDS), by + dp(13f), scenePaint);
+        label(c, fill >= 1f ? "THAT'S IT - HOLD IT" : "LIFT YOUR SPEED  ·  " + Math.round(left) + " s",
+              cx, y + dp(49f), 9.5f, TEXT, Paint.Align.CENTER);
+    }
+
+    /** The handicap chip, the week's series pips and the crew strip, across the top of the HUD. */
+    private void drawRaceChips(Canvas c, float w, float dt) {
+        if (state == State.FINISHED) {
+            return;
+        }
+        float cx = w * 0.42f;
+        float y0 = dp(8f);
+        handicapShown += (handicap() - handicapShown) * Math.min(1f, 4f * dt);
+        rect.set(cx - dp(78f), y0, cx + dp(78f), y0 + dp(30f));
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(handicapOn ? 0xCC0E2630 : 0xAA161A22);
+        c.drawRoundRect(rect, dp(8f), dp(8f), scenePaint);
+        scenePaint.setStyle(Paint.Style.STROKE);
+        scenePaint.setStrokeWidth(dp(1.5f));
+        scenePaint.setColor(handicapOn ? 0x8835D0BA : 0x554A5568);
+        c.drawRoundRect(rect, dp(8f), dp(8f), scenePaint);
+        scenePaint.setStyle(Paint.Style.FILL);
+        String v = !handicapOn ? "LEVEL" : String.format(java.util.Locale.US, "%s%.0f m",
+                handicapShown >= 0 ? "+" : "−", Math.abs(handicapShown));
+        bold(c, v, cx, y0 + dp(15f), 13f, handicapOn ? (handicap() >= 0 ? WARN : ACCENT) : DIM, Paint.Align.CENTER);
+        label(c, handicapOn ? "FIELD'S HANDICAP  ·  TAP" : "HANDICAP OFF  ·  TAP", cx, y0 + dp(26f), 8f,
+                FAINT, Paint.Align.CENTER);
+
+        // Best of three, this week.
+        float sx = w * 0.58f;
+        drawSeriesPips(c, sx, y0 + dp(13f), false);
+        label(c, seriesLine, sx, y0 + dp(26f), 8f, seriesDecided ? (seriesYou >= 2 ? ACCENT : BAD) : FAINT,
+                Paint.Align.CENTER);
+        if (!mateStrip.isEmpty()) {
+            label(c, mateStrip, cx, y0 + dp(38f), 8.5f, ACCENT, Paint.Align.CENTER);
+        }
+    }
+
+    /** YOU ●●○ against THEM ●○○, with the pip just won popping at the finish. */
+    private void drawSeriesPips(Canvas c, float cx, float y, boolean big) {
+        float r = big ? dp(8f) : dp(4.5f);
+        float step = big ? dp(22f) : dp(12f);
+        float inset = big ? dp(46f) : dp(26f);
+        label(c, "YOU", cx - inset - step * 2.6f, y + r * 0.6f, big ? 12f : 8f, DIM, Paint.Align.RIGHT);
+        label(c, "FIELD", cx + inset + step * 2.6f, y + r * 0.6f, big ? 12f : 8f, DIM, Paint.Align.LEFT);
+        scenePaint.setStyle(Paint.Style.FILL);
+        for (int k = 0; k < 3; k++) {
+            for (int side = 0; side < 2; side++) {
+                boolean won = side == 0 ? k < seriesYou : k < seriesThem;
+                float x = side == 0 ? cx - inset - step * (2 - k) : cx + inset + step * k;
+                boolean pop = state == State.FINISHED && seriesPipPop == k && (side == 0) == seriesPipMine
+                        && won;
+                float rr = pop ? r * (1f + 0.35f * (float) Math.abs(Math.sin(sessionSeconds * 6))) : r;
+                scenePaint.setColor(won ? (side == 0 ? ACCENT : BAD) : 0x33FFFFFF);
+                c.drawCircle(x, y, rr, scenePaint);
+                if (!won) {
+                    scenePaint.setStyle(Paint.Style.STROKE);
+                    scenePaint.setStrokeWidth(dp(1.2f));
+                    scenePaint.setColor(0x55FFFFFF);
+                    c.drawCircle(x, y, rr, scenePaint);
+                    scenePaint.setStyle(Paint.Style.FILL);
+                }
+            }
+        }
+    }
+
     /** The last 250 m: gold pulses at the lane edges and speed lines once you are pushing. */
     private void drawSprintWater(Canvas c, float w, float waterTop, float waterBottom, float speed) {
         sprintFlash = Math.max(0f, sprintFlash - 0.02f);
@@ -969,7 +1475,9 @@ class PaceBoatGame extends GameView {
 
         if (sprinting && state == State.RACING) {
             drawSprintHud(c, w, hudH, speed);
-        } else if (sessionSeconds < splitBannerUntil && state == State.RACING) {
+        } else if (sessionSeconds < splitBannerUntil && state == State.RACING
+                // The push panel is drawn last and lands in this same band: a live call owns it.
+                && pushCrew < 0 && sessionSeconds >= pushResultUntil) {
             bold(c, splitBanner, w / 2f, hudH * 0.55f + dp(46f), 16f, WARN, Paint.Align.CENTER);
             label(c, splitBannerSub, w / 2f, hudH * 0.55f + dp(62f), 10f, TEXT, Paint.Align.CENTER);
         }
@@ -1157,9 +1665,173 @@ class PaceBoatGame extends GameView {
                 resultQuote = crewName(speaker) + ":  \"" + line + "\"";
             }
         }
+        if (pushCrew >= 0) {
+            endPush();
+        }
+        scoreSeries();
+        adjustHandicap(crews);
+        recruit(crews);
+        // What the field will start with next time: the learned stagger plus the crew, the new mate
+        // included. mateMetres itself is left alone so this race's positions and replay do not move.
+        nextFieldMetres = handicapNext + mates.size() * MATE_METRES;
+        buildAnalysis(crews);
     }
 
-    private void drawFinish(Canvas c, float w, float h) {
+    /* ---------- the week's best-of-three ---------- */
+
+    private void scoreSeries() {
+        if (seriesDecided) {
+            return;
+        }
+        if (resultWon) {
+            seriesYou++;
+            seriesPipPop = seriesYou - 1;
+            seriesPipMine = true;
+        } else {
+            seriesThem++;
+            seriesPipPop = seriesThem - 1;
+            seriesPipMine = false;
+        }
+        bests.putString(seriesKey(), seriesWeek + "|" + seriesYou + "|" + seriesThem);
+        seriesDecided = seriesYou >= 2 || seriesThem >= 2;
+        if (seriesDecided) {
+            if (seriesYou >= 2) {
+                bests.putFloat("race.series.wins", bests.get("race.series.wins", 0f) + 1f);
+                seriesLine = "SERIES WON  " + seriesYou + " - " + seriesThem;
+            } else {
+                seriesLine = "SERIES LOST  " + seriesYou + " - " + seriesThem;
+            }
+        } else {
+            seriesLine = "SERIES  " + seriesYou + " - " + seriesThem + "  ·  RACE "
+                    + Math.min(3, seriesYou + seriesThem + 1) + " OF 3";
+        }
+    }
+
+    /** True while the last race decided the week, for the finish screen's banner. */
+    private boolean seriesJustDecided() {
+        return seriesDecided && seriesPipPop >= 0;
+    }
+
+    /* ---------- the learning handicap ---------- */
+
+    /**
+     * Moves the stagger by 60% of the margin of this race, converted to metres at the speed you
+     * actually rowed. Winning by ten seconds hands the field about six seconds of it back next time,
+     * so the race converges on a finish you can see rather than on a procession either way.
+     */
+    private void adjustHandicap(int crews) {
+        // A race run level measured the raw gap, not the gap the stagger leaves. Feeding that margin
+        // into a stagger it was not rowed against would move it by the whole handicap twice over.
+        if (!handicapOn) {
+            handicapNext = handicapMetres;
+            return;
+        }
+        double best = -1;
+        for (int i = 0; i < crews; i++) {
+            if (best < 0 || resultTime[i] < best) {
+                best = resultTime[i];
+            }
+        }
+        if (best < 0 || finishTime <= 0) {
+            handicapNext = handicapMetres;
+            return;
+        }
+        double yourSpeed = raceMeters / finishTime;
+        handicapNext = clampHandicap((float) (handicapMetres + 0.6 * (best - finishTime) * yourSpeed));
+        bests.putFloat(handicapKey(), handicapNext);
+    }
+
+    /* ---------- the crew ---------- */
+
+    private void recruit(int crews) {
+        recruited = null;
+        recruitAnim = 0;
+        if (mates.size() >= MAX_MATES) {
+            return;
+        }
+        // One at a time: a joining is a moment, not a list.
+        for (int i = 0; i < crews; i++) {
+            if (crewRecruitable(i) && resultTime[i] > finishTime && !mates.contains(crewName(i))) {
+                mates.add(crewName(i));
+                recruited = crewName(i);
+                saveMates();
+                return;
+            }
+        }
+    }
+
+    /* ---------- the split-by-split page ---------- */
+
+    /**
+     * The reference crew and its 500 m times. A recording is preferred - that is the boat you are
+     * really measuring yourself against - otherwise the fastest crew. Markers a crew had not reached
+     * when you finished are projected from where it was and how fast it was going, and flagged.
+     */
+    private void buildAnalysis(int crews) {
+        analysisCrew = -1;
+        for (int i = 0; i < crews; i++) {
+            if (crewIsRecording(i)) {
+                analysisCrew = i;
+                break;
+            }
+        }
+        if (analysisCrew < 0) {
+            for (int i = 0; i < crews; i++) {
+                if (analysisCrew < 0 || resultTime[i] < resultTime[analysisCrew]) {
+                    analysisCrew = i;
+                }
+            }
+        }
+        analysisWon = "";
+        analysisLost = "";
+        if (analysisCrew < 0) {
+            return;
+        }
+        int n = splitCount();
+        double now = finishTime;
+        double dNow = crewDistance(analysisCrew);
+        double sNow = Math.max(0.5, crewSpeed(analysisCrew));
+        float fieldStart = Math.max(0f, handicap());
+        for (int k = 1; k <= n; k++) {
+            // Segment k runs from (k-1)*500 to k*500. If it starts behind the field's start line the
+            // crew never rowed it, so it is not a segment either boat can be judged on.
+            analysisPreStart[k] = (k - 1) * 500.0 < fieldStart;
+            double t = crewSplit[analysisCrew][k];
+            if (t >= 0) {
+                analysisSplit[k] = t;
+                analysisProjected[k] = false;
+            } else if (k * 500.0 <= fieldStart) {
+                analysisSplit[k] = 0;             // already past it at the gun
+                analysisProjected[k] = false;
+            } else {
+                analysisSplit[k] = now + (k * 500.0 - dNow) / sNow;
+                analysisProjected[k] = true;
+            }
+        }
+        // Where the race turned: the segment you took most out of them, and the one that cost most.
+        double bestGain = 0;
+        double worstLoss = 0;
+        for (int k = 1; k <= n; k++) {
+            if (youSplit[k] < 0 || analysisPreStart[k]) {
+                continue;
+            }
+            double yours = youSplit[k] - (k > 1 ? youSplit[k - 1] : 0);
+            double theirs = analysisSplit[k] - (k > 1 ? analysisSplit[k - 1] : 0);
+            double d = theirs - yours;
+            if (d > bestGain) {
+                bestGain = d;
+                analysisWon = String.format(java.util.Locale.US, "BEST 500: %d–%d m, %.1f s taken",
+                        (k - 1) * 500, k * 500, d);
+            }
+            if (-d > worstLoss) {
+                worstLoss = -d;
+                analysisLost = String.format(java.util.Locale.US, "WORST 500: %d–%d m, %.1f s lost",
+                        (k - 1) * 500, k * 500, -d);
+            }
+        }
+    }
+
+    private void drawFinish(Canvas c, float w, float h, float dt) {
         accentPaint.setColor(0xCC0A0E14);
         c.drawRect(0, 0, w, h, accentPaint);
         accentPaint.setColor(ACCENT);
@@ -1187,7 +1859,188 @@ class PaceBoatGame extends GameView {
         if (!resultQuote.isEmpty()) {
             label(c, resultQuote, w / 2f, y + dp(44f), 13f, TEXT, Paint.Align.CENTER);
         }
-        label(c, "tap to row again", w / 2f, h * 0.90f, 11f, FAINT, Paint.Align.CENTER);
+
+        // The week's series, then the handicap the next race will carry.
+        float sy = h * 0.70f;
+        drawSeriesPips(c, w / 2f, sy, true);
+        bold(c, seriesLine, w / 2f, sy + dp(30f), seriesJustDecided() ? 20f : 14f,
+                seriesDecided ? (seriesYou >= 2 ? ACCENT : BAD) : WARN, Paint.Align.CENTER);
+        String hcp = String.format(java.util.Locale.US, "NEXT RACE: THE FIELD STARTS %.0f m %s%s",
+                Math.abs(nextFieldMetres), nextFieldMetres >= 0 ? "UP" : "BACK",
+                handicapOn ? "" : "  (HANDICAP OFF)");
+        label(c, hcp, w / 2f, sy + dp(48f), 11f, DIM, Paint.Align.CENTER);
+        if (pushesCalled > 0) {
+            label(c, "PUSHES ANSWERED  " + pushesAnswered + " OF " + pushesCalled, w / 2f, sy + dp(64f), 11f,
+                    pushesAnswered * 2 >= pushesCalled ? ACCENT : BAD, Paint.Align.CENTER);
+        }
+
+        // A crew joining: their boat pulls alongside and the rower comes aboard.
+        if (recruited != null) {
+            recruitAnim = Math.min(1.0, recruitAnim + dt * 0.7);
+            float ry = h * 0.885f;
+            float ease = (float) (1 - Math.pow(1 - recruitAnim, 3));
+            float mx = w / 2f - dp(150f) + dp(120f) * ease;
+            accentPaint.setColor(ACCENT);
+            Fx.glow(c, mx, ry, dp(34f), 0x5535D0BA);
+            scenePaint.setStyle(Paint.Style.FILL);
+            scenePaint.setColor(MATE_COLORS[(mates.size() - 1) % MATE_COLORS.length]);
+            c.drawCircle(mx, ry - (float) Math.abs(Math.sin(recruitAnim * Math.PI)) * dp(22f), dp(7f), scenePaint);
+            bold(c, recruited + " JOIN YOUR CREW", w / 2f + dp(30f), ry + dp(5f), 17f, ACCENT, Paint.Align.LEFT);
+        }
+        label(c, splitCount() >= 1 ? "tap for the split-by-split" : "tap to row again", w / 2f, h * 0.955f,
+                11f, FAINT, Paint.Align.CENTER);
+    }
+
+    /* ---------- page two: split by split, and a replay ---------- */
+
+    /**
+     * Every 500 m against the reference crew, with a bar for the seconds taken or lost, the segment
+     * that won it and the segment that cost it, and a 12x replay of the two boats down the course.
+     */
+    private void drawSplitAnalysis(Canvas c, float w, float h, float dt) {
+        analysisT += dt;
+        accentPaint.setColor(0xF20A0E14);
+        c.drawRect(0, 0, w, h, accentPaint);
+        String who = analysisCrew >= 0 ? crewName(analysisCrew) : "THE FIELD";
+        bold(c, "SPLIT BY SPLIT  vs  " + who, w / 2f, h * 0.085f, 21f, ACCENT, Paint.Align.CENTER);
+        label(c, String.format(java.util.Locale.US, "%s  ·  %s   your %s, theirs %s", raceMeters + " m",
+                        handicapOn ? "handicap " + Math.round(handicap()) + " m" : "level start",
+                        clock(finishTime), analysisCrew >= 0 ? clock(resultTime[analysisCrew]) : "--:--"),
+                w / 2f, h * 0.085f + dp(18f), 11f, DIM, Paint.Align.CENTER);
+
+        int n = splitCount();
+        float top = h * 0.20f;
+        float rowH = Math.min(dp(30f), (h * 0.46f) / Math.max(1, n));
+        float midX = w * 0.64f;
+        float perSecond = dp(26f);      // a second of margin is 26dp of bar
+        label(c, "YOURS", w * 0.30f, top, 9f, FAINT, Paint.Align.RIGHT);
+        label(c, "THEIRS", w * 0.42f, top, 9f, FAINT, Paint.Align.RIGHT);
+        label(c, "LOST", midX - dp(40f), top, 9f, FAINT, Paint.Align.RIGHT);
+        label(c, "TAKEN", midX + dp(40f), top, 9f, FAINT, Paint.Align.LEFT);
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(0x33FFFFFF);
+        c.drawRect(midX - dp(0.5f), top + dp(6f), midX + dp(0.5f), top + rowH * n + dp(14f), scenePaint);
+
+        for (int k = 1; k <= n; k++) {
+            float reveal = Math.max(0f, Math.min(1f, (analysisT - 0.13f * (k - 1)) * 3.5f));
+            if (reveal <= 0f) {
+                continue;
+            }
+            float y = top + rowH * k + dp(8f);
+            double yours = youSplit[k] >= 0 ? youSplit[k] - (k > 1 ? youSplit[k - 1] : 0) : -1;
+            double theirs = analysisCrew >= 0 && !analysisPreStart[k]
+                    ? analysisSplit[k] - (k > 1 ? analysisSplit[k - 1] : 0) : -1;
+            label(c, (k * 500) + " m", w * 0.18f, y, 11f, FAINT, Paint.Align.RIGHT);
+            bold(c, yours > 0 ? PersonalBests.formatPace((float) yours) : "--:--", w * 0.30f, y, 13f, TEXT,
+                    Paint.Align.RIGHT);
+            String theirsText = analysisCrew < 0 ? "--:--"
+                    : analysisPreStart[k] ? "HEAD START"
+                    : theirs > 0 ? PersonalBests.formatPace((float) theirs) + (analysisProjected[k] ? "~" : "")
+                    : "--:--";
+            label(c, theirsText, w * 0.42f, y, 12f,
+                    analysisCrew >= 0 && !analysisPreStart[k] ? crewColor(analysisCrew) : DIM, Paint.Align.RIGHT);
+            if (yours <= 0 || theirs <= 0) {
+                continue;
+            }
+            float d = (float) (theirs - yours);            // positive: you took time out of them
+            float len = Math.min(w * 0.30f, Math.abs(d) * perSecond) * reveal;
+            scenePaint.setColor(d >= 0 ? 0xFF35D0BA : 0xFFF0655D);
+            if (d >= 0) {
+                c.drawRect(midX, y - dp(9f), midX + len, y - dp(1f), scenePaint);
+            } else {
+                c.drawRect(midX - len, y - dp(9f), midX, y - dp(1f), scenePaint);
+            }
+            if (reveal > 0.6f) {
+                label(c, String.format(java.util.Locale.US, "%s%.1f s", d >= 0 ? "+" : "−", Math.abs(d)),
+                        d >= 0 ? midX + len + dp(6f) : midX - len - dp(6f), y, 10f, d >= 0 ? ACCENT : BAD,
+                        d >= 0 ? Paint.Align.LEFT : Paint.Align.RIGHT);
+            }
+        }
+
+        float sy = top + rowH * n + dp(34f);
+        if (!analysisWon.isEmpty()) {
+            label(c, analysisWon, w / 2f, sy, 12f, ACCENT, Paint.Align.CENTER);
+        }
+        if (!analysisLost.isEmpty()) {
+            label(c, analysisLost, w / 2f, sy + dp(16f), 12f, BAD, Paint.Align.CENTER);
+        }
+
+        drawReplay(c, w, h, dt);
+        label(c, "tap to row again", w / 2f, h * 0.965f, 11f, FAINT, Paint.Align.CENTER);
+    }
+
+    /** The two boats replayed along the course from the split times, twelve times faster. */
+    private void drawReplay(Canvas c, float w, float h, float dt) {
+        float ry = h * 0.855f;
+        float x0 = w * 0.12f;
+        float x1 = w * 0.88f;
+        double crewFinishT = analysisCrew >= 0 ? resultTime[analysisCrew] : finishTime;
+        double total = Math.max(finishTime, crewFinishT);
+        replayT += dt * 12.0;
+        if (replayT > total + 1.6) {
+            replayT = 0;
+        }
+        label(c, "REPLAY  ·  12x", x0, ry - dp(30f), 9f, FAINT, Paint.Align.LEFT);
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(0x33FFFFFF);
+        c.drawRect(x0, ry - dp(1f), x1, ry + dp(1f), scenePaint);
+        // 500 m marks and the finish post.
+        for (int k = 1; k <= splitCount(); k++) {
+            float mx = x0 + (x1 - x0) * (k * 500f / raceMeters);
+            scenePaint.setColor(k * 500 == raceMeters ? 0xAAF5C518 : 0x44FFFFFF);
+            c.drawRect(mx - dp(1f), ry - dp(9f), mx + dp(1f), ry + dp(9f), scenePaint);
+        }
+        double youM = replayMetres(youSplit, 0, finishTime, replayT);
+        double crewM = analysisCrew >= 0 ? replayMetres(analysisSplit, handicap(), crewFinishT, replayT) : 0;
+        float yx = x0 + (x1 - x0) * (float) Math.min(1, youM / raceMeters);
+        float cxp = x0 + (x1 - x0) * (float) Math.min(1, crewM / raceMeters);
+        // Your boat above the line, theirs below, each with a small wake.
+        drawReplayBoat(c, yx, ry - dp(13f), ACCENT, "YOU");
+        if (analysisCrew >= 0) {
+            drawReplayBoat(c, cxp, ry + dp(13f), crewColor(analysisCrew), crewName(analysisCrew));
+        }
+        double leadM = youM - crewM;
+        label(c, String.format(java.util.Locale.US, "%s   %s%.0f m", clock(replayT), leadM >= 0 ? "+" : "−",
+                Math.abs(leadM)), x1, ry - dp(30f), 10f, leadM >= 0 ? ACCENT : BAD, Paint.Align.RIGHT);
+    }
+
+    private void drawReplayBoat(Canvas c, float x, float y, int color, String tag) {
+        scenePaint.setStyle(Paint.Style.FILL);
+        scenePaint.setColor(0x44FFFFFF);
+        c.drawRect(x - dp(22f), y - dp(1f), x, y + dp(1f), scenePaint);
+        scenePaint.setColor(color);
+        rect.set(x - dp(11f), y - dp(3.5f), x + dp(11f), y + dp(3.5f));
+        c.drawRoundRect(rect, dp(3.5f), dp(3.5f), scenePaint);
+        label(c, tag, x, y - dp(8f), 8f, color, Paint.Align.CENTER);
+    }
+
+    /**
+     * Where a boat was at {@code t}, interpolated between its 500 m times - the only positions the
+     * race actually recorded, so the replay is the race rather than an animation of it.
+     */
+    private double replayMetres(double[] splits, double startM, double finish, double t) {
+        int n = splitCount();
+        double prevT = 0;
+        double prevM = startM;
+        for (int k = 1; k <= n; k++) {
+            double m = k * 500.0;
+            if (m <= startM) {
+                continue;       // behind this boat's start line: it never passed through here
+            }
+            double st = splits[k];
+            if (st < 0) {
+                break;
+            }
+            if (t <= st) {
+                return prevM + (m - prevM) * (t - prevT) / Math.max(0.01, st - prevT);
+            }
+            prevT = st;
+            prevM = m;
+        }
+        if (t < finish && finish > prevT) {
+            return prevM + (raceMeters - prevM) * (t - prevT) / (finish - prevT);
+        }
+        return raceMeters;
     }
 
     private static String placeText(int place) {

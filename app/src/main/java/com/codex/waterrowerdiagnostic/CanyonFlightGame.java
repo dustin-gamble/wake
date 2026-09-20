@@ -38,6 +38,26 @@ import android.view.MotionEvent;
  *   <li><b>The light moves toward sunset</b> with distance flown: afternoon, golden hour, sunset,
  *   dusk with stars. {@link Daylight} is shared with DRIVE.</li>
  * </ul>
+ *
+ * <p>The race upgrades (this build):
+ * <ul>
+ *   <li><b>A run is a time trial now.</b> The canyon has an end - {@link #EXIT_METRES} - and a
+ *   timing gate every {@link #CHECK_METRES}. Each split is medalled against the rower's own speeds
+ *   ({@link CanyonRouteMap#medal}): gold at their high speed, silver at typical, bronze at low. The
+ *   whole run is medalled the same way and the best time is kept as {@code canyon.exit}.</li>
+ *   <li><b>A rival plane</b> flies the same canyon, rubber-bands so it is never out of reach,
+ *   surges every ~20 s, and taunts every time the lead changes. It is drawn flying the rings when
+ *   it is on screen and as an edge chevron with the gap when it is not.</li>
+ *   <li><b>Boost.</b> A ring taken clean through the middle with no rock on your paint charges the
+ *   boost. Spend it - tap the meter, or it fires itself when full - for a few seconds of thrust:
+ *   real metres down the canyon (so it buys you the race and the clock) and rock immunity while it
+ *   burns.</li>
+ *   <li><b>A route map</b> along the top right: checkpoints, the forks you took, and the branches
+ *   still locked. Higher tiers open with your best score - a third SLOT road through the middle of
+ *   every fork, a fourth boost charge, and a night run where prizes count double.</li>
+ *   <li><b>A photo finish</b> at the canyon exit: the shutter flash, then a print of the line with
+ *   both planes where they actually were, the margin, your split and the medal.</li>
+ * </ul>
  */
 final class CanyonFlightGame extends GameView {
 
@@ -52,21 +72,38 @@ final class CanyonFlightGame extends GameView {
     private static final float FORK_LEN = 170f;
     /** Seconds of continuous rock contact that costs a life. */
     private static final float SCRAPE_LIMIT = 0.9f;
+    /** Length of the canyon: the run ends at the exit, with a photo finish. */
+    private static final float EXIT_METRES = 2000f;
+    /** Metres between timing gates. */
+    private static final float CHECK_METRES = 400f;
+    /** Seconds of thrust per boost charge spent. */
+    private static final float BOOST_PER_CHARGE = 1.3f;
+    /** Metres the gap must actually swing before the lead is called changed. */
+    private static final float LEAD_HYSTERESIS = 5f;
 
     private static final int NONE = -1;
     private static final int GEM = 0;
     private static final int HEART = 1;
     private static final int STAR = 2;
 
+    /** Roads through a fork, in the order {@link CanyonRouteMap} colours them. */
+    private static final int LOW_ROAD = 0;
+    private static final int HIGH_ROAD = 1;
+    private static final int SLOT_ROAD = 2;
+    private static final String[] ROAD_NAMES = {"LOW", "HIGH", "SLOT"};
+
     private static final class Fork {
         final float start;
         final float end;
-        /** -1 undecided, 0 low road, 1 high road. */
+        /** Two spires with a slot between them, once the rower has unlocked it. */
+        final boolean slot;
+        /** -1 undecided, else LOW_ROAD / HIGH_ROAD / SLOT_ROAD. */
         int chosen = -1;
 
-        Fork(float start, float end) {
+        Fork(float start, float end, boolean slot) {
             this.start = start;
             this.end = end;
+            this.slot = slot;
         }
     }
 
@@ -75,7 +112,7 @@ final class CanyonFlightGame extends GameView {
         final float speed;     // centre of the band
         final int pickup;
         final Fork fork;
-        final int branch;      // -1 not in a fork, 0 low road, 1 high road
+        final int branch;      // -1 not in a fork, else the road it belongs to
         boolean resolved;
         boolean passed;
         boolean collected;
@@ -97,6 +134,10 @@ final class CanyonFlightGame extends GameView {
     private final java.util.List<Fork> forks = new java.util.ArrayList<>();
     private final Fx.Particles fx = new Fx.Particles();
     private final Fx.Shake shake = new Fx.Shake();
+    private final CanyonRouteMap map;
+    /** Road taken at each fork, for the route map. */
+    private final int[] forkChoices = new int[12];
+    private int forksTaken;
 
     private boolean started;
     private boolean over;
@@ -144,19 +185,88 @@ final class CanyonFlightGame extends GameView {
     /** Output of {@link #corridor}: walls in speed units at one distance. */
     private float cFloor;
     private float cCeil;
-    private float cRockLo;
-    private float cRockHi;
+    /** Spires at this distance, ascending in speed: one normally, two when the fork has a slot. */
+    private final float[] rockLo = new float[2];
+    private final float[] rockHi = new float[2];
+    private int rockCount;
     private Fork cFork;
+
+    /* ---------- the race ---------- */
+
+    /** Route tiers this rower's best score has opened: 1 slot road, 2 turbo, 3 night run. */
+    private int tier;
+    /**
+     * The score {@link #tier} was decided from, read once at the start of the run. The route map
+     * is drawn from this and not from the live score: a point earned mid-run does not turn a
+     * spire into a slot until the next run, so a padlock that opened on screen would be a lie.
+     */
+    private float unlockScore;
+    private float prizeMul = 1f;
+    /** Metres of daylight the run starts with, so a night run finishes under stars. */
+    private float dayOffset;
+
+    /** Timing gates. */
+    private float nextCheckAt;
+    private int checkIndex;
+    private double lastCheckSeconds;
+    private int golds;
+    private int silvers;
+    private int bronzes;
+
+    /** Boost, earned by clean ring passes. */
+    private int boostCharges;
+    private int boostCapacity = 3;
+    private double boostUntil;
+    private double boostFullSince;
+    private double boostMetres;
+    private float boostGlow;
+    /** Tap target for the boost meter, set when it is drawn. */
+    private float boostHitX;
+    private float boostHitY;
+    private float boostHitW;
+    private float boostHitH;
+
+    /** The rival plane. */
+    private double rivalX;
+    private float rivalAlt;
+    private float rivalSpeed;
+    private double rivalSurgeUntil;
+    private double rivalNextSurge;
+    private String rivalTaunt = "";
+    private double rivalTauntUntil;
+    private boolean rivalWasAhead;
+    private int tauntSeq;
+
+    /** The finish. */
+    private boolean finished;
+    private double finishSeconds;
+    private float finishMargin;
+    private int finishMedal = CanyonRouteMap.NO_MEDAL;
+    private double finishAt;
+    private boolean photoFinish;
+    /**
+     * The finish card's text, built once when the run ends. It is a still picture the rower can
+     * sit on for minutes; formatting it every frame would allocate a Formatter 60 times a second
+     * for text that cannot change.
+     */
+    private String finishTitle = "";
+    private String finishTimeText = "";
+    private String finishLine1 = "";
+    private String finishLine2 = "";
+    /** The gold split for one checkpoint: fixed for the run, so it is formatted once. */
+    private String goldSplitText = "";
 
     CanyonFlightGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        this.map = new CanyonRouteMap(context.getResources().getDisplayMetrics().density);
     }
 
     @Override
     protected void onStart() {
         started = false;
         over = false;
+        finished = false;
         streak = 0;
         lives = LIVES;
         passed = 0;
@@ -172,6 +282,43 @@ final class CanyonFlightGame extends GameView {
         bannerUntil = 0;
         gates.clear();
         forks.clear();
+        forksTaken = 0;
+        for (int i = 0; i < forkChoices.length; i++) {
+            forkChoices[i] = -1;
+        }
+        // Branches open with the rower's best score, so the canyon grows as they get better.
+        unlockScore = bests.get("canyon.score", 0f);
+        tier = CanyonRouteMap.tiers(unlockScore);
+        boostCapacity = tier >= 2 ? 4 : 3;
+        prizeMul = tier >= 3 ? 2f : 1f;
+        dayOffset = tier >= 3 ? 760f : 0f;
+        boostCharges = 0;
+        boostUntil = 0;
+        boostFullSince = 0;
+        boostMetres = 0;
+        boostGlow = 0f;
+        nextCheckAt = CHECK_METRES;
+        checkIndex = 0;
+        lastCheckSeconds = 0;
+        golds = 0;
+        silvers = 0;
+        bronzes = 0;
+        rivalX = -40;
+        rivalAlt = 0.5f;
+        rivalSpeed = (float) profile.typicalSpeed();
+        rivalSurgeUntil = 0;
+        rivalNextSurge = 18;
+        rivalTauntUntil = 0;
+        rivalWasAhead = false;
+        tauntSeq = 0;
+        photoFinish = false;
+        finishTitle = "";
+        finishTimeText = "";
+        finishLine1 = "";
+        finishLine2 = "";
+        goldSplitText = "gold "
+                + CanyonRouteMap.time(CanyonRouteMap.target(CanyonRouteMap.GOLD, CHECK_METRES, profile));
+        map.collapse();
         // The altitude scale covers this rower: from well below their low speed to a little above
         // their high, so a change in effort is a visible change in height.
         minSpeed = (float) Math.max(0.8, profile.lowSpeed() - 1.2);
@@ -191,9 +338,10 @@ final class CanyonFlightGame extends GameView {
 
     /**
      * The flyable corridor at {@code m} metres, in speed units (so it is tuned to this rower): the
-     * roof and floor close from off-screen to the rower's own low/high band, and inside a fork a
-     * spire sits across the middle. Writes {@link #cFloor}, {@link #cCeil}, {@link #cRockLo},
-     * {@link #cRockHi} and {@link #cFork} - fields, so the per-column drawing allocates nothing.
+     * roof and floor close from off-screen to the rower's own low/high band, and inside a fork one
+     * spire - or two, with a slot between them - sits across the middle. Writes {@link #cFloor},
+     * {@link #cCeil}, {@link #rockLo}, {@link #rockHi}, {@link #rockCount} and {@link #cFork} -
+     * fields, so the per-column drawing allocates nothing.
      */
     private void corridor(double m) {
         float narrow = clamp01((float) (m - NARROW_START) / NARROW_SPAN);
@@ -202,8 +350,7 @@ final class CanyonFlightGame extends GameView {
         cFloor = (minSpeed - 0.6f) + (lo - (minSpeed - 0.6f)) * narrow;
         cCeil = (maxSpeed + 0.6f) + (hi - (maxSpeed + 0.6f)) * narrow;
         cFork = null;
-        cRockLo = 0f;
-        cRockHi = 0f;
+        rockCount = 0;
         for (int i = 0; i < forks.size(); i++) {
             Fork f = forks.get(i);
             if (m >= f.start && m <= f.end) {
@@ -212,12 +359,43 @@ final class CanyonFlightGame extends GameView {
                 float vlo = Math.max(cFloor, minSpeed);
                 float vhi = Math.min(cCeil, maxSpeed);
                 float mid = (vlo + vhi) / 2f;
-                float half = (vhi - vlo) * 0.13f * ramp;
-                cRockLo = mid - half;
-                cRockHi = mid + half;
+                float span = vhi - vlo;
+                if (f.slot) {
+                    // Placed so the outer roads stay where the single spire put them (2.3 and 4.1
+                    // m/s for this rower's default profile) and the slot is the new, tight middle:
+                    // a 0.2-0.36 m/s window at about 3.2-3.5 m/s, just under their typical pace.
+                    float off = span * 0.125f;
+                    float half = span * 0.062f * ramp;
+                    rockLo[0] = mid - off - half;
+                    rockHi[0] = mid - off + half;
+                    rockLo[1] = mid + off - half;
+                    rockHi[1] = mid + off + half;
+                    rockCount = 2;
+                } else {
+                    float half = span * 0.13f * ramp;
+                    rockLo[0] = mid - half;
+                    rockHi[0] = mid + half;
+                    rockCount = 1;
+                }
                 break;
             }
         }
+    }
+
+    /** Centre speed of a road through the fork {@link #corridor} last sampled. */
+    private float roadSpeed(int road) {
+        float vlo = Math.max(cFloor, minSpeed);
+        float vhi = Math.min(cCeil, maxSpeed);
+        if (rockCount == 0) {
+            return (vlo + vhi) / 2f;
+        }
+        if (road == LOW_ROAD) {
+            return (vlo + rockLo[0]) / 2f;
+        }
+        if (road == HIGH_ROAD) {
+            return (rockHi[rockCount - 1] + vhi) / 2f;
+        }
+        return rockCount == 2 ? (rockHi[0] + rockLo[1]) / 2f : (vlo + vhi) / 2f;
     }
 
     /** Screen y of a speed, NOT clamped to the sky, so rock can sit partly off-screen. */
@@ -229,18 +407,19 @@ final class CanyonFlightGame extends GameView {
     private void spawnGates() {
         float low = (float) profile.lowSpeed() - 0.4f;
         float high = (float) profile.highSpeed() + 0.2f;
-        while (nextGateAt < x + 200f) {
+        while (nextGateAt < x + 200f && nextGateAt < EXIT_METRES - 40f) {
             if (nextGateAt + 40f >= nextForkAt) {
-                // A fork: two rings on each road, placed in the middle of each branch.
-                Fork f = new Fork(nextForkAt, nextForkAt + FORK_LEN);
+                // A fork: rings on each road, placed in the middle of each branch.
+                Fork f = new Fork(nextForkAt, nextForkAt + FORK_LEN, tier >= 1);
                 forks.add(f);
                 for (int k = 0; k < 2; k++) {
-                    float at = f.start + (k == 0 ? 60f : 125f);
+                    float at = f.start + (k == 0 ? 55f : 120f);
                     corridor(at);
-                    float upper = (cRockHi + Math.min(cCeil, maxSpeed)) / 2f;
-                    float lower = (Math.max(cFloor, minSpeed) + cRockLo) / 2f;
-                    gates.add(new Gate(at, upper, STAR, f, 1));
-                    gates.add(new Gate(at, lower, k == 0 ? GEM : HEART, f, 0));
+                    gates.add(new Gate(at, roadSpeed(HIGH_ROAD), STAR, f, HIGH_ROAD));
+                    gates.add(new Gate(at, roadSpeed(LOW_ROAD), k == 0 ? GEM : HEART, f, LOW_ROAD));
+                    if (f.slot) {
+                        gates.add(new Gate(at, roadSpeed(SLOT_ROAD), STAR, f, SLOT_ROAD));
+                    }
                 }
                 nextGateAt = f.end + 60f + rng.nextFloat() * 40f;
                 nextForkAt = nextGateAt + 420f + rng.nextFloat() * 200f;
@@ -279,16 +458,34 @@ final class CanyonFlightGame extends GameView {
             gates.clear();
             forks.clear();
             ringCount = 0;
+            boostMetres = 0;
             nextGateAt = (float) (sessionMeters - runStart) + 80f;
             nextForkAt = nextGateAt + 300f;
+            rivalX = -40;
+            rivalSpeed = (float) profile.typicalSpeed();
+            rivalNextSurge = sessionSeconds + 18;
+            lastCheckSeconds = activeSeconds;
         }
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_DOWN && over) {
-            start();
-            return true;
+        if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            if (over || finished) {
+                start();
+                return true;
+            }
+            float tx = e.getX();
+            float ty = e.getY();
+            if (map.tap(tx, ty)) {
+                invalidate();
+                return true;
+            }
+            if (boostHitW > 0 && tx >= boostHitX - dp(10f) && tx <= boostHitX + boostHitW + dp(10f)
+                    && ty >= boostHitY - dp(14f) && ty <= boostHitY + boostHitH + dp(14f)) {
+                fireBoost();
+                return true;
+            }
         }
         return super.onTouchEvent(e);
     }
@@ -309,14 +506,45 @@ final class CanyonFlightGame extends GameView {
     private void loseLife(float youX, float youY) {
         lives--;
         streak = 0;
+        boostCharges = Math.max(0, boostCharges - 1);
         hurtUntil = sessionSeconds + 1.2;
         shake.kick(dp(10f));
         fx.burst(youX, youY, 24, dp(160f), 0.6f, dp(3.5f), 0xFFF0655D, false);
         if (lives <= 0) {
             over = true;
-            bests.recordHighest("canyon.gates", passed);
-            bests.recordHighest("canyon.score", score);
+            saveRecords();
         }
+    }
+
+    private void saveRecords() {
+        bests.recordHighest("canyon.gates", passed);
+        bests.recordHighest("canyon.score", score);
+        bests.recordHighest("canyon.gold", golds);
+    }
+
+    /* ---------- boost ---------- */
+
+    /** Spend every charge at once: thrust, real metres down the canyon and rock immunity. */
+    private void fireBoost() {
+        if (boostCharges <= 0 || sessionSeconds < boostUntil || !started || over || finished) {
+            return;
+        }
+        float seconds = BOOST_PER_CHARGE * boostCharges;
+        boostUntil = sessionSeconds + seconds;
+        graceUntil = Math.max(graceUntil, boostUntil);
+        scrapeTime = 0f;
+        boostCharges = 0;
+        boostFullSince = 0;
+        shake.kick(dp(6f));
+        banner("BOOST", 0xFFFF8A3D);
+    }
+
+    private float boostSpeed() {
+        return (float) profile.typicalSpeed() * (tier >= 2 ? 1.5f : 1.1f);
+    }
+
+    private boolean boosting() {
+        return sessionSeconds < boostUntil;
     }
 
     /* ---------- drawing ---------- */
@@ -484,7 +712,7 @@ final class CanyonFlightGame extends GameView {
         }
     }
 
-    /** The spire that splits a fork, and the two road signs at its mouth. */
+    /** The spire (or the pair of them) that splits a fork, and the road signs at its mouth. */
     private void drawForks(Canvas c, float w, float youX, float ppm, float dusk) {
         double left = x - youX / ppm;
         double right = x + (w - youX) / ppm;
@@ -499,15 +727,19 @@ final class CanyonFlightGame extends GameView {
             double step = 3.0;
             double a = Math.max(f.start, Math.floor((left - 4) / step) * step);
             double b = Math.min(f.end, Math.ceil((right + 4) / step) * step);
-            if (b > a) {
+            int bands = f.slot ? 2 : 1;
+            for (int band = 0; band < bands && b > a; band++) {
                 path.reset();
                 // Top edge forward, bottom edge back.
                 boolean first = true;
                 for (double m = a; m <= b + 0.001; m += step) {
                     corridor(m);
+                    if (rockCount <= band) {
+                        continue;
+                    }
                     int hash = (int) ((Math.round(m / step) * 40503L) >>> 3) & 3;
                     float px = youX + (float) (m - x) * ppm;
-                    float py = yOf(cRockHi) - hash * dp(2f);
+                    float py = yOf(rockHi[band]) - hash * dp(2f);
                     if (first) {
                         path.moveTo(px, py);
                         first = false;
@@ -515,10 +747,16 @@ final class CanyonFlightGame extends GameView {
                         path.lineTo(px, py);
                     }
                 }
+                if (first) {
+                    continue;
+                }
                 for (double m = b; m >= a - 0.001; m -= step) {
                     corridor(m);
+                    if (rockCount <= band) {
+                        continue;
+                    }
                     int hash = (int) ((Math.round(m / step) * 7919L) >>> 3) & 3;
-                    path.lineTo(youX + (float) (m - x) * ppm, yOf(cRockLo) + hash * dp(2f));
+                    path.lineTo(youX + (float) (m - x) * ppm, yOf(rockLo[band]) + hash * dp(2f));
                 }
                 path.close();
                 paint.setStyle(Paint.Style.FILL);
@@ -534,15 +772,18 @@ final class CanyonFlightGame extends GameView {
                 // Signs at the fork mouth, one per road.
                 float sx = youX + (f.start - 6f - (float) x) * ppm;
                 corridor(f.start + 60f);
-                float upY = yOf((cRockHi + Math.min(cCeil, maxSpeed)) / 2f);
-                float lowY = yOf((Math.max(cFloor, minSpeed) + cRockLo) / 2f);
-                float midY = yOf((cRockLo + cRockHi) / 2f);
+                float upY = yOf(roadSpeed(HIGH_ROAD));
+                float lowY = yOf(roadSpeed(LOW_ROAD));
                 paint.setColor(0xFF5A3A28);
                 c.drawRect(sx - dp(2f), upY, sx + dp(2f), lowY, paint);
-                signBoard(c, sx, upY, "HIGH ROAD", "2 STARS  +5 each", 0xFFF5C518);
+                signBoard(c, sx, upY, "HIGH ROAD", "2 STARS  ·  +5 each", 0xFFF5C518);
                 signBoard(c, sx, lowY, "LOW ROAD", "easy  ·  gem + heart", ACCENT);
-                paint.setColor(0xCCF5C518);
-                c.drawCircle(sx, midY, dp(4f), paint);
+                if (f.slot) {
+                    signBoard(c, sx, yOf(roadSpeed(SLOT_ROAD)), "SLOT", "tight  ·  2 stars  ·  +8 each", 0xFFFF8A3D);
+                } else {
+                    paint.setColor(0xCCF5C518);
+                    c.drawCircle(sx, yOf((rockLo[0] + rockHi[0]) / 2f), dp(4f), paint);
+                }
             }
         }
     }
@@ -561,16 +802,57 @@ final class CanyonFlightGame extends GameView {
         label(c, sub, sx, sy + dp(12f), 8.5f, TEXT, Paint.Align.CENTER);
     }
 
+    /**
+     * The timing gates: a lit arch across the canyon every {@link #CHECK_METRES}, carrying the
+     * split you have to beat for gold, and the finish arch at the canyon exit.
+     */
+    private void drawCheckpoints(Canvas c, float w, float h, float youX, float ppm) {
+        for (int i = 1; i * CHECK_METRES <= EXIT_METRES; i++) {
+            float at = i * CHECK_METRES;
+            boolean exit = at >= EXIT_METRES - 0.5f;
+            float gx = youX + (at - (float) x) * ppm;
+            if (gx < -dp(80f) || gx > w + dp(120f)) {
+                continue;
+            }
+            corridor(at);
+            float top = Math.max(-dp(20f), yOf(cCeil));
+            float bot = Math.min(h + dp(20f), yOf(cFloor));
+            boolean done = at <= x;
+            int col = exit ? 0xFFFFFFFF : done ? 0x5535D0BA : 0xFFF5C518;
+            paint.setStyle(Paint.Style.FILL);
+            // A light curtain you fly through.
+            paint.setColor((col & 0x00FFFFFF) | (done ? 0x11000000 : 0x33000000));
+            c.drawRect(gx - dp(4f), top, gx + dp(4f), bot, paint);
+            // Posts.
+            paint.setColor(col);
+            c.drawRect(gx - dp(7f), top, gx + dp(7f), top + dp(16f), paint);
+            c.drawRect(gx - dp(7f), bot - dp(16f), gx + dp(7f), bot, paint);
+            if (exit) {
+                // Chequered finish banner.
+                for (int q = 0; q < 10; q++) {
+                    paint.setColor((q % 2 == 0) ? 0xFFF2F2EE : 0xFF1B1526);
+                    float qy = top + dp(18f) + q * dp(11f);
+                    c.drawRect(gx - dp(11f), qy, gx + dp(11f), qy + dp(11f), paint);
+                }
+                Fx.glow(c, gx, (top + bot) / 2f, dp(120f), 0x55FFFFFF);
+                bold(c, "CANYON EXIT", gx, top + dp(10f), 13f, 0xFFFFFFFF, Paint.Align.CENTER);
+            } else if (!done) {
+                bold(c, "CP " + i, gx, top + dp(32f), 12f, col, Paint.Align.CENTER);
+                label(c, goldSplitText, gx, top + dp(46f), 8.5f, 0xFFFFD36A, Paint.Align.CENTER);
+            }
+        }
+    }
+
     /** A small high-wing plane pointing right, pitched with the climb, prop spinning. */
-    private void drawPlane(Canvas c, float px, float py, float speed) {
+    private void drawPlane(Canvas c, float px, float py, float speed, float roll, int body, int trim) {
         c.save();
-        c.rotate((float) Math.toDegrees(-pitch * 0.6f), px, py);
+        c.rotate((float) Math.toDegrees(-roll * 0.6f), px, py);
         float s = dp(1f);
         paint.setStyle(Paint.Style.FILL);
         // Fuselage.
-        paint.setColor(0xFFF4F4F4);
+        paint.setColor(body);
         c.drawRoundRect(px - 34 * s, py - 7 * s, px + 30 * s, py + 7 * s, 7 * s, 7 * s, paint);
-        paint.setColor(ACCENT);
+        paint.setColor(trim);
         c.drawRect(px - 30 * s, py - 1.5f * s, px + 26 * s, py + 2.5f * s, paint);
         // Tail.
         path.reset();
@@ -580,7 +862,7 @@ final class CanyonFlightGame extends GameView {
         path.close();
         c.drawPath(path, paint);
         // Wing (seen edge-on, slightly below the top) and strut.
-        paint.setColor(0xFFDDE6EE);
+        paint.setColor(Daylight.blend(body, 0xFF000000, 0.12f));
         c.drawRoundRect(px - 12 * s, py - 12 * s, px + 14 * s, py - 6 * s, 3 * s, 3 * s, paint);
         // Cockpit.
         paint.setColor(0xFF6FB8E8);
@@ -592,6 +874,97 @@ final class CanyonFlightGame extends GameView {
         paint.setColor(0xFF333333);
         c.drawCircle(px + 32 * s, py, 2.5f * s, paint);
         c.restore();
+    }
+
+    /**
+     * The rival: its own plane in the canyon when it is on screen, an edge chevron with the gap
+     * when it is not, and a speech bubble whenever it has something to say.
+     */
+    private void drawRival(Canvas c, float w, float youX, float ppm) {
+        if (!started) {
+            // It has not left the line yet; an edge chevron reading "40 m" before the rower has
+            // taken a stroke is just noise.
+            return;
+        }
+        float rx = youX + (float) (rivalX - x) * ppm;
+        float ry = skyBottomY - (skyBottomY - skyTopY) * rivalAlt;
+        boolean onScreen = rx > -dp(60f) && rx < w + dp(60f);
+        if (onScreen) {
+            Fx.glow(c, rx, ry, dp(46f), 0x44FF6FA8);
+            // Contrail.
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(0x66FF9ABF);
+            c.drawLine(rx - dp(30f), ry, rx - dp(30f) - rivalSpeed * dp(16f), ry + dp(2f), paint);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            paint.setStyle(Paint.Style.FILL);
+            drawPlane(c, rx, ry, rivalSpeed, 0f, 0xFFE8557F, 0xFF2A1220);
+        } else {
+            // Off screen: a chevron on the edge it went out of, with the gap.
+            boolean ahead = rivalX > x;
+            float ex = ahead ? w - dp(26f) : dp(26f);
+            float ey = Math.max(skyTopY + dp(30f), Math.min(skyBottomY - dp(30f), ry));
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFFE8557F);
+            path.reset();
+            float dir = ahead ? 1f : -1f;
+            path.moveTo(ex + dir * dp(16f), ey);
+            path.lineTo(ex - dir * dp(10f), ey - dp(13f));
+            path.lineTo(ex - dir * dp(10f), ey + dp(13f));
+            path.close();
+            c.drawPath(path, paint);
+            bold(c, Math.round(Math.abs(rivalX - x)) + " m", ex, ey + dp(30f), 11f, 0xFFE8557F, Paint.Align.CENTER);
+        }
+        if (sessionSeconds < rivalTauntUntil) {
+            float bx = onScreen ? rx : (rivalX > x ? w - dp(120f) : dp(120f));
+            float by = onScreen ? ry - dp(46f) : skyTopY + dp(70f);
+            paint.setColor(0xEE1A1016);
+            paint.setTextSize(dp(11f));
+            float tw = paint.measureText(rivalTaunt) + dp(22f);
+            c.drawRoundRect(bx - tw / 2f, by - dp(15f), bx + tw / 2f, by + dp(9f), dp(11f), dp(11f), paint);
+            path.reset();
+            path.moveTo(bx - dp(6f), by + dp(8f));
+            path.lineTo(bx + dp(4f), by + dp(8f));
+            path.lineTo(bx - dp(1f), by + dp(19f));
+            path.close();
+            c.drawPath(path, paint);
+            bold(c, rivalTaunt, bx, by + dp(2f), 11f, 0xFFFF9ABF, Paint.Align.CENTER);
+        }
+    }
+
+    /** The boost meter: charges you earned, and what happens when you spend them. */
+    private void drawBoostMeter(Canvas c, float w, float h) {
+        float bw = dp(168f);
+        float bh = dp(16f);
+        float bx = dp(16f);
+        float by = h - dp(66f);
+        boostHitX = bx;
+        boostHitY = by;
+        boostHitW = bw;
+        boostHitH = bh;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xAA0A0E14);
+        c.drawRoundRect(bx - dp(8f), by - dp(16f), bx + bw + dp(8f), by + bh + dp(8f), dp(6f), dp(6f), paint);
+        float cell = (bw - dp(4f) * (boostCapacity - 1)) / boostCapacity;
+        boolean burning = boosting();
+        for (int i = 0; i < boostCapacity; i++) {
+            float cx = bx + i * (cell + dp(4f));
+            boolean lit = i < boostCharges;
+            paint.setColor(lit ? 0xFFFF8A3D : 0x332A3648);
+            c.drawRoundRect(cx, by, cx + cell, by + bh, dp(3f), dp(3f), paint);
+            if (lit) {
+                Fx.glow(c, cx + cell / 2f, by + bh / 2f, dp(24f), 0x55FF8A3D);
+            }
+        }
+        if (burning) {
+            float left = (float) ((boostUntil - sessionSeconds) / (BOOST_PER_CHARGE * boostCapacity));
+            paint.setColor(0xFFFFD36A);
+            c.drawRoundRect(bx, by, bx + bw * Math.max(0f, Math.min(1f, left)), by + bh, dp(3f), dp(3f), paint);
+        }
+        String hint = burning ? "BOOSTING" : boostCharges > 0 ? "TAP TO BOOST" : "CLEAN RINGS CHARGE THE BOOST";
+        label(c, hint, bx, by - dp(4f), 8.5f, burning ? 0xFFFFD36A : boostCharges > 0 ? 0xFFFF8A3D : FAINT,
+                Paint.Align.LEFT);
     }
 
     /** Sun (sinking with the route), stars at dusk, drifting clouds and a flock of birds. */
@@ -673,6 +1046,75 @@ final class CanyonFlightGame extends GameView {
         return Math.max(0f, Math.min(1f, (speed - minSpeed) / (maxSpeed - minSpeed)));
     }
 
+    /** The rival flies the rings too, and never quite lets you go. */
+    private void stepRival(float dt) {
+        if (sessionSeconds > rivalNextSurge) {
+            rivalSurgeUntil = sessionSeconds + 7;
+            rivalNextSurge = sessionSeconds + 20 + rng.nextFloat() * 12f;
+            rivalTaunt = CanyonRouteMap.taunt(CanyonRouteMap.TAUNT_SURGE_KIND, tauntSeq++);
+            rivalTauntUntil = sessionSeconds + 2.6;
+        }
+        float base = (float) profile.typicalSpeed() * 0.97f;
+        float target = base * (sessionSeconds < rivalSurgeUntil ? 1.2f : 1f);
+        // Rubber band, bounded: it closes when it is behind and eases when far ahead, so the race
+        // is still live at the exit whoever is having the better run.
+        target += (float) Math.max(-0.7, Math.min(0.7, (x - rivalX) * 0.012));
+        rivalSpeed += (target - rivalSpeed) * Math.min(1f, dt * 1.2f);
+        rivalX += rivalSpeed * dt;
+        // It flies the next ring's height.
+        float wanted = altFor((float) profile.typicalSpeed());
+        for (Gate g : gates) {
+            if (g.at >= rivalX && !g.skipped) {
+                wanted = altFor(g.speed);
+                break;
+            }
+        }
+        rivalAlt += (wanted - rivalAlt) * Math.min(1f, dt * 1.8f);
+        // A Schmitt trigger, not a bare comparison: the rubber band holds the two of you within a
+        // metre or two of each other, and your own distance comes from a coasted speed that dips
+        // hard between strokes, so a plain `rivalX > x` flips several times a stroke near parity -
+        // banner, taunt and +3 each time.
+        boolean ahead = rivalWasAhead ? rivalX > x - LEAD_HYSTERESIS : rivalX > x + LEAD_HYSTERESIS;
+        if (ahead != rivalWasAhead && started) {
+            rivalWasAhead = ahead;
+            rivalTaunt = CanyonRouteMap.taunt(ahead ? CanyonRouteMap.TAUNT_AHEAD_KIND
+                    : CanyonRouteMap.TAUNT_BEHIND_KIND, tauntSeq++);
+            rivalTauntUntil = sessionSeconds + 2.8;
+            if (ahead) {
+                banner("THE RIVAL HAS THE LEAD", 0xFFE8557F);
+            } else {
+                banner("YOU HAVE THE LEAD", ACCENT);
+                score += 3;
+            }
+        }
+    }
+
+    /** Crossing the exit ends the run and takes the photo. */
+    private void finishRun() {
+        finished = true;
+        finishSeconds = Math.max(0.1, activeSeconds);
+        finishMedal = CanyonRouteMap.medal(finishSeconds, EXIT_METRES, profile);
+        finishMargin = (float) (x - rivalX);
+        photoFinish = Math.abs(finishMargin) <= 12f;
+        finishAt = sessionSeconds;
+        if (finishMargin > 0) {
+            score += 20;
+        }
+        shake.kick(dp(8f));
+        bests.recordLowest("canyon.exit", (float) finishSeconds);
+        saveRecords();
+        // The card's text, built once: it is a still picture, not an animation.
+        boolean won = finishMargin > 0;
+        finishTitle = photoFinish ? "PHOTO FINISH" : won ? "YOU TOOK THE CANYON" : "THE RIVAL TOOK IT";
+        finishTimeText = CanyonRouteMap.time(finishSeconds);
+        finishLine1 = passed + " gates  ·  " + gems + " prizes  ·  " + golds + " gold  ·  score " + score;
+        String best = bests.has("canyon.exit")
+                ? "  ·  best " + CanyonRouteMap.time(bests.get("canyon.exit", 0f)) : "";
+        finishLine2 = (won ? "won by " : "lost by ")
+                + String.format(java.util.Locale.US, "%.1f m", Math.abs(finishMargin))
+                + best + "  ·  tap to fly it again";
+    }
+
     @Override
     protected void render(Canvas c, float dt) {
         float w = getWidth();
@@ -681,9 +1123,14 @@ final class CanyonFlightGame extends GameView {
             return;
         }
         float speed = boat.value();
-        if (started && !over) {
-            x = sessionMeters - runStart;
+        boolean live = started && !over && !finished;
+        if (live) {
+            if (boosting()) {
+                boostMetres += boostSpeed() * dt;
+            }
+            x = sessionMeters - runStart + boostMetres;
         }
+        boostGlow += ((boosting() ? 1f : 0f) - boostGlow) * Math.min(1f, dt * 5f);
         skyTopY = h * 0.10f;
         skyBottomY = h * 0.86f;
         spawnGates();
@@ -693,12 +1140,26 @@ final class CanyonFlightGame extends GameView {
         if (Math.abs(averaged - flightSpeed) > 0.1f * dt || flightSpeed == 0f) {
             flightSpeed = averaged;
         }
-        if (started && !over) {
+        if (live) {
             recentSpeed += (speed - recentSpeed) * Math.min(1f, dt / 8f);
         }
         altitude += (altFor(flightSpeed) - altitude) * Math.min(1f, 2.2f * dt);
         shake.step(dt);
         fx.step(dt, 0f);
+        if (live) {
+            stepRival(dt);
+            // Full charges fire themselves after a few seconds, so the rower never has to reach
+            // for the screen mid-piece to get the thing they earned.
+            if (boostCharges >= boostCapacity && !boosting()) {
+                if (boostFullSince == 0) {
+                    boostFullSince = sessionSeconds;
+                } else if (sessionSeconds - boostFullSince > 5) {
+                    fireBoost();
+                }
+            } else if (boostCharges < boostCapacity) {
+                boostFullSince = 0;
+            }
+        }
 
         float skyTop = skyTopY;
         float skyBottom = skyBottomY;
@@ -724,22 +1185,37 @@ final class CanyonFlightGame extends GameView {
             break;
         }
 
-        if (started && !over) {
-            // Forks: which side of the spire you are on when you reach it is the road you take.
+        if (live) {
+            // Forks: which road you are lined up with when you reach the spire is the one you take.
             for (int i = 0; i < forks.size(); i++) {
                 Fork f = forks.get(i);
                 if (f.chosen >= 0 || x < f.start) {
                     continue;
                 }
                 corridor(f.start);
-                f.chosen = youY < yOf(cRockLo) ? 1 : 0;
+                int roads = f.slot ? 3 : 2;
+                int bestRoad = LOW_ROAD;
+                float bestGap = Float.MAX_VALUE;
+                for (int r = 0; r < roads; r++) {
+                    float gap = Math.abs(yOf(roadSpeed(r)) - youY);
+                    if (gap < bestGap) {
+                        bestGap = gap;
+                        bestRoad = r;
+                    }
+                }
+                f.chosen = bestRoad;
+                if (forksTaken < forkChoices.length) {
+                    forkChoices[forksTaken++] = bestRoad;
+                }
                 for (Gate g : gates) {
                     if (g.fork == f && g.branch != f.chosen) {
                         g.resolved = true;
                         g.skipped = true;
                     }
                 }
-                if (f.chosen == 1) {
+                if (f.chosen == SLOT_ROAD) {
+                    banner("THE SLOT  -  THREAD IT AND THE STARS ARE YOURS", 0xFFFF8A3D);
+                } else if (f.chosen == HIGH_ROAD) {
                     banner("HIGH ROAD  -  HOLD THE PACE FOR THE STARS", 0xFFF5C518);
                 } else {
                     banner("LOW ROAD  -  EASY PACE, STAY UNDER THE SPIRE", ACCENT);
@@ -760,12 +1236,14 @@ final class CanyonFlightGame extends GameView {
                     fx.burst(youX, youY, 18, dp(120f), 0.5f, dp(3f), 0xFF35D0BA, false);
                     String text = streak >= 3 ? "+1  STREAK x" + streak : "+1";
                     int col = 0xFFF5C518;
+                    boolean clean = dy <= band * 0.45f && scrapeTime <= 0.05f;
                     if (g.pickup != NONE && dy <= band * 0.4f) {
                         g.collected = true;
                         if (g.pickup == STAR) {
-                            score += 5;
+                            int worth = (int) ((g.branch == SLOT_ROAD ? 8 : 5) * prizeMul);
+                            score += worth;
                             gems++;
-                            text = "STAR  +5";
+                            text = "STAR  +" + worth;
                             fx.burst(youX, youY, 30, dp(200f), 0.7f, dp(3.5f), 0xFFF5C518, false);
                         } else if (g.pickup == HEART && lives < LIVES) {
                             lives++;
@@ -773,9 +1251,10 @@ final class CanyonFlightGame extends GameView {
                             col = 0xFFF0655D;
                             fx.burst(youX, youY, 24, dp(150f), 0.6f, dp(3.5f), 0xFFF0655D, false);
                         } else {
-                            score += 2;
+                            int worth = (int) (2 * prizeMul);
+                            score += worth;
                             gems++;
-                            text = g.pickup == HEART ? "HEART  +2" : "GEM  +2";
+                            text = (g.pickup == HEART ? "HEART  +" : "GEM  +") + worth;
                             col = 0xFF4FE3D0;
                             fx.burst(youX, youY, 22, dp(160f), 0.6f, dp(3f), 0xFF4FE3D0, false);
                         }
@@ -788,6 +1267,11 @@ final class CanyonFlightGame extends GameView {
                         shake.kick(dp(4f));
                         fx.burst(youX, gy + Math.signum(youY - gy) * band, 16, dp(140f), 0.4f, dp(2.5f), 0xFFFFD36A, false);
                     }
+                    if (clean && boostCharges < boostCapacity) {
+                        boostCharges++;
+                        text = text + "  ·  BOOST " + boostCharges + "/" + boostCapacity;
+                        fx.burst(youX - dp(30f), youY, 10, dp(90f), 0.4f, dp(2.5f), 0xFFFF8A3D, false);
+                    }
                     popup(text, col, youY);
                 } else {
                     loseLife(youX, youY);
@@ -796,21 +1280,49 @@ final class CanyonFlightGame extends GameView {
                     }
                 }
             }
-            // Rock: the roof, the floor, and inside a fork the spire on the side you did not take.
+            // Timing gates: each split medalled against this rower's own speeds.
+            while (!over && x >= nextCheckAt && nextCheckAt < EXIT_METRES) {
+                double split = Math.max(0.1, activeSeconds - lastCheckSeconds);
+                lastCheckSeconds = activeSeconds;
+                checkIndex++;
+                int medal = CanyonRouteMap.medal(split, CHECK_METRES, profile);
+                if (medal == CanyonRouteMap.GOLD) {
+                    golds++;
+                    score += 6;
+                } else if (medal == CanyonRouteMap.SILVER) {
+                    silvers++;
+                    score += 4;
+                } else if (medal == CanyonRouteMap.BRONZE) {
+                    bronzes++;
+                    score += 2;
+                }
+                banner("CP " + checkIndex + "  " + CanyonRouteMap.MEDAL_NAME[medal] + "  "
+                        + CanyonRouteMap.time(split), CanyonRouteMap.MEDAL_COLOR[medal]);
+                fx.burst(youX, youY, 20, dp(150f), 0.6f, dp(3f), CanyonRouteMap.MEDAL_COLOR[medal], false);
+                nextCheckAt += CHECK_METRES;
+            }
+            // Rock: the roof, the floor, and inside a fork whichever spire you are on.
             if (!over) {
                 corridor(x);
                 float slack = dp(7f);
                 boolean high = youY < yOf(cCeil) + slack;
                 boolean low = youY > yOf(cFloor) - slack;
-                if (cFork != null && cFork.chosen >= 0 && cRockHi > cRockLo + 0.01f) {
-                    if (cFork.chosen == 1 && youY > yOf(cRockHi) - slack) {
-                        low = true;
-                    } else if (cFork.chosen == 0 && youY < yOf(cRockLo) + slack) {
-                        high = true;
+                boolean inSpire = false;
+                if (cFork != null && cFork.chosen >= 0) {
+                    for (int i = 0; i < rockCount; i++) {
+                        if (youY > yOf(rockHi[i]) - slack && youY < yOf(rockLo[i]) + slack) {
+                            inSpire = true;
+                            break;
+                        }
+                    }
+                    if (inSpire) {
+                        // Point the rower at the road they chose rather than at "up" or "down".
+                        high = yOf(roadSpeed(cFork.chosen)) > youY;
+                        low = !high;
                     }
                 }
                 scrapeHigh = high;
-                if ((high || low) && sessionSeconds > graceUntil) {
+                if ((high || low || inSpire) && sessionSeconds > graceUntil) {
                     scrapeTime += dt;
                     shake.kick(dp(3f));
                     sparkClock += dt;
@@ -831,10 +1343,13 @@ final class CanyonFlightGame extends GameView {
                     scrapeTime = Math.max(0f, scrapeTime - dt * 1.5f);
                 }
             }
+            if (!over && x >= EXIT_METRES) {
+                finishRun();
+            }
         }
 
         // The light: afternoon to dusk along the run.
-        float dayT = Daylight.progress(x);
+        float dayT = Daylight.progress(x + dayOffset);
         float dusk = Daylight.shade(dayT);
         int phase = Daylight.phaseIndex(dayT);
         if (phase != lastPhase) {
@@ -893,27 +1408,31 @@ final class CanyonFlightGame extends GameView {
         // The closing rock and any fork spires, in front of the far scenery, behind the plane.
         drawCorridor(c, w, h, youX, ppm, dusk);
         drawForks(c, w, youX, ppm, dusk);
+        drawCheckpoints(c, w, h, youX, ppm);
         // Gates: the back half of each ring now, the front half after the plane, so you fly through.
         drawGates(c, w, youX, ppm, band, false);
+        drawRival(c, w, youX, ppm);
         // You: a little plane, pitched by the climb, with a contrail and prop blur.
         float climb = dt > 0 && lastYouY != 0f ? (lastYouY - youY) / dt : 0f;
         lastYouY = youY;
         pitch += (Math.max(-0.5f, Math.min(0.5f, climb / dp(160f))) - pitch) * Math.min(1f, 4f * dt);
-        Fx.glow(c, youX, youY, dp(60f), streak >= 3 ? 0x66F5C518 : 0x4035D0BA);
+        Fx.glow(c, youX, youY, dp(60f), boostGlow > 0.2f ? 0x88FF8A3D : streak >= 3 ? 0x66F5C518 : 0x4035D0BA);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
         for (int k = 0; k < 3; k++) {
-            paint.setColor(k == 0 ? 0x88FFFFFF : k == 1 ? 0x55FFFFFF : 0x33FFFFFF);
-            paint.setStrokeWidth(dp(4f - k));
-            float tx = youX - dp(40f) - k * speed * dp(14f);
+            int trail = boostGlow > 0.2f ? (k == 0 ? 0xCCFFD36A : k == 1 ? 0x88FF8A3D : 0x55FF6A2A)
+                    : (k == 0 ? 0x88FFFFFF : k == 1 ? 0x55FFFFFF : 0x33FFFFFF);
+            paint.setColor(trail);
+            paint.setStrokeWidth(dp(4f - k) * (1f + boostGlow));
+            float tx = youX - dp(40f) - k * speed * dp(14f) - boostGlow * dp(90f);
             c.drawLine(youX - dp(30f), youY + pitch * dp(20f), tx - speed * dp(10f), youY + pitch * dp(20f) + k * dp(3f), paint);
         }
         paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
         boolean hurt = sessionSeconds < hurtUntil;
-        boolean grace = sessionSeconds < graceUntil;
+        boolean grace = sessionSeconds < graceUntil && !boosting();
         if ((!hurt && !grace) || ((int) (sessionSeconds * 10) % 2 == 0)) {
-            drawPlane(c, youX, youY, speed);
+            drawPlane(c, youX, youY, speed, pitch, 0xFFF4F4F4, ACCENT);
         }
         drawGates(c, w, youX, ppm, band, true);
         fx.draw(c);
@@ -922,9 +1441,11 @@ final class CanyonFlightGame extends GameView {
             bold(c, popupText, youX + dp(40f), popupY - dp(30f) - rise, 20f, popupColor, Paint.Align.LEFT);
         }
         c.restore();
-        Fx.speedLines(c, paint, w, h, speed, sessionSeconds, dp(1f));
+        Fx.speedLines(c, paint, w, h, speed + boostGlow * 3f, sessionSeconds, dp(1f));
         if (hurt) {
             Fx.vignette(c, w, h, 0.7f, 0x8A1010);
+        } else if (boostGlow > 0.05f) {
+            Fx.vignette(c, w, h, 0.25f + boostGlow * 0.35f, 0x8A4A10);
         } else if (scrapeTime > 0.05f) {
             Fx.vignette(c, w, h, 0.25f + scrapeTime / SCRAPE_LIMIT * 0.5f, 0x8A4A10);
         }
@@ -934,13 +1455,27 @@ final class CanyonFlightGame extends GameView {
             paint.setColor(i < lives ? ACCENT : 0x33FFFFFF);
             c.drawCircle(dp(18f) + i * dp(18f), dp(20f), dp(6f), paint);
         }
-        label(c, gems + " prizes  ·  " + shaves + " shaves", dp(12f), dp(42f), 8.5f, FAINT, Paint.Align.LEFT);
+        label(c, gems + " prizes  ·  " + shaves + " shaves  ·  " + golds + "G " + silvers + "S " + bronzes + "B",
+                dp(12f), dp(42f), 8.5f, FAINT, Paint.Align.LEFT);
         bold(c, String.valueOf(score), w / 2f, dp(30f), 24f, TEXT, Paint.Align.CENTER);
         label(c, streak >= 2 ? "SCORE  ·  " + passed + " GATES  ·  STREAK x" + streak : "SCORE  ·  " + passed + " GATES",
                 w / 2f, dp(44f), 8.5f, streak >= 3 ? 0xFFF5C518 : FAINT, Paint.Align.CENTER);
+        // The race: who is ahead, and how far is left.
+        float lead = (float) (x - rivalX);
+        label(c, started ? (lead >= 0 ? "LEADING BY " + Math.round(lead) + " m"
+                        : "RIVAL AHEAD BY " + Math.round(-lead) + " m") + "   ·   "
+                        + Math.max(0, Math.round(EXIT_METRES - x)) + " m TO THE EXIT"
+                        : "THE RIVAL IS WARMING UP",
+                w / 2f, dp(58f), 9f, lead >= 0 ? ACCENT : 0xFFE8557F, Paint.Align.CENTER);
         bold(c, String.format(java.util.Locale.US, "%.1f m/s", speed), w - dp(16f), dp(30f), 18f, ACCENT,
                 Paint.Align.RIGHT);
-        label(c, Daylight.phaseName(phase), w - dp(16f), dp(44f), 8.5f, 0xFFFFC27A, Paint.Align.RIGHT);
+        label(c, Daylight.phaseName(phase) + "  ·  " + clock(activeSeconds), w - dp(16f), dp(44f), 8.5f,
+                0xFFFFC27A, Paint.Align.RIGHT);
+        float mapW = Math.min(dp(230f), w * 0.3f);
+        map.draw(c, w - dp(16f) - mapW, dp(64f), mapW, (float) (x / EXIT_METRES), forkChoices,
+                Math.max(5, forksTaken), ROAD_NAMES, unlockScore,
+                (int) (EXIT_METRES / CHECK_METRES) - 1, checkIndex, golds);
+        drawBoostMeter(c, w, h);
         if (sessionSeconds < bannerUntil) {
             bold(c, bannerText, w / 2f, h * 0.2f, 18f, bannerColor, Paint.Align.CENTER);
         }
@@ -965,17 +1500,24 @@ final class CanyonFlightGame extends GameView {
         String cap;
         int col = FAINT;
         if (!started) {
-            cap = "TAKE A STROKE TO TAKE OFF";
+            cap = "TAKE A STROKE TO TAKE OFF  ·  " + Math.round(EXIT_METRES) + " m TO THE CANYON EXIT";
         } else if (over) {
             cap = "DOWN  ·  score " + score + "  ·  " + passed + " gates, " + Math.round(x) + " m  ·  tap to fly again";
             col = BAD;
+        } else if (finished) {
+            cap = "";
+        } else if (boosting()) {
+            cap = "BOOST  -  THE ROCK CANNOT TOUCH YOU";
+            col = 0xFFFF8A3D;
         } else if (scrapeTime > 0.05f) {
             // Covers the fork spire too, which is neither the roof nor the floor.
             cap = scrapeHigh ? "SCRAPING THE ROOF - EASE OFF" : "SCRAPING ROCK - PULL UP";
             col = BAD;
         } else if (nextFork != null) {
-            cap = String.format(java.util.Locale.US, "FORK IN %d m  ·  CLIMB FOR THE HIGH ROAD, SETTLE FOR THE LOW",
-                    Math.max(0, Math.round(nextFork.start - x)));
+            cap = String.format(java.util.Locale.US, "FORK IN %d m  ·  %s",
+                    Math.max(0, Math.round(nextFork.start - x)),
+                    nextFork.slot ? "CLIMB FOR THE STARS, HOLD STEADY FOR THE SLOT, SETTLE FOR THE LOW"
+                            : "CLIMB FOR THE HIGH ROAD, SETTLE FOR THE LOW");
             col = 0xFFF5C518;
         } else if (roofGap < dp(28f)) {
             cap = "ROOF CLOSING - EASE OFF";
@@ -992,7 +1534,20 @@ final class CanyonFlightGame extends GameView {
         } else {
             cap = "CLEAR SKIES";
         }
-        bold(c, cap, w / 2f, h - dp(16f), 12f, col, Paint.Align.CENTER);
+        if (cap.length() > 0) {
+            bold(c, cap, w / 2f, h - dp(16f), 12f, col, Paint.Align.CENTER);
+        }
+        if (finished) {
+            drawPhotoFinish(c, w, h);
+        }
+    }
+
+    /** The shutter, then the print. */
+    private void drawPhotoFinish(Canvas c, float w, float h) {
+        float age = (float) (sessionSeconds - finishAt);
+        float flash = Math.max(0f, 1f - age / 0.45f);
+        map.photoFinish(c, w, h, flash, finishTitle, finishMedal, finishTimeText, finishLine1, finishLine2,
+                ACCENT, 0xFFE8557F, finishMargin, finishSeconds);
     }
 
     /**

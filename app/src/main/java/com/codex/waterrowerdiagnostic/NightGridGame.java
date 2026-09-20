@@ -23,9 +23,28 @@ import android.view.MotionEvent;
  *
  * <p>Events run on the rowing clock, so resting does not skip them: a STORM, in which every surge
  * (a stroke clearly harder than your recent ones) is a lightning strike on the mast that charges
- * the battery bank, then a BLACKOUT, in which you must hold power above the line or the reserve
- * drains - the battery you charged in the storm is spent first - and if it empties the grid goes
- * down. Hold it and the town lets off fireworks and cheers from its windows.
+ * the battery bank; a PEAK DEMAND hour, in which the whole valley switches on at once and the
+ * demand line swells by half for half a minute; then a BLACKOUT, in which you must hold power
+ * above the line or the reserve drains and the grid goes down.
+ *
+ * <p>3.23.0 added the five the rower asked for:
+ * <ul>
+ *   <li><b>Neighbouring towns.</b> Three hamlets on the far ridge - Riverside, Pine Hollow, East
+ *       Harbour - unlock at lifetime energy milestones and are wired in by <i>spending</i> half the
+ *       battery on their CONNECT chip. Each adds fourteen homes to light and 18% to demand for
+ *       ever, and its spur line carries current up from the valley.
+ *   <li><b>Contracts.</b> A standing order to deliver a set number of kilojoules inside a
+ *       three-and-a-half-minute window of the rowing clock, sized from the rower's own typical
+ *       power. Deliver it for a charge and a festival; let it lapse and the next one is easier.
+ *   <li><b>Peak demand.</b> A mid-cycle swell to 1.45x demand. Cover it for 55% of the window and
+ *       the battery gains a quarter; fall short and the towns brown out, visibly, while you watch.
+ *   <li><b>A battery bank you spend.</b> It persists across sessions ({@code grid.battery}) and is
+ *       no longer spent for you: the DISCHARGE switch under the bank dumps it into the grid at
+ *       120% of typical power for eight seconds - enough to carry a blackout or a peak - and it is
+ *       also the currency that connects a new town. Surplus supply trickles back in.
+ *   <li><b>A festival of lights</b> at every milestone: bunting strung over the rooftops, a lantern
+ *       parade along the valley road, fireworks, and every window full of people waving.
+ * </ul>
  *
  * <p>Decorations follow the real season (tap the season chip, top right, to preview the others).
  */
@@ -35,22 +54,48 @@ final class NightGridGame extends GameView {
     private static final double JOULES_PER_HOUSE = 20000;
     private static final int START_HOUSES = 24;
 
+    /** Neighbouring towns on the far ridge: unlocked by lifetime energy, connected by battery. */
+    private static final String[] NEIGHBOUR = {"RIVERSIDE", "PINE HOLLOW", "EAST HARBOUR"};
+    private static final double[] NEIGHBOUR_J = {150e3, 450e3, 1000e3};
+    private static final float[] NEIGHBOUR_X = {0.30f, 0.56f, 0.82f};
+    private static final int NEIGH_HOUSES = 14;
+    /** Share of the battery a new town costs to wire in. */
+    private static final float CONNECT_COST = 0.5f;
+    /** Each connected town adds this share of the home town's demand, for ever. */
+    private static final float TOWN_DEMAND = 0.18f;
+
+    /** Seconds of the rowing clock a contract allows, and the share of typical power it asks for. */
+    private static final double CONTRACT_SECONDS = 210;
+    private static final double CONTRACT_SHARE = 0.7;
+    /** How far demand swells at the top of the peak hour. */
+    private static final float PEAK_SWELL = 1.45f;
+    /** Share of the peak window you must cover to bank the reward. */
+    private static final double PEAK_COVER = 0.55;
+    /** Seconds a discharge lasts, and what it adds as a multiple of typical power. */
+    private static final float DISCHARGE_SECONDS = 8f;
+    private static final double DISCHARGE_GAIN = 1.2;
+    /** Share of the bank a full discharge spends. Its own constant: it is not the connect price. */
+    private static final float DISCHARGE_DRAIN = 0.5f;
+
     /** Landmarks, built at lifetime energy milestones and lit once enough of the town is lit. */
     private static final String[] LANDMARK = {"CHURCH", "WATER TOWER", "TOWN HALL", "LIGHTHOUSE"};
     private static final double[] LANDMARK_J = {300e3, 800e3, 1500e3, 2500e3};
     private static final float[] LANDMARK_LIT = {0.25f, 0.45f, 0.65f, 0.15f};
 
     /* Event cycle, in seconds of the rowing clock. */
-    private static final double CYCLE = 140;
+    private static final double CYCLE = 170;
     private static final double STORM_START = 40;
     private static final double STORM_END = 68;
-    private static final double WARN_START = 95;
-    private static final double BLACKOUT_START = 98;
-    private static final double BLACKOUT_END = 113;
+    private static final double PEAK_START = 80;
+    private static final double PEAK_END = 106;
+    private static final double WARN_START = 125;
+    private static final double BLACKOUT_START = 128;
+    private static final double BLACKOUT_END = 143;
     private static final int CALM = 0;
     private static final int STORM = 1;
     private static final int WARNING = 2;
     private static final int BLACKOUT = 3;
+    private static final int PEAK = 4;
 
     private static final int WINTER = 0;
     private static final int SPRING = 1;
@@ -74,6 +119,13 @@ final class NightGridGame extends GameView {
     private final float[] bolt = new float[24];
     private final java.util.Random rnd = new java.util.Random();
     private final RectF seasonHit = new RectF();
+
+    /* Neighbouring towns: a cluster of small houses per town, laid out once on the far ridge. */
+    private final float[] nhDX = new float[NEIGHBOUR.length * NEIGH_HOUSES];
+    private final float[] nhDY = new float[NEIGHBOUR.length * NEIGH_HOUSES];
+    private final float[] nhS = new float[NEIGHBOUR.length * NEIGH_HOUSES];
+    private final RectF[] connectHit = new RectF[NEIGHBOUR.length];
+    private final RectF dischargeHit = new RectF();
 
     private LinearGradient sky;
     private float skyH;
@@ -114,6 +166,24 @@ final class NightGridGame extends GameView {
     private int baseCount;
     private int strikes;
 
+    // Neighbouring towns, contracts, the peak hour and the battery you spend.
+    private int townsConnected;
+    private float townFlow;
+    private int contractTier;
+    private int contractsDone;
+    private boolean contractActive;
+    private double contractTarget;
+    private double contractDone;
+    private double contractLeft;
+    private float peakFactor = 1f;
+    private double peakHeld;
+    private int peaksCovered;
+    private float dischargeLeft;
+    private float boostW;
+    private float gridSupply;
+    private float festival;
+    private int festivals;
+
     private String banner;
     private int bannerColor;
     private float bannerTime;
@@ -141,6 +211,18 @@ final class NightGridGame extends GameView {
         for (int i = 0; i < MAX_HOUSES; i++) {
             order[i] = idx[i];
             rank[idx[i]] = i;
+        }
+        // Neighbouring hamlets: two rows of small houses either side of the town centre.
+        java.util.Random n = new java.util.Random(707);
+        for (int k = 0; k < NEIGHBOUR.length; k++) {
+            for (int j = 0; j < NEIGH_HOUSES; j++) {
+                int i = k * NEIGH_HOUSES + j;
+                int row = j % 2;
+                nhDX[i] = (j / 2 - 3.2f) * 0.0145f + (n.nextFloat() - 0.5f) * 0.006f;
+                nhDY[i] = row == 0 ? 5f : 18f;      // dp, added to the ridge line at draw time
+                nhS[i] = (row == 0 ? 13f : 17f) + n.nextFloat() * 4f;
+            }
+            connectHit[k] = new RectF();
         }
     }
 
@@ -178,6 +260,19 @@ final class NightGridGame extends GameView {
         baseCount = 0;
         strikes = 0;
         banner = null;
+        townsConnected = Math.max(0, Math.min(NEIGHBOUR.length, Math.round(bests.get("grid.towns", 0f))));
+        contractsDone = Math.max(0, Math.round(bests.get("grid.contracts", 0f)));
+        peaksCovered = Math.max(0, Math.round(bests.get("grid.peaks", 0f)));
+        festivals = Math.max(0, Math.round(bests.get("grid.festivals", 0f)));
+        contractTier = Math.min(6, contractsDone);
+        peakFactor = 1f;
+        peakHeld = 0;
+        dischargeLeft = 0f;
+        boostW = 0f;
+        gridSupply = 0f;
+        festival = 0f;
+        townFlow = 0f;
+        newContract();
         java.util.Arrays.fill(bornAt, -1f);
         long now = System.currentTimeMillis();
         tzOffsetMs = java.util.TimeZone.getDefault().getOffset(now);
@@ -191,6 +286,10 @@ final class NightGridGame extends GameView {
         bests.recordHighest("grid.houses", houses);
         bests.putFloat("grid.held", heldTotal);
         bests.putFloat("grid.battery", battery);
+        bests.putFloat("grid.towns", townsConnected);
+        bests.recordHighest("grid.contracts", contractsDone);
+        bests.recordHighest("grid.peaks", peaksCovered);
+        bests.recordHighest("grid.festivals", festivals);
         if (runSeconds > 120) {
             bests.recordHighest("grid.percent", (float) (100 * litSeconds / runSeconds));
         }
@@ -198,11 +297,58 @@ final class NightGridGame extends GameView {
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_DOWN && seasonHit.contains(e.getX(), e.getY())) {
+        if (e.getAction() != MotionEvent.ACTION_DOWN) {
+            return super.onTouchEvent(e);
+        }
+        float x = e.getX();
+        float y = e.getY();
+        if (dischargeHit.contains(x, y)) {
+            spendBattery();
+            return true;
+        }
+        int next = townsConnected;
+        if (next < NEIGHBOUR.length && lifetimeJoules >= NEIGHBOUR_J[next]
+                && connectHit[next].contains(x, y)) {
+            connectTown(next);
+            return true;
+        }
+        if (seasonHit.contains(x, y)) {
             seasonOverride = (season() + 1) % 4;
             return true;
         }
         return super.onTouchEvent(e);
+    }
+
+    /** DISCHARGE: dump the bank into the grid for eight seconds. The rower's call, not the game's. */
+    private void spendBattery() {
+        if (dischargeLeft > 0f) {
+            return;
+        }
+        if (battery < 0.05f) {
+            say("THE BANK IS EMPTY - SURGE IN A STORM TO CHARGE IT", BAD);
+            return;
+        }
+        dischargeLeft = DISCHARGE_SECONDS;
+        say("DISCHARGING THE BANK", 0xFF6FD8FF);
+    }
+
+    /** Wire a neighbouring town into the grid, paid for out of the battery bank. */
+    private void connectTown(int k) {
+        if (k != townsConnected || k >= NEIGHBOUR.length || lifetimeJoules < NEIGHBOUR_J[k]) {
+            return;
+        }
+        if (battery < CONNECT_COST) {
+            say("NEED " + Math.round(CONNECT_COST * 100) + "% BATTERY TO RUN THE LINE", BAD);
+            return;
+        }
+        battery -= CONNECT_COST;
+        townsConnected++;
+        startFestival(NEIGHBOUR[k] + " JOINS THE GRID");
+    }
+
+    /** Total homes on the grid: the home town plus every connected neighbour. */
+    private int totalHomes() {
+        return houses + townsConnected * NEIGH_HOUSES;
     }
 
     private int season() {
@@ -219,10 +365,16 @@ final class NightGridGame extends GameView {
         return (int) Math.max(0, Math.min(MAX_HOUSES, beyond));
     }
 
-    private float demand() {
-        // An evening peak every few minutes: 60% of typical power, swelling by a tenth. Was 80%, and
-        // on the tablet an easy 32 W row against 106 W demand lit nothing at all - it looked dead.
+    /** What the home town alone asks for: 60% of typical power, breathing by a tenth. */
+    private float homeDemand() {
+        // Was 80%, and on the tablet an easy 32 W row against 106 W demand lit nothing at all - it
+        // looked dead.
         return (float) Math.max(10.0, profile.typicalWatts() * 0.6 * (1 + 0.1 * Math.sin(sessionSeconds / 45.0)));
+    }
+
+    /** The whole grid's demand: every connected town, and the peak hour's swell on top. */
+    private float demand() {
+        return homeDemand() * (1f + TOWN_DEMAND * townsConnected) * peakFactor;
     }
 
     /** The line a blackout asks you to hold: a quarter above ordinary demand, ~75% of typical. */
@@ -249,12 +401,65 @@ final class NightGridGame extends GameView {
         bannerTime = 2.4f;
     }
 
+    /* ---------------- contracts ---------------- */
+
+    /**
+     * A standing order for energy, sized from the rower's own typical power rather than a constant:
+     * 70% of typical held across the window. Each delivered contract raises the tier by a fifth;
+     * a lapsed one drops it back, so it settles where this rower actually is.
+     */
+    private void newContract() {
+        double base = Math.max(40.0, profile.typicalWatts()) * CONTRACT_SHARE * CONTRACT_SECONDS;
+        contractTarget = base * Math.pow(1.12, Math.min(6, contractTier));
+        contractDone = 0;
+        contractLeft = CONTRACT_SECONDS;
+        contractActive = true;
+    }
+
+    private void stepContract(float dt, boolean rowing) {
+        if (!contractActive) {
+            return;
+        }
+        if (contractDone >= contractTarget) {
+            contractsDone++;
+            contractTier = Math.min(6, contractTier + 1);
+            battery = Math.min(1f, battery + 0.3f);
+            startFestival("CONTRACT " + contractsDone + " DELIVERED");
+            newContract();
+            return;
+        }
+        if (rowing) {
+            contractLeft -= dt;
+        }
+        if (contractLeft <= 0) {
+            contractTier = Math.max(0, contractTier - 1);
+            say("CONTRACT LAPSED - A LIGHTER ONE IS ON THE WIRE", BAD);
+            newContract();
+        }
+    }
+
+    /**
+     * A festival of lights: bunting over the rooftops, a lantern parade along the valley road,
+     * fireworks and every window full of people. Fired at every milestone the town reaches.
+     */
+    private void startFestival(String why) {
+        festival = Math.max(festival, 18f);
+        fireworks = Math.max(fireworks, 6f);
+        fireworkNext = 0f;
+        cheer = Math.max(cheer, 6f);
+        festivals++;
+        say("FESTIVAL OF LIGHTS - " + why, 0xFFFFD27A);
+    }
+
     /* ---------------- events ---------------- */
 
     private int phaseAt(double clock) {
         double p = clock % CYCLE;
         if (p >= STORM_START && p < STORM_END) {
             return STORM;
+        }
+        if (p >= PEAK_START && p < PEAK_END) {
+            return PEAK;
         }
         if (p >= WARN_START && p < BLACKOUT_START) {
             return WARNING;
@@ -271,33 +476,56 @@ final class NightGridGame extends GameView {
         }
         int now = phaseAt(eventClock);
         if (now != phase) {
+            // Leaving a phase: bank what was held.
+            if (phase == BLACKOUT && !blackoutFailed) {
+                heldSession++;
+                heldTotal++;
+                startFestival("THE LIGHTS HELD");
+            }
+            if (phase == PEAK) {
+                if (peakHeld >= (PEAK_END - PEAK_START) * PEAK_COVER) {
+                    peaksCovered++;
+                    battery = Math.min(1f, battery + 0.25f);
+                    cheer = Math.max(cheer, 4f);
+                    fireworks = Math.max(fireworks, 2.5f);
+                    say("PEAK COVERED - +25% CHARGE", ACCENT);
+                } else {
+                    say("PEAK MISSED - THE VALLEY BROWNED OUT", BAD);
+                }
+            }
             if (now == STORM) {
                 say("STORM - SURGE TO CHARGE THE BATTERY", BLUE);
                 ambientNext = sessionSeconds + 2;
+            } else if (now == PEAK) {
+                peakHeld = 0;
+                say("PEAK DEMAND - THE WHOLE VALLEY SWITCHES ON", WARN_COLOR);
             } else if (now == WARNING) {
                 blackoutFailed = false;
                 say("BLACKOUT COMING - GET ON IT", BAD);
             } else if (now == BLACKOUT) {
                 reserve = 1f;
-            } else if (phase == BLACKOUT && now == CALM && !blackoutFailed) {
-                heldSession++;
-                heldTotal++;
-                cheer = 5f;
-                fireworks = 3.5f;
-                fireworkNext = 0f;
-                say("LIGHTS HELD!", ACCENT);
             }
             phase = now;
         }
         stormAmt += ((phase == STORM ? 1f : 0f) - stormAmt) * Math.min(1f, dt / 2.5f);
 
+        // The peak hour: demand swells to PEAK_SWELL and back across the window, so the demand
+        // marker visibly sweeps out and returns. Hold the line for most of it and the bank gains.
+        float peakTarget = 1f;
+        if (phase == PEAK) {
+            double f = ((eventClock % CYCLE) - PEAK_START) / (PEAK_END - PEAK_START);
+            peakTarget = 1f + (PEAK_SWELL - 1f) * (float) Math.sin(Math.PI * Math.max(0, Math.min(1, f)));
+        }
+        peakFactor += (peakTarget - peakFactor) * Math.min(1f, dt / 0.6f);
+        if (phase == PEAK && gridSupply >= demand()) {
+            peakHeld += dt;
+        }
+
         if (phase == BLACKOUT && !blackoutFailed) {
+            // The bank is no longer spent for you: hit DISCHARGE, which is already in gridSupply.
             float need = blackoutNeed();
-            float deficit = Math.max(0f, need - supply) / Math.max(1f, need);
-            float drain = deficit * dt / 3f;
-            float take = Math.min(battery, drain);
-            battery -= take;
-            reserve -= drain - take;
+            float deficit = Math.max(0f, need - gridSupply) / Math.max(1f, need);
+            reserve -= deficit * dt / 3f;
             if (deficit <= 0f) {
                 reserve = Math.min(1f, reserve + dt * 0.04f);
             }
@@ -313,6 +541,22 @@ final class NightGridGame extends GameView {
             darkTimer = Math.max(0f, darkTimer - dt);
         }
         cheer = Math.max(0f, cheer - dt);
+
+        // Surplus supply trickles back into the bank, so the battery is earned by rowing well and
+        // not only by surging in a storm.
+        if (rowing && phase != BLACKOUT) {
+            float d = demand();
+            if (gridSupply > d * 1.02f) {
+                battery = Math.min(1f, battery
+                        + dt * 0.02f * Math.min(1f, (gridSupply - d) / Math.max(20f, d)));
+            }
+        }
+        if (festival > 0f) {
+            festival = Math.max(0f, festival - dt);
+            cheer = Math.max(cheer, 0.5f);
+            fireworks = Math.max(fireworks, Math.min(festival, 1.5f));
+        }
+        townFlow += dt * (0.3f + gridSupply / 200f);
 
         // Surges, judged per stroke against your own recent strokes (never read in onStroke: power
         // has collapsed by the time the counter ticks). Average drive power when the meter has
@@ -588,6 +832,259 @@ final class NightGridGame extends GameView {
         }
         label(c, "BATTERY " + Math.round(battery * 100) + "%", x0, top + cellH + dp(14f), 10f,
                 battery > 0 ? 0xFF9FD8FF : FAINT, Paint.Align.LEFT);
+    }
+
+    /**
+     * The DISCHARGE switch under the bank. This is the whole point of the battery: it is yours to
+     * spend, on carrying a peak or a blackout, or on wiring in a neighbouring town.
+     */
+    private void drawDischarge(Canvas c, float w, float h) {
+        float x0 = w * 0.025f;
+        float y0 = h * 0.64f + dp(56f);
+        float bw = dp(124f);
+        float bh = dp(30f);
+        dischargeHit.set(x0, y0, x0 + bw, y0 + bh);
+        boolean live = dischargeLeft > 0f;
+        boolean ready = !live && battery > 0.05f;
+        if (ready) {
+            // A pulse so it reads as a control, not a readout.
+            float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 3.2);
+            glow(c, dischargeHit.centerX(), dischargeHit.centerY(), dp(52f),
+                    (((int) (40 + 60 * pulse)) << 24) | 0x6FD8FF);
+        }
+        paint.setColor(live ? 0xDD1E3A4A : ready ? 0xDD16283C : 0x55202838);
+        c.drawRoundRect(dischargeHit, dp(8f), dp(8f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(live ? 0xFFF0B132 : ready ? 0xFF6FD8FF : 0xFF3A4254);
+        c.drawRoundRect(dischargeHit, dp(8f), dp(8f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        if (live) {
+            // The switch is thrown: a draining bar across the button.
+            float f = Math.max(0f, dischargeLeft / DISCHARGE_SECONDS);
+            paint.setColor(0x55F0B132);
+            c.drawRect(x0 + dp(2f), y0 + bh - dp(5f), x0 + dp(2f) + (bw - dp(4f)) * f, y0 + bh - dp(2f), paint);
+            label(c, "DISCHARGING " + (int) Math.ceil(dischargeLeft) + "s", dischargeHit.centerX(),
+                    y0 + dp(19f), 10f, 0xFFF0B132, Paint.Align.CENTER);
+        } else {
+            label(c, ready ? "DISCHARGE  +" + Math.round(profile.typicalWatts() * DISCHARGE_GAIN) + " W" : "BANK EMPTY",
+                    dischargeHit.centerX(), y0 + dp(19f), 10f, ready ? 0xFF9FD8FF : FAINT, Paint.Align.CENTER);
+        }
+    }
+
+    /** The far ridge across the valley, where the neighbouring towns sit. */
+    private float farHillY(float x, float h) {
+        return h * 0.425f + (float) Math.sin(x / dp(210f) + 1.7) * dp(13f);
+    }
+
+    private void drawFarRidge(Canvas c, float w, float h) {
+        paint.setColor(0xFF0D1730);
+        path.reset();
+        path.moveTo(0, farHillY(0, h));
+        for (float x = dp(50f); x <= w + dp(50f); x += dp(50f)) {
+            path.lineTo(x, farHillY(x, h));
+        }
+        path.lineTo(w + dp(50f), h * 0.62f);
+        path.lineTo(0, h * 0.62f);
+        path.close();
+        c.drawPath(path, paint);
+    }
+
+    /**
+     * A neighbouring town: a hamlet on the far ridge, its spur line climbing from the valley's
+     * power line, its windows lit from whatever the home town does not take.
+     */
+    private void drawNeighbourTown(Canvas c, float w, float h, int k, int litHere, boolean connected) {
+        double t = sessionSeconds;
+        float cx = w * NEIGHBOUR_X[k];
+        float lineY = h * 0.48f;
+        if (connected) {
+            float baseY = farHillY(cx, h) + dp(20f);
+            paint.setColor(0xFF2A3648);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.6f));
+            c.drawLine(cx, baseY, cx, lineY, paint);
+            // A little pylon where the spur meets the valley line.
+            c.drawLine(cx - dp(7f), lineY, cx, lineY - dp(16f), paint);
+            c.drawLine(cx + dp(7f), lineY, cx, lineY - dp(16f), paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(litHere > 0 ? 0xFFF5C518 : 0xFF6A7488);
+            for (int d = 0; d < 4; d++) {
+                float f = (float) (((townFlow + d / 4f) % 1.0 + 1.0) % 1.0);
+                c.drawCircle(cx, lineY - f * (lineY - baseY), dp(2f), paint);
+            }
+        }
+        for (int j = 0; j < NEIGH_HOUSES; j++) {
+            int i = k * NEIGH_HOUSES + j;
+            float hx = cx + nhDX[i] * w;
+            float hy = farHillY(hx, h) + dp(nhDY[i]);
+            float s = dp(nhS[i]);
+            // Not named `on`: that is the home town's lit array, and a local of the same name
+            // shadowing it is one edit away from a bug that still compiles.
+            boolean alight = j < litHere;
+            paint.setColor(alight ? 0xFF313A50 : 0xFF1C2438);
+            c.drawRect(hx - s * 0.5f, hy - s * 0.62f, hx + s * 0.5f, hy, paint);
+            path.reset();
+            path.moveTo(hx - s * 0.6f, hy - s * 0.62f);
+            path.lineTo(hx, hy - s * 1.0f);
+            path.lineTo(hx + s * 0.6f, hy - s * 0.62f);
+            path.close();
+            paint.setColor(alight ? 0xFF4A3330 : 0xFF2A2230);
+            c.drawPath(path, paint);
+            if (alight) {
+                float flicker = 0.8f + 0.2f * (float) Math.sin(t * 2.6 + i * 1.7);
+                glow(c, hx, hy - s * 0.35f, s * 1.5f, (((int) (0x55 * flicker)) << 24) | 0xFFD37A);
+                paint.setColor(0xFFFFE08A);
+                c.drawRect(hx - s * 0.22f, hy - s * 0.46f, hx + s * 0.06f, hy - s * 0.18f, paint);
+            } else {
+                paint.setColor(0xFF121926);
+                c.drawRect(hx - s * 0.22f, hy - s * 0.46f, hx + s * 0.06f, hy - s * 0.18f, paint);
+            }
+        }
+        String tag = connected ? "  " + litHere + "/" + NEIGH_HOUSES
+                : lifetimeJoules < NEIGHBOUR_J[k]
+                        ? "  " + Math.round((NEIGHBOUR_J[k] - lifetimeJoules) / 1000) + " kJ AWAY"
+                        : "";
+        label(c, NEIGHBOUR[k] + tag, cx, farHillY(cx, h) - dp(26f), 9f,
+                connected ? (litHere > 0 ? 0xFFBFD4F0 : FAINT) : FAINT, Paint.Align.CENTER);
+    }
+
+    /**
+     * The CONNECT chip under the next town you can wire in. Drawn late, over the hills, so the
+     * ridge cannot swallow a control.
+     */
+    private void drawConnectChip(Canvas c, float w, float h) {
+        int k = townsConnected;
+        if (k >= NEIGHBOUR.length) {
+            return;
+        }
+        float cx = w * NEIGHBOUR_X[k];
+        if (lifetimeJoules < NEIGHBOUR_J[k]) {
+            connectHit[k].setEmpty();
+            return;
+        }
+        float cw = dp(176f);
+        float ch = dp(28f);
+        float y0 = farHillY(cx, h) + dp(30f);
+        connectHit[k].set(cx - cw / 2f, y0, cx + cw / 2f, y0 + ch);
+        boolean can = battery >= CONNECT_COST;
+        float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 2.6);
+        if (can) {
+            glow(c, cx, y0 + ch / 2f, dp(76f), (((int) (30 + 50 * pulse)) << 24) | 0x35D0BA);
+        }
+        paint.setColor(can ? 0xEE13312B : 0xCC1A2030);
+        c.drawRoundRect(connectHit[k], dp(14f), dp(14f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(can ? ACCENT : 0xFF3A4254);
+        c.drawRoundRect(connectHit[k], dp(14f), dp(14f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        label(c, can ? "CONNECT " + NEIGHBOUR[k] + "  ·  " + Math.round(CONNECT_COST * 100) + "%"
+                        : NEIGHBOUR[k] + " NEEDS " + Math.round(CONNECT_COST * 100) + "% BATTERY",
+                cx, y0 + dp(18f), 10f, can ? ACCENT : FAINT, Paint.Align.CENTER);
+    }
+
+    /**
+     * The festival: bunting strung over the rooftops and a lantern parade walking the valley road.
+     * The fireworks and the waving people come from {@link #startFestival} setting cheer.
+     */
+    private void drawFestival(Canvas c, float w, float h) {
+        if (festival <= 0f) {
+            return;
+        }
+        double t = sessionSeconds;
+        float a = Math.min(1f, festival / 1.5f);
+        // Bunting: four strings sagging across the town, flags swinging with the string.
+        for (int s = 0; s < 4; s++) {
+            float x0 = w * (0.24f + s * 0.185f);
+            float x1 = x0 + w * 0.175f;
+            float y0 = h * (0.575f + (s % 2) * 0.07f);
+            float sway = (float) Math.sin(t * 1.6 + s) * dp(3f);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.2f));
+            paint.setColor((((int) (170 * a)) << 24) | 0x8A93A6);
+            float px = x0;
+            float py = y0;
+            for (int q = 1; q <= 12; q++) {
+                float f = q / 12f;
+                float x = x0 + (x1 - x0) * f;
+                float y = y0 + (float) Math.sin(f * Math.PI) * dp(24f) + sway * f;
+                c.drawLine(px, py, x, y, paint);
+                px = x;
+                py = y;
+            }
+            paint.setStyle(Paint.Style.FILL);
+            for (int q = 0; q < 12; q++) {
+                float f = (q + 0.5f) / 12f;
+                float x = x0 + (x1 - x0) * f;
+                float y = y0 + (float) Math.sin(f * Math.PI) * dp(24f) + sway * f;
+                float tilt = (float) Math.sin(t * 3 + q + s) * dp(3f);
+                int col = q % 4 == 0 ? 0xFFFF7A9C : q % 4 == 1 ? 0xFFFFD27A
+                        : q % 4 == 2 ? 0xFF7FE6C8 : 0xFF9FB8FF;
+                paint.setColor((((int) (235 * a)) << 24) | (col & 0xFFFFFF));
+                path.reset();
+                path.moveTo(x - dp(5f), y);
+                path.lineTo(x + dp(5f), y);
+                path.lineTo(x + tilt, y + dp(13f));
+                path.close();
+                c.drawPath(path, paint);
+            }
+        }
+        // Lantern parade along the valley road, walking with the crowd.
+        float roadY = h * 0.80f;
+        for (int p = 0; p < 8; p++) {
+            float px = (float) (((t * dp(46f)) + p * dp(64f)) % (w + dp(160f))) - dp(80f);
+            float py = roadY + dp(24f) - (px / w) * dp(26f);
+            float bob = (float) Math.abs(Math.sin(t * 4 + p)) * dp(3f);
+            float top = py - dp(20f) - bob;
+            glow(c, px + dp(10f), top + dp(2f), dp(24f), (((int) (150 * a)) << 24) | 0xFFD27A);
+            paint.setColor((((int) (255 * a)) << 24) | 0x121A2A);
+            c.drawCircle(px, top, dp(3.4f), paint);
+            c.drawRoundRect(px - dp(3.4f), top + dp(3f), px + dp(3.4f), py - dp(4f) - bob, dp(3f), dp(3f), paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.6f));
+            float step = (float) Math.sin(t * 8 + p) * dp(3.5f);
+            c.drawLine(px, py - dp(5f) - bob, px - step, py - bob, paint);
+            c.drawLine(px, py - dp(5f) - bob, px + step, py - bob, paint);
+            c.drawLine(px + dp(2f), top + dp(5f), px + dp(10f), top + dp(2f), paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor((((int) (255 * a)) << 24) | 0xFFE08A);
+            c.drawCircle(px + dp(10f), top + dp(2f), dp(3.2f), paint);
+        }
+    }
+
+    /** The standing order: kilojoules to deliver, and the window left to do it in. */
+    private void drawContractPanel(Canvas c, float w, float h) {
+        if (!contractActive) {
+            return;
+        }
+        float pw = dp(214f);
+        float x0 = w - pw - dp(12f);
+        float y0 = dp(66f);
+        float ph = dp(58f);
+        boolean urgent = contractLeft < 30;
+        paint.setColor(0x99101B2C);
+        c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(10f), dp(10f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.2f));
+        float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 5);
+        paint.setColor(urgent ? ((((int) (120 + 135 * pulse)) << 24) | (BAD & 0xFFFFFF)) : 0x33FFFFFF);
+        c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(10f), dp(10f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        label(c, "CONTRACT " + (contractTier + 1) + "  ·  " + contractsDone + " delivered",
+                x0 + dp(10f), y0 + dp(16f), 9f, FAINT, Paint.Align.LEFT);
+        double left = Math.max(0, contractTarget - contractDone);
+        bold(c, (left < 1000 ? String.format(java.util.Locale.US, "%.1f", left / 1000.0)
+                        : String.valueOf(Math.round(left / 1000.0))) + " kJ TO GO",
+                x0 + dp(10f), y0 + dp(34f), 15f, left <= 0 ? ACCENT : TEXT, Paint.Align.LEFT);
+        label(c, clock(Math.max(0, contractLeft)) + " left", x0 + pw - dp(10f), y0 + dp(34f), 11f,
+                urgent ? BAD : DIM, Paint.Align.RIGHT);
+        float f = (float) Math.max(0, Math.min(1, contractDone / contractTarget));
+        float by = y0 + dp(44f);
+        paint.setColor(0x33FFFFFF);
+        c.drawRoundRect(x0 + dp(10f), by, x0 + pw - dp(10f), by + dp(8f), dp(4f), dp(4f), paint);
+        paint.setColor(f > 0.66f ? ACCENT : f > 0.33f ? WARN : BLUE);
+        c.drawRoundRect(x0 + dp(10f), by, x0 + dp(10f) + (pw - dp(20f)) * f, by + dp(8f), dp(4f), dp(4f), paint);
     }
 
     /** Landmarks on the hill, built at lifetime energy milestones. */
@@ -934,18 +1431,39 @@ final class NightGridGame extends GameView {
         }
         int watts = status == null ? 0 : status.watts;
         supply += (watts - supply) * Math.min(1f, dt / 4f);
-        float demand = demand();
+        // The bank, spent on the rower's own word. It drains DISCHARGE_DRAIN over DISCHARGE_SECONDS
+        // and adds DISCHARGE_GAIN x typical power to the grid while it lasts.
+        float boostTarget = 0f;
+        if (dischargeLeft > 0f) {
+            float take = Math.min(battery, dt * (DISCHARGE_DRAIN / DISCHARGE_SECONDS));
+            battery -= take;
+            dischargeLeft -= dt;
+            if (battery <= 0.0005f) {
+                battery = 0f;
+                dischargeLeft = 0f;
+            } else {
+                boostTarget = (float) (profile.typicalWatts() * DISCHARGE_GAIN);
+            }
+        }
+        boostW += (boostTarget - boostW) * Math.min(1f, dt / 0.5f);
+        gridSupply = supply + boostW;
         double work = status == null ? -1 : status.meter.workJoules;
         if (lastWork >= 0 && work > lastWork) {
             double before = lifetimeJoules;
-            lifetimeJoules += work - lastWork;
+            double delta = work - lastWork;
+            lifetimeJoules += delta;
+            contractDone += delta;
             int grown = housesFor(lifetimeJoules);
             while (grown > houses) {
                 int i = order[houses];
                 bornAt[i] = (float) sessionSeconds;
                 houses++;
                 fx.burst(houseX[i] * w, houseY[i] * h - dp(10f), 18, dp(110f), 1.0f, dp(2.4f), 0xFFFFD27A, true);
-                say("NEW HOUSE - THE TOWN HAS " + houses, 0xFFFFD27A);
+                if (houses % 20 == 0) {
+                    startFestival("THE TOWN REACHES " + houses + " HOMES");
+                } else {
+                    say("NEW HOUSE - THE TOWN HAS " + houses, 0xFFFFD27A);
+                }
             }
             int up = storeysFor(lifetimeJoules);
             if (up > storeys) {
@@ -954,42 +1472,54 @@ final class NightGridGame extends GameView {
             }
             for (int k = 0; k < LANDMARK_J.length; k++) {
                 if (before < LANDMARK_J[k] && lifetimeJoules >= LANDMARK_J[k]) {
-                    say("NEW LANDMARK: " + LANDMARK[k], ACCENT);
-                    fireworks = 2.5f;
+                    startFestival("NEW LANDMARK: " + LANDMARK[k]);
+                }
+            }
+            for (int k = 0; k < NEIGHBOUR_J.length; k++) {
+                if (before < NEIGHBOUR_J[k] && lifetimeJoules >= NEIGHBOUR_J[k]) {
+                    say(NEIGHBOUR[k] + " IS ASKING TO JOIN THE GRID", BLUE);
                 }
             }
         }
         lastWork = work;
         boolean rowing = isClockRunning();
         stepEvents(dt, rowing, w, h);
-        // The share of the town lit follows supply over demand, so easy rowing lights part of it
-        // and meeting demand lights it all. (Was all-or-nothing around the demand line.)
-        float targetShare = Math.max(0f, Math.min(1f, supply / demand));
-        if (!rowing && supply < 5) {
+        stepContract(dt, rowing);
+        float demand = demand();
+        int homes = totalHomes();
+        // The share of the grid lit follows supply over demand, so easy rowing lights part of it
+        // and meeting demand lights it all. (Was all-or-nothing around the demand line.) The home
+        // town fills first; whatever is left over runs out along the spur lines.
+        float targetShare = Math.max(0f, Math.min(1f, gridSupply / demand));
+        if (!rowing && gridSupply < 5) {
             targetShare = 0f;
         }
         if (darkTimer > 0f) {
             targetShare = 0f;
         }
-        lit += (targetShare * houses - lit) * Math.min(1f, dt * (darkTimer > 0f ? 3f : 0.5f));
-        // In a blackout the reserve decides how much of the lit town survives; the warning flickers.
+        lit += (targetShare * homes - lit) * Math.min(1f, dt * (darkTimer > 0f ? 3f : 0.5f));
+        // In a blackout the reserve decides how much of the lit town survives; the warning flickers,
+        // and a peak you are not covering browns the whole valley out.
         float factor = 1f;
         if (phase == BLACKOUT && !blackoutFailed) {
             factor = 0.2f + 0.8f * reserve;
         } else if (phase == WARNING) {
             factor = ((int) (sessionSeconds * 9)) % 3 == 0 ? 0.6f : 1f;
+        } else if (phase == PEAK && gridSupply < demand * 0.9f) {
+            factor = ((int) (sessionSeconds * 7)) % 4 == 0 ? 0.6f : 1f;
         }
         int litCount = Math.round(lit * factor);
+        int homeLit = Math.min(litCount, houses);
         if (rowing) {
             runSeconds += dt;
-            litSeconds += dt * (litCount / (float) Math.max(1, houses));
+            litSeconds += dt * (litCount / (float) Math.max(1, homes));
         }
         wheel += boat.value() * dt * 1.4f;
-        flow += (supply / 40f) * dt;
+        flow += (gridSupply / 40f) * dt;
         turbine += dt * (status == null ? 6 : 6 + status.strokeRate * 1.2f) * (1 + stormAmt * 1.5f);
         fx.step(dt, dp(60f));
         bannerTime = Math.max(0f, bannerTime - dt);
-        float share = houses > 0 ? litCount / (float) houses : 0f;
+        float share = homes > 0 ? litCount / (float) homes : 0f;
 
         // Night sky, moon and stars.
         if (sky == null || skyH != h) {
@@ -1013,6 +1543,19 @@ final class NightGridGame extends GameView {
         paint.setColor(0xFFE9EEF5);
         c.drawCircle(w * 0.82f, h * 0.14f, dp(26f), paint);
         drawNightSky(c, w, h);
+
+        // The far ridge and the neighbouring towns on it, behind everything in the valley.
+        drawFarRidge(c, w, h);
+        int spill = Math.max(0, litCount - houses);
+        for (int k = 0; k < NEIGHBOUR.length; k++) {
+            boolean connected = k < townsConnected;
+            // Every hamlet is drawn from the first session, dark and unwired. Hiding the locked
+            // ones left the whole far ridge empty until 150 kJ of lifetime energy, so the feature
+            // was invisible exactly when the rower needed a reason to row toward it.
+            int litHere = connected
+                    ? Math.max(0, Math.min(NEIGH_HOUSES, spill - k * NEIGH_HOUSES)) : 0;
+            drawNeighbourTown(c, w, h, k, litHere, connected);
+        }
 
         // Hills.
         paint.setColor(0xFF0B1426);
@@ -1038,12 +1581,13 @@ final class NightGridGame extends GameView {
             c.drawPath(path, paint);
             paint.setStyle(Paint.Style.FILL);
         }
-        drawLandmarks(c, w, h, litCount);
+        drawLandmarks(c, w, h, homeLit);
         drawTrain(c, w, h);
         // 3.19.6: the right half of the tablet screen was bare. A wind farm turning with your rate,
         // a road with headlights, and an aurora when the town is fully lit.
         drawValleyLife(c, w, h, share);
         drawBattery(c, w, h);
+        drawDischarge(c, w, h);
 
         // River and the water wheel generator.
         paint.setColor(0xFF12304A);
@@ -1071,7 +1615,7 @@ final class NightGridGame extends GameView {
         c.drawLine(wx + wr * 1.2f, wy - dp(40f), w * 0.26f, lineY, paint);
         c.drawLine(w * 0.26f, lineY, w * 0.98f, lineY + dp(10f), paint);
         float need = phase == BLACKOUT || phase == WARNING ? blackoutNeed() : demand;
-        paint.setColor(supply >= need ? 0xFFF5C518 : 0xFFF0655D);
+        paint.setColor(gridSupply >= need ? 0xFFF5C518 : 0xFFF0655D);
         for (int d = 0; d < 14; d++) {
             float f = (float) (((flow + d / 14f) % 1.0 + 1.0) % 1.0);
             float px = w * 0.26f + f * w * 0.72f;
@@ -1082,7 +1626,7 @@ final class NightGridGame extends GameView {
         // Houses, far rows first; a house exists once the town has grown to its place in the
         // lighting order. (Was a search of the whole order for every house, every frame.)
         for (int i = 0; i < MAX_HOUSES; i++) {
-            on[i] = rank[i] < Math.min(litCount, houses);
+            on[i] = rank[i] < homeLit;
         }
         for (int pass = 0; pass < MAX_HOUSES; pass++) {
             int i = order[MAX_HOUSES - 1 - pass];
@@ -1137,6 +1681,8 @@ final class NightGridGame extends GameView {
             }
         }
         drawSeasonAir(c, w, h, share);
+        drawFestival(c, w, h);
+        drawConnectChip(c, w, h);
         drawRain(c, w, h);
         drawBolt(c);
         fx.draw(c);
@@ -1147,27 +1693,42 @@ final class NightGridGame extends GameView {
         if (phase == BLACKOUT && !blackoutFailed) {
             float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6);
             Fx.vignette(c, w, h, 0.35f + 0.35f * (1 - reserve) * pulse, 0x400505);
-        } else if (darkTimer > 0f || (supply < demand * 0.8f && rowing)) {
+        } else if (darkTimer > 0f || (gridSupply < demand * 0.8f && rowing)) {
             Fx.vignette(c, w, h, 0.5f, 0x050510);
         }
 
-        // HUD: supply against demand.
+        // HUD: supply against demand. The battery's contribution rides on top of your own watts.
         bold(c, Math.round(share * 100) + "% LIT", dp(18f), dp(40f), 30f, share > 0.8f ? ACCENT : share > 0.4f ? WARN : BAD, Paint.Align.LEFT);
-        label(c, litCount + " of " + houses + " houses  ·  " + growthLine(), dp(18f), dp(58f), 10f, FAINT, Paint.Align.LEFT);
+        label(c, litCount + " of " + homes + " homes"
+                        + (townsConnected > 0 ? " in " + (townsConnected + 1) + " towns" : "")
+                        + "  ·  " + growthLine(),
+                dp(18f), dp(58f), 10f, FAINT, Paint.Align.LEFT);
         float bx = w * 0.5f;
         float bw = w * 0.33f;
         float by = dp(26f);
-        float max = Math.max(need * 1.6f, supply * 1.1f);
+        // Scale the bar off the STEADY demand, never off `need`. Scaling off need pinned the marker
+        // at a fixed need/(need*1.6) = 62.5% of the bar, so the peak hour rescaled the bar under the
+        // marker and the marker itself never moved - the one thing the peak is supposed to show.
+        // Held steady, it sweeps out to ~90% at the top of the peak and comes back.
+        float steady = homeDemand() * (1f + TOWN_DEMAND * townsConnected)
+                * (phase == BLACKOUT || phase == WARNING ? 1.25f : 1f);
+        float max = Math.max(steady * 1.6f, gridSupply * 1.1f);
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(bx, by, bx + bw, by + dp(14f), dp(7f), dp(7f), paint);
-        paint.setColor(supply >= need ? ACCENT : BAD);
+        if (boostW > 1f) {
+            paint.setColor(0xFF6FD8FF);
+            c.drawRoundRect(bx, by, bx + bw * Math.min(1f, gridSupply / max), by + dp(14f), dp(7f), dp(7f), paint);
+        }
+        paint.setColor(gridSupply >= need ? ACCENT : BAD);
         c.drawRoundRect(bx, by, bx + bw * Math.min(1f, supply / max), by + dp(14f), dp(7f), dp(7f), paint);
-        float dx = bx + bw * need / max;
-        paint.setColor(phase == BLACKOUT || phase == WARNING ? BAD : TEXT);
+        float dx = bx + bw * Math.min(1f, need / max);
+        paint.setColor(phase == BLACKOUT || phase == WARNING || phase == PEAK ? BAD : TEXT);
         c.drawRect(dx - dp(2f), by - dp(6f), dx + dp(2f), by + dp(20f), paint);
-        label(c, Math.round(supply) + " W SUPPLY", bx, by + dp(32f), 10f, TEXT, Paint.Align.LEFT);
-        label(c, (phase == BLACKOUT || phase == WARNING ? "HOLD " : "DEMAND ") + Math.round(need) + " W", dx, by - dp(10f), 9f,
-                phase == BLACKOUT || phase == WARNING ? BAD : FAINT, Paint.Align.CENTER);
+        label(c, Math.round(supply) + " W SUPPLY" + (boostW > 1f ? "  +" + Math.round(boostW) + " W BANK" : ""),
+                bx, by + dp(32f), 10f, boostW > 1f ? 0xFF9FD8FF : TEXT, Paint.Align.LEFT);
+        label(c, (phase == BLACKOUT || phase == WARNING ? "HOLD " : phase == PEAK ? "PEAK " : "DEMAND ")
+                        + Math.round(need) + " W", dx, by - dp(10f), 9f,
+                phase == BLACKOUT || phase == WARNING || phase == PEAK ? BAD : FAINT, Paint.Align.CENTER);
 
         // Season chip, top right: tap to preview the other seasons.
         float cw = dp(92f);
@@ -1178,6 +1739,14 @@ final class NightGridGame extends GameView {
         label(c, heldTotal + " blackouts held", seasonHit.centerX(), seasonHit.bottom + dp(14f), 9f, FAINT, Paint.Align.CENTER);
 
         drawEventPanel(c, w, h, rowing);
+        drawContractPanel(c, w, h);
+        label(c, peaksCovered + " peaks covered  ·  " + festivals + " festivals",
+                w - dp(20f), dp(138f), 9f, FAINT, Paint.Align.RIGHT);
+        if (festival > 0f) {
+            float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 4);
+            bold(c, "FESTIVAL OF LIGHTS", w / 2f, h * 0.31f, 16f,
+                    ((int) (120 + 135 * pulse) << 24) | 0xFFD27A, Paint.Align.CENTER);
+        }
 
         if (bannerTime > 0f && banner != null) {
             int a = (int) (255 * Math.min(1f, bannerTime / 0.5f));
@@ -1189,6 +1758,14 @@ final class NightGridGame extends GameView {
     }
 
     private String growthLine() {
+        if (townsConnected < NEIGHBOUR.length) {
+            int k = townsConnected;
+            if (lifetimeJoules < NEIGHBOUR_J[k]) {
+                return NEIGHBOUR[k] + " joins the grid in "
+                        + Math.round((NEIGHBOUR_J[k] - lifetimeJoules) / 1000) + " kJ";
+            }
+            return NEIGHBOUR[k] + " is waiting on " + Math.round(CONNECT_COST * 100) + "% battery";
+        }
         for (int k = 0; k < LANDMARK_J.length; k++) {
             if (lifetimeJoules < LANDMARK_J[k]) {
                 return "next landmark: " + LANDMARK[k] + " in " + Math.round((LANDMARK_J[k] - lifetimeJoules) / 1000) + " kJ";
@@ -1210,10 +1787,27 @@ final class NightGridGame extends GameView {
             bold(c, "STORM  " + left + "s", cx, y, 20f, BLUE, Paint.Align.CENTER);
             label(c, "surge - pull a stroke harder than the last few - to strike the mast (+20% battery)  ·  "
                     + strikes + " strikes", cx, y + dp(18f), 10f, TEXT, Paint.Align.CENTER);
+        } else if (phase == PEAK) {
+            int left = (int) Math.ceil(PEAK_END - p);
+            float need = demand();
+            boolean covering = gridSupply >= need;
+            bold(c, "PEAK DEMAND - " + Math.round(need) + " W  " + left + "s", cx, y, 20f,
+                    covering ? ACCENT : WARN_COLOR, Paint.Align.CENTER);
+            float bw = w * 0.30f;
+            float bx = cx - bw / 2f;
+            float by = y + dp(10f);
+            float f = (float) Math.min(1.0, peakHeld / ((PEAK_END - PEAK_START) * PEAK_COVER));
+            paint.setColor(0x33FFFFFF);
+            c.drawRoundRect(bx, by, bx + bw, by + dp(12f), dp(6f), dp(6f), paint);
+            paint.setColor(f >= 1f ? ACCENT : WARN_COLOR);
+            c.drawRoundRect(bx, by, bx + bw * f, by + dp(12f), dp(6f), dp(6f), paint);
+            label(c, f >= 1f ? "PEAK IN THE BAG - KEEP IT LIT"
+                            : covering ? "covering the peak - hold it" : "short - row harder or DISCHARGE the bank",
+                    cx, by + dp(26f), 10f, covering ? TEXT : BAD, Paint.Align.CENTER);
         } else if (phase == WARNING) {
             int left = (int) Math.ceil(BLACKOUT_START - p);
             bold(c, "BLACKOUT IN " + left, cx, y, 22f, BAD, Paint.Align.CENTER);
-            label(c, "hold " + Math.round(blackoutNeed()) + " W for 15 s  ·  the battery covers you first",
+            label(c, "hold " + Math.round(blackoutNeed()) + " W for 15 s  ·  DISCHARGE the bank to cover it",
                     cx, y + dp(18f), 10f, TEXT, Paint.Align.CENTER);
         } else if (phase == BLACKOUT) {
             if (blackoutFailed) {
@@ -1231,15 +1825,28 @@ final class NightGridGame extends GameView {
             c.drawRoundRect(bx, by, bx + bw, by + dp(12f), dp(6f), dp(6f), paint);
             paint.setColor(reserve > 0.5f ? ACCENT : reserve > 0.25f ? WARN : BAD);
             c.drawRoundRect(bx, by, bx + bw * reserve, by + dp(12f), dp(6f), dp(6f), paint);
-            label(c, "GRID RESERVE" + (battery > 0.01f && supply < blackoutNeed() ? "  ·  battery covering" : ""),
-                    cx, by + dp(26f), 10f, TEXT, Paint.Align.CENTER);
+            label(c, "GRID RESERVE" + (boostW > 1f ? "  ·  the bank is covering you"
+                            : battery > 0.05f && gridSupply < blackoutNeed() ? "  ·  DISCHARGE the bank" : ""),
+                    cx, by + dp(26f), 10f, boostW > 1f ? 0xFF9FD8FF : TEXT, Paint.Align.CENTER);
         } else if (rowing) {
             double toStorm = p < STORM_START ? STORM_START - p : CYCLE - p + STORM_START;
+            double toPeak = p < PEAK_START ? PEAK_START - p : CYCLE - p + PEAK_START;
             double toBlackout = p < WARN_START ? WARN_START - p : CYCLE - p + WARN_START;
-            String next = toStorm < toBlackout
-                    ? "storm in " + (int) Math.ceil(toStorm) + "s - get ready to surge"
-                    : "blackout in " + (int) Math.ceil(toBlackout) + "s" + (battery < 0.2f ? " - battery low" : "");
-            label(c, next, cx, y, 12f, toStorm < toBlackout ? 0xFF9FB8FF : 0xFFF0A09A, Paint.Align.CENTER);
+            String next;
+            int colour;
+            if (toStorm <= toPeak && toStorm <= toBlackout) {
+                next = "storm in " + (int) Math.ceil(toStorm) + "s - get ready to surge";
+                colour = 0xFF9FB8FF;
+            } else if (toPeak <= toBlackout) {
+                next = "peak demand in " + (int) Math.ceil(toPeak) + "s - "
+                        + Math.round(homeDemand() * (1f + TOWN_DEMAND * townsConnected) * PEAK_SWELL) + " W at the top";
+                colour = WARN_COLOR;
+            } else {
+                next = "blackout in " + (int) Math.ceil(toBlackout) + "s"
+                        + (battery < 0.2f ? " - the bank is low" : " - bank at " + Math.round(battery * 100) + "%");
+                colour = 0xFFF0A09A;
+            }
+            label(c, next, cx, y, 12f, colour, Paint.Align.CENTER);
         }
     }
 }

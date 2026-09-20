@@ -147,6 +147,8 @@ var state = {
   ditched: false,
   started: false,
   typicalWatts: 129,     // replaced by the rower's profile from the feed
+  typicalSpeed: 3.85,    // ditto - the measured median on this machine until the profile lands
+  highWatts: 205,
   smoothWatts: 0,
   agl: START_AGL,
   ground: 0,
@@ -185,6 +187,7 @@ window.wakeSave = function () {
   saveTrip();
   saveGhost();
   saveLift();
+  saveFlightRecords();
 };
 
 /* ---------------- geo helpers ---------------- */
@@ -388,6 +391,14 @@ window.wakeFeed = function (d) {
   if (Number(d.p) > 0) {
     state.typicalWatts = Number(d.p);
   }
+  // 3.23.0: the rower's own typical boat speed sets the migration leader's pace, and their high
+  // power sets what "pushing through" a weather front means. Both from the profile, never guessed.
+  if (Number(d.q) > 0) {
+    state.typicalSpeed = Number(d.q);
+  }
+  if (Number(d.h) > 0) {
+    state.highWatts = Number(d.h);
+  }
   var strokes = Number(d.k) || 0;
   if (state.strokesAtStart < 0) {
     state.strokesAtStart = strokes;
@@ -461,14 +472,20 @@ function frame(now) {
     // A steady rower sits at the 700 m ceiling, so lift is also the only way above it: up to
     // LIFT_CEILING more, where the wind aloft is worth airspeed, settling back once out of the lift.
     climb += updateLift(dt, typical, watts);
+    // A weather front presses you down as well as back, unless you push through it.
+    climb += updateFronts(dt, typical, watts);
     if (state.agl > MAX_AGL && lifting.strength < 0.05) {
       climb = Math.min(climb, -ALOFT_SETTLE);
     }
     var ceiling = state.agl > MAX_AGL || lifting.strength > 0.05 ? MAX_AGL + LIFT_CEILING : MAX_AGL;
     state.agl = Math.max(MIN_AGL, Math.min(ceiling, state.agl + climb * dt));
     // The flock drafts you along (+1.5% a bird in the V); the fog's damp air drags you back.
+    // 3.23.0 adds the leader's slipstream and the tailwind behind a front you punched through,
+    // against the headwind inside one.
     var targetAir = (BASE_AIRSPEED + boat * AIRSPEED_PER_MPS)
-      * (1 + FLOCK_DRAFT * flock.inSlot + ALOFT_BONUS * aloft()) * (1 - FOG_DRAG * state.fog);
+      * (1 + FLOCK_DRAFT * flock.inSlot + ALOFT_BONUS * aloft()
+        + MIG_DRAFT * mig.draft + frontTailBonus())
+      * (1 - FOG_DRAG * state.fog) * (1 - fronts.drag);
     state.airspeed += (targetAir - state.airspeed) * Math.min(1, 1.5 * dt);
     state.along += state.airspeed * dt;
     race.flown += state.airspeed * dt;
@@ -514,8 +531,12 @@ function frame(now) {
   var camHeading = here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6);
   var camPitch = -8 - Math.min(16, state.agl / 60);
   var camRoll = state.bank;
-  // A postcard stop turns the head toward the landmark for the picture, then back.
+  // A postcard stop turns the head toward the landmark for the picture, then back. A photo
+  // challenge gives the same landmark a shorter glance.
   var look = postcardLook(now, here, altitude);
+  if (!look) {
+    look = photoLook(here, altitude);
+  }
   if (look) {
     var dh = ((look.heading - camHeading + 540) % 360) - 180;
     camHeading += dh * look.w;
@@ -538,6 +559,11 @@ function frame(now) {
   updatePostcards(now);
   updateGhost(dt, here, altitude);
   drawLift(now);
+  updateLegs(dt);
+  updateMigration(dt);
+  updatePhoto();
+  drawWeather();
+  updatePassportPage();
 
   adaptQuality(dt);
   if (now - lastPreloadMs > 700) {
@@ -1186,9 +1212,9 @@ function updateFog(dt, fresh) {
 
 var POSTCARDS = [
   // Taken looking back north from 3.2 km out: the bridge is behind you as the trip starts.
-  { id: 'goldengate', name: 'the Golden Gate', lat: 37.8199, lon: -122.4783, h: 150, lo: 250, hi: 500, shotAt: 3200 },
-  { id: 'bixby', name: 'Bixby Bridge, Big Sur', lat: 36.3716, lon: -121.9018, h: 80, lo: 200, hi: 420, shotAt: -1 },
-  { id: 'mcway', name: 'McWay Falls, Big Sur', lat: 36.1580, lon: -121.6721, h: 30, lo: 150, hi: 360, shotAt: -1 }
+  { id: 'goldengate', name: 'the Golden Gate', lat: 37.8199, lon: -122.4783, h: 150, lo: 250, hi: 500, shotAt: 3200, stamp: 'Golden Gate Bridge' },
+  { id: 'bixby', name: 'Bixby Bridge, Big Sur', lat: 36.3716, lon: -121.9018, h: 80, lo: 200, hi: 420, shotAt: -1, stamp: 'Bixby Bridge' },
+  { id: 'mcway', name: 'McWay Falls, Big Sur', lat: 36.1580, lon: -121.6721, h: 30, lo: 150, hi: 360, shotAt: -1, stamp: 'McWay Falls' }
 ];
 var POSTCARD_APPROACH = 3000;   // ~60 s of warning at a typical pace
 var LOOK_IN = 1300;
@@ -1360,6 +1386,10 @@ function capturePostcard() {
     + (newBest ? ' · NEW BEST' : '');
   el('postcard').className = 'overlay';
   pc.hideAt = Date.now() + CARD_SHOW_MS;
+  // The postcard stops are passport landmarks too, and their stars are the ones that count there.
+  if (card.stamp) {
+    stampLandmark({ name: card.stamp }, pc.stars, 'POSTCARD');
+  }
 }
 
 /* ---- 5. the ghost of your last flight ---- */
@@ -1553,6 +1583,1038 @@ function updateGhost(dt, here, altitude) {
   }
 }
 
+/* ================= 3.23.0: legs, migration, photo challenges, fronts, the passport =================
+
+   Five more things the rower asked for, all of them built on data the page already has:
+     - every landmark is a LEG with a destination, a live ETA at the pace you are holding, and a
+       best time you are racing,
+     - MIGRATION mode puts a leader bird ahead of you flying at a pace taken from your own profile;
+       hold its slipstream for +10% airspeed, drop 1.5 km back and it goes on without you,
+     - PHOTO CHALLENGES ask you to be at a given height as a landmark goes by, and print the frame
+       Cesium just drew,
+     - WEATHER FRONTS are a headwind and a downdraught you can either wallow in or pull through,
+       and pushing through pays a twenty-second tailwind,
+     - the PASSPORT stamps every landmark reached and keeps the stars its photo earned.
+   Nothing here fetches anything. Written for Chrome 70: no optional chaining, no flex gap. */
+
+function fmtClock(seconds) {
+  if (!isFinite(seconds) || seconds < 0 || seconds > 5999) {
+    return '—';
+  }
+  var total = Math.round(seconds);
+  var s = total % 60;
+  return Math.floor(total / 60) + ':' + (s < 10 ? '0' + s : s);
+}
+
+function starText(n) {
+  var out = '';
+  for (var i = 0; i < 3; i++) {
+    out += i < n ? '★' : '☆';
+  }
+  return out;
+}
+
+/* ---- 6. legs, destinations and an ETA at your pace ---- */
+
+var LEG_ETA_SMOOTH = 8;         // seconds: an ETA that jumps every stroke is unreadable
+var legNav = { idx: -1, startClock: 0, clean: false, done: 0, best: {}, air: 0, bar: -1 };
+
+function legIndexAt(m) {
+  for (var i = 0; i < LEGS.length; i++) {
+    if (m >= LEGS[i].start && m < LEGS[i].start + LEGS[i].length) {
+      return i;
+    }
+  }
+  return LEGS.length - 1;
+}
+
+function loadLegTimes() {
+  if (!bridge || !bridge.legTimes) {
+    return;
+  }
+  try {
+    var parts = String(bridge.legTimes() || '').split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var bits = parts[i].split(':');
+      var k = Number(bits[0]);
+      var v = Number(bits[1]);
+      if (isFinite(k) && isFinite(v) && v > 0 && k >= 0 && k < LEGS.length) {
+        legNav.best[k] = v;
+      }
+    }
+  } catch (e) { /* no times yet */ }
+}
+
+function saveLegTimes() {
+  if (!bridge || !bridge.saveLegTimes) {
+    return;
+  }
+  var out = [];
+  for (var k in legNav.best) {
+    if (Object.prototype.hasOwnProperty.call(legNav.best, k)) {
+      out.push(k + ':' + Math.round(legNav.best[k]));
+    }
+  }
+  if (out.length === 0) {
+    return;
+  }
+  try {
+    bridge.saveLegTimes(out.join(','));
+  } catch (e) { /* the table is a nicety */ }
+}
+
+function updateLegs(dt) {
+  var m = mod(state.along);
+  var i = legIndexAt(m);
+  // The rowing clock can go backwards - a fresh session behind the same page, the same thing
+  // restartRace() watches for. A leg started before that is not a run at the record, and without
+  // this the elapsed time would go negative and the ETA comparison would read "ahead" forever.
+  if (state.clock + 1 < legNav.startClock) {
+    legNav.startClock = state.clock;
+    legNav.clean = false;
+  }
+  if (legNav.idx < 0) {
+    legNav.idx = i;
+    legNav.startClock = state.clock;
+    // A leg entered part-way (a restart, or last session's trip) is not a run at its record.
+    legNav.clean = m - LEGS[i].start < 200;
+  } else if (i !== legNav.idx) {
+    if (i === (legNav.idx + 1) % LEGS.length && !state.hovering) {
+      arriveAtLeg(legNav.idx);
+    }
+    legNav.idx = i;
+    legNav.startClock = state.clock;
+    // Normally this lands a metre or two past the new leg's start, so it is a clean run at its
+    // record. The restart link jumps the trip back to the Golden Gate, which also lands on a
+    // start; anything else that moved you mid-leg would not, and must not set a time.
+    legNav.clean = m - LEGS[i].start < 200;
+  }
+
+  // The ETA runs on the airspeed you are actually holding, smoothed over 8 s so it counts down
+  // steadily and quickens visibly when you pull.
+  legNav.air += (state.airspeed - legNav.air) * Math.min(1, dt / LEG_ETA_SMOOTH);
+  var leg = LEGS[legNav.idx];
+  var flown = clamp(m - leg.start, 0, leg.length);
+  var remain = Math.max(0, leg.length - flown);
+  var eta = legNav.air > 1.5 ? remain / legNav.air : -1;
+  var elapsed = Math.max(0, state.clock - legNav.startClock);
+  var best = legNav.best[legNav.idx];
+
+  setText('legDest', leg.to.name);
+  setText('legLine', (remain / 1000).toFixed(1) + ' km · ETA '
+    + (eta < 0 ? '—' : fmtClock(eta)));
+  setText('legBest', best ? 'best ' + fmtClock(best) : 'no time yet');
+  var cls = '';
+  if (best && eta >= 0 && legNav.clean && !state.hovering) {
+    cls = elapsed + eta < best ? 'ahead' : 'behind';
+  }
+  if (shownText.__legCls !== cls) {
+    shownText.__legCls = cls;
+    el('legLine').className = cls;
+  }
+  var frac = leg.length > 0 ? flown / leg.length : 0;
+  if (Math.abs(frac - legNav.bar) > 0.003) {
+    legNav.bar = frac;
+    el('legBarFill').style.width = (frac * 100).toFixed(1) + '%';
+  }
+}
+
+function arriveAtLeg(idx) {
+  var secs = state.clock - legNav.startClock;
+  var timed = legNav.clean && secs > 20;
+  var beat = false;
+  if (timed) {
+    var old = legNav.best[idx];
+    if (!old || secs < old) {
+      legNav.best[idx] = secs;
+      beat = true;
+      saveLegTimes();
+    }
+  }
+  legNav.done++;
+  if (bridge && bridge.recordLegs) {
+    try {
+      bridge.recordLegs(legNav.done);
+    } catch (e) { /* a record is a nicety */ }
+  }
+  showToast((beat ? 'NEW BEST LEG — ' : 'REACHED ') + LEGS[idx].to.name.toUpperCase()
+    + (timed ? ' · ' + fmtClock(secs) : ''));
+  stampLandmark(LEGS[idx].to, 0, beat ? 'BEST LEG ' + fmtClock(secs) : 'LANDMARK REACHED');
+}
+
+/* ---- 7. the passport ---- */
+
+var MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+/* The roll the passport can stamp: every named place on the coast, because all three ways of
+   earning a stamp - reaching a leg destination, framing a photo challenge and taking a postcard -
+   land on one of these. PLACES is the route's own landmarks followed by the towns between them. */
+var PASSPORT_PLACES = PLACES;
+var book = { entries: {}, count: 0, stars: 0, lastSlug: '', lastMs: 0 };
+var passPage = { shown: false, hideAt: 0 };
+
+function slugOf(name) {
+  var s = String(name).toLowerCase().replace(/[^a-z]/g, '');
+  return s.length > 18 ? s.substring(0, 18) : s;
+}
+
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+function todayCode() {
+  var d = new Date();
+  return String(d.getFullYear()) + pad2(d.getMonth() + 1) + pad2(d.getDate());
+}
+
+function prettyDay(code) {
+  if (!code || code.length !== 8) {
+    return 'STAMPED';
+  }
+  var mo = Number(code.substring(4, 6));
+  return Number(code.substring(6, 8)) + ' ' + (MONTHS[mo - 1] || '');
+}
+
+/* Only these slugs can be in the book: a stamp is always a place on the coast. A stored entry
+   for anything else is not one of ours, and counting it would make the card read 12/46 with
+   eleven cells filled and inflate coast.stamps to match. */
+var KNOWN_SLUGS = {};
+for (var ps = 0; ps < PASSPORT_PLACES.length; ps++) {
+  KNOWN_SLUGS[slugOf(PASSPORT_PLACES[ps].name)] = true;
+}
+
+function loadPassport() {
+  if (bridge && bridge.passport) {
+    try {
+      var parts = String(bridge.passport() || '').split(',');
+      for (var i = 0; i < parts.length; i++) {
+        var bits = parts[i].split(':');
+        if (bits[0] && KNOWN_SLUGS[bits[0]] === true) {
+          book.entries[bits[0]] = { stars: clamp(Number(bits[1]) || 0, 0, 3), day: bits[2] || '' };
+        }
+      }
+    } catch (e) { /* an empty book is a fine place to start */ }
+  }
+  countBook();
+  showPassportCount();
+}
+
+function countBook() {
+  book.count = 0;
+  book.stars = 0;
+  for (var k in book.entries) {
+    if (Object.prototype.hasOwnProperty.call(book.entries, k)) {
+      book.count++;
+      book.stars += book.entries[k].stars;
+    }
+  }
+}
+
+function showPassportCount() {
+  setText('passN', book.count + '/' + PASSPORT_PLACES.length + ' ★' + book.stars);
+}
+
+/** A landmark was reached (or photographed): stamp it, keep the better star count, and thump. */
+function stampLandmark(place, stars, note) {
+  var slug = slugOf(place.name);
+  if (!slug) {
+    return;
+  }
+  var entry = book.entries[slug];
+  var isNew = !entry;
+  if (!entry) {
+    entry = { stars: 0, day: '' };
+    book.entries[slug] = entry;
+  }
+  if (stars > entry.stars) {
+    entry.stars = stars;
+  }
+  entry.day = todayCode();
+  countBook();
+  if (bridge && bridge.savePassport) {
+    try {
+      bridge.savePassport(serializeBook());
+    } catch (e) { /* the stamp still shows this flight */ }
+  }
+  showPassportCount();
+  // A photo is taken 300 m before the landmark, so its stamp and the leg's arrival are seconds
+  // apart. One thump per place.
+  var now = Date.now();
+  if (book.lastSlug === slug && now - book.lastMs < 30000) {
+    return;
+  }
+  book.lastSlug = slug;
+  book.lastMs = now;
+  thumpStamp(place.name, isNew ? 'NEW STAMP' : (note || 'STAMPED'), entry.stars);
+}
+
+function serializeBook() {
+  var out = [];
+  for (var k in book.entries) {
+    if (Object.prototype.hasOwnProperty.call(book.entries, k)) {
+      out.push(k + ':' + clamp(Math.round(book.entries[k].stars), 0, 3) + ':'
+        + (book.entries[k].day || ''));
+    }
+  }
+  return out.join(',');
+}
+
+/** The stamp slams down over the view, rocks, and lifts off again. */
+function thumpStamp(name, sub, stars) {
+  var e = el('stamp');
+  el('stampName').textContent = String(name).toUpperCase();
+  el('stampSub').textContent = sub + (stars > 0 ? ' · ' + starText(stars) : '');
+  e.className = 'overlay';
+  // Reading a layout property restarts the animation; without it a second stamp does nothing.
+  var restart = e.offsetWidth;
+  if (restart >= 0) {
+    e.className = 'overlay go';
+  }
+}
+
+function togglePassport() {
+  if (passPage.shown) {
+    closePassport();
+    return;
+  }
+  buildPassport();
+  el('passport').className = 'overlay';
+  passPage.shown = true;
+  passPage.hideAt = Date.now() + 16000;
+}
+
+function closePassport() {
+  el('passport').className = 'overlay hidden';
+  passPage.shown = false;
+  passPage.hideAt = 0;
+}
+
+/** Closes itself: the book must not sit over the coast while the rower is still rowing. */
+function updatePassportPage() {
+  if (passPage.hideAt && Date.now() > passPage.hideAt) {
+    closePassport();
+  }
+}
+
+function buildPassport() {
+  var grid = el('passGrid');
+  grid.innerHTML = '';
+  var cells = [];
+  for (var i = 0; i < PASSPORT_PLACES.length; i++) {
+    var entry = book.entries[slugOf(PASSPORT_PLACES[i].name)];
+    var cell = document.createElement('div');
+    cell.className = 'pcell ' + (entry ? 'got' : 'miss');
+    var n = document.createElement('div');
+    n.className = 'pn';
+    n.textContent = PASSPORT_PLACES[i].name;
+    cell.appendChild(n);
+    var s = document.createElement('div');
+    s.className = 'ps';
+    s.textContent = entry ? starText(entry.stars) : '';
+    cell.appendChild(s);
+    var d = document.createElement('div');
+    d.className = 'pd';
+    d.textContent = entry ? prettyDay(entry.day) : 'NOT YET';
+    cell.appendChild(d);
+    cell.style.transitionDelay = i * 22 + 'ms';
+    grid.appendChild(cell);
+    cells.push(cell);
+  }
+  el('passSub').textContent = book.count + ' of ' + PASSPORT_PLACES.length + ' landmarks stamped · '
+    + book.stars + ' photo stars · ' + legNav.done + ' legs this flight · '
+    + fronts.count + ' fronts beaten';
+  // One frame later, so the transition has a state to move from.
+  window.setTimeout(function () {
+    for (var j = 0; j < cells.length; j++) {
+      cells[j].className += ' in';
+    }
+  }, 24);
+}
+
+/* ---- 8. migration: a leader bird that sets the pace ---- */
+
+/* +8% in the slipstream. It has to be worth chasing and small enough to trim: the bonus makes
+   you faster than the leader, so holding the slot means easing off as you reach its front and
+   pulling again as you slide out of its back. That trimming is the whole exercise. */
+var MIG_DRAFT = 0.08;
+var MIG_SLOT_AHEAD = 30;        // you may nose this far past it and still be drafting
+var MIG_SLOT_BACK = 150;        // ...and hang this far back
+var MIG_ALT_BAND = 140;         // and be this far off its height
+var MIG_LOST = 1500;            // this far off its pace, either way, and the pair splits up
+var MIG_RAMP_S = 300;           // five minutes from a gentle pace to a demanding one
+var mig = { armed: false, flying: false, lost: false, along: 0, agl: 260, held: 0, gap: 0,
+  draft: 0, speed: 0, flownS: 0, bb: null, label: null, pos: null, you: -1, cardOn: null };
+
+/** The leader's airspeed: what this rower makes at their own typical boat speed, ramped. */
+function leaderPace() {
+  var base = BASE_AIRSPEED + Math.max(2.2, state.typicalSpeed) * AIRSPEED_PER_MPS;
+  return base * (0.95 + 0.13 * clamp(mig.flownS / MIG_RAMP_S, 0, 1));
+}
+
+/**
+ * The split the leader's pace asks for, in the /500m the rower is already watching on the strip.
+ * Airspeed is BASE + boat speed x PER_MPS, so this simply runs that backwards.
+ */
+function leaderSplit() {
+  var boatNeeded = (mig.speed - BASE_AIRSPEED) / AIRSPEED_PER_MPS;
+  if (boatNeeded < 0.5) {
+    return '--:--';
+  }
+  var secs = Math.round(500 / boatNeeded);
+  return Math.floor(secs / 60) + ':' + (secs % 60 < 10 ? '0' : '') + (secs % 60) + ' /500m';
+}
+
+function loadMigration() {
+  if (bridge && bridge.migrateMode) {
+    try {
+      mig.armed = bridge.migrateMode() === '1';
+    } catch (e) { /* off is the safe default */ }
+  }
+}
+
+function saveMigrationMode() {
+  if (bridge && bridge.setMigrateMode) {
+    try {
+      bridge.setMigrateMode(mig.armed ? '1' : '');
+    } catch (e) { /* remembered next time, or not */ }
+  }
+}
+
+function tapMigration() {
+  if (!mig.armed) {
+    mig.armed = true;
+    mig.lost = false;
+    mig.flying = false;
+    saveMigrationMode();
+    showToast('MIGRATION ON — HOLD THE LEADER’S SLIPSTREAM');
+  } else if (mig.lost) {
+    callLeader();
+  } else {
+    mig.armed = false;
+    mig.flying = false;
+    saveMigrationMode();
+    recordMigration();
+    showToast('MIGRATION OFF');
+  }
+}
+
+function callLeader() {
+  mig.lost = false;
+  mig.flying = true;
+  mig.flownS = 0;
+  mig.along = state.along + 80;
+  mig.agl = state.agl;
+  showToast('THE LEADER CIRCLES BACK — GO');
+}
+
+function recordMigration() {
+  if (bridge && bridge.recordMigration && mig.held >= 100) {
+    try {
+      bridge.recordMigration(Math.round(mig.held));
+    } catch (e) { /* a record is a nicety */ }
+  }
+}
+
+function updateMigration(dt) {
+  var cardOn = mig.armed;
+  if (cardOn !== mig.cardOn) {
+    mig.cardOn = cardOn;
+    el('migCard').className = cardOn ? 'card on' : 'card';
+  }
+  if (!mig.armed) {
+    mig.draft = 0;
+    setText('migState', 'MIGRATION OFF');
+    setText('migCap', 'Tap to follow a leader');
+    hideLeader();
+    return;
+  }
+  if (state.hovering || !state.started) {
+    mig.along = state.along + 80;
+    mig.agl = state.agl;
+    mig.flying = false;
+    mig.draft = 0;
+    setText('migState', 'LEADER WAITING');
+    setText('migCap', 'It leaves when you do');
+    hideLeader();
+    return;
+  }
+  if (mig.lost) {
+    mig.draft = 0;
+    setText('migState', 'LEADER GONE');
+    setText('migCap', 'Tap to call it back');
+    hideLeader();
+    return;
+  }
+  if (!mig.flying) {
+    mig.flying = true;
+    mig.flownS = 0;
+    mig.along = state.along + 80;
+    mig.agl = state.agl;
+  }
+
+  mig.flownS += dt;
+  // It flies in the same air you do - at the head of the same flock, in the same fog, in the wind
+  // at the same height - so the only thing between you is how hard you are pulling. A front is
+  // deliberately left out: pushing through one is exactly how you gain on it.
+  mig.speed = leaderPace() * (1 + FLOCK_DRAFT * flock.inSlot + ALOFT_BONUS * aloft())
+    * (1 - FOG_DRAG * state.fog);
+  mig.along += mig.speed * dt;
+  // It flies at the height you fly at, so the slipstream is about pace and not about altitude -
+  // except that it climbs over the fog banks ahead, so following it keeps you out of them. A
+  // photo challenge pulls you down out of the draft, which is a choice worth having.
+  var want = clamp(state.agl, MIN_AGL + 40, MAX_AGL);
+  var fogAhead = fogTopAt(mod(mig.along + 1200));
+  if (fogAhead > 0) {
+    want = Math.max(want, fogAhead + 70);
+  }
+  want = clamp(want, MIN_AGL + 40, MAX_AGL);
+  mig.agl += (want - mig.agl) * Math.min(1, dt * 0.5);
+
+  mig.gap = mig.along - state.along;
+  var offAlt = Math.abs(state.agl - mig.agl);
+  var inSlot = mig.gap > -MIG_SLOT_AHEAD && mig.gap < MIG_SLOT_BACK && offAlt < MIG_ALT_BAND;
+  var was = mig.draft;
+  mig.draft += ((inSlot ? 1 : 0) - mig.draft) * Math.min(1, dt * 3);
+  if (inSlot) {
+    mig.held += state.airspeed * dt;
+  }
+  if (was < 0.5 && mig.draft >= 0.5) {
+    showToast('IN THE SLIPSTREAM — +' + Math.round(MIG_DRAFT * 100) + '%');
+  }
+  // Losing it works both ways: the slipstream is a place, and you can miss it in front as
+  // easily as behind. The leader does not cheat to stay ahead of a hard row.
+  if (Math.abs(mig.gap) > MIG_LOST) {
+    mig.lost = true;
+    recordMigration();
+    showToast((mig.gap > 0 ? 'THE LEADER LEFT YOU — ' : 'YOU LEFT THE LEADER — ')
+      + (mig.held / 1000).toFixed(1) + ' km TOGETHER');
+  }
+
+  setText('migState', inSlot ? 'IN THE DRAFT'
+    : mig.gap >= 0 ? Math.round(mig.gap) + ' m BEHIND' : Math.round(-mig.gap) + ' m AHEAD');
+  setText('migCap', (mig.held / 1000).toFixed(1) + ' km drafted · hold ' + leaderSplit());
+  // The marker runs from 1200 m behind the leader (left) to 400 m in front of it (right).
+  var x = clamp((1200 - mig.gap) / 1600, 0, 1) * 100;
+  if (Math.abs(x - mig.you) > 0.4) {
+    mig.you = x;
+    el('migYou').style.left = x.toFixed(1) + '%';
+  }
+  var youCls = inSlot ? 'draft' : '';
+  if (shownText.__migYou !== youCls) {
+    shownText.__migYou = youCls;
+    el('migYou').className = youCls;
+  }
+  drawLeader();
+}
+
+function leaderBirdImage() {
+  var c = document.createElement('canvas');
+  c.width = 112;
+  c.height = 60;
+  var g = c.getContext('2d');
+  var glow = g.createRadialGradient(56, 32, 3, 56, 32, 50);
+  glow.addColorStop(0, 'rgba(240,177,50,0.5)');
+  glow.addColorStop(1, 'rgba(240,177,50,0)');
+  g.fillStyle = glow;
+  g.fillRect(0, 0, 112, 60);
+  g.strokeStyle = 'rgba(32,24,16,0.96)';
+  g.lineWidth = 6;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(10, 20);
+  g.quadraticCurveTo(34, 12, 56, 34);
+  g.quadraticCurveTo(78, 12, 102, 20);
+  g.stroke();
+  g.strokeStyle = 'rgba(240,177,50,0.9)';
+  g.lineWidth = 2;
+  g.stroke();
+  return c;
+}
+
+function ensureLeaderBird() {
+  if (!viewer || mig.bb) {
+    return;
+  }
+  mig.pos = new Cesium.Cartesian3();
+  var bbs = viewer.scene.primitives.add(new Cesium.BillboardCollection());
+  mig.bb = bbs.add({
+    position: Cesium.Cartesian3.fromDegrees(ROUTE[0].lon, ROUTE[0].lat, 200),
+    image: leaderBirdImage(),
+    show: false,
+    scaleByDistance: new Cesium.NearFarScalar(120, 2.2, 5000, 0.5),
+    disableDepthTestDistance: Number.POSITIVE_INFINITY
+  });
+  var labels = viewer.scene.primitives.add(new Cesium.LabelCollection());
+  mig.label = labels.add({
+    position: Cesium.Cartesian3.fromDegrees(ROUTE[0].lon, ROUTE[0].lat, 200),
+    text: 'LEADER',
+    font: 'bold 15px sans-serif',
+    fillColor: Cesium.Color.fromCssColorString('#f0b132'),
+    style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+    outlineWidth: 3,
+    outlineColor: Cesium.Color.fromCssColorString('#03080f'),
+    pixelOffset: new Cesium.Cartesian2(0, 28),
+    show: false,
+    scaleByDistance: new Cesium.NearFarScalar(120, 1.2, 5000, 0.6),
+    disableDepthTestDistance: Number.POSITIVE_INFINITY
+  });
+}
+
+function hideLeader() {
+  if (mig.bb) {
+    mig.bb.show = false;
+    mig.label.show = false;
+  }
+}
+
+function drawLeader() {
+  ensureLeaderBird();
+  if (!mig.bb) {
+    return;
+  }
+  // Only ever drawn ahead of you: the camera never looks back.
+  var visible = mig.gap > 15 && mig.gap < 6000;
+  mig.bb.show = visible;
+  mig.label.show = visible && mig.gap > 90;
+  if (!visible) {
+    return;
+  }
+  var p = offsetPoint(atDistance(state.along + mig.gap), state.weaveOffset * 0.5 - 40);
+  Cesium.Cartesian3.fromDegrees(p.lon, p.lat,
+    state.ground + mig.agl + Math.sin(Date.now() / 520) * 4, undefined, mig.pos);
+  mig.bb.position = mig.pos;
+  mig.label.position = mig.pos;
+}
+
+/* ---- 9. weather fronts ---- */
+
+var FRONT_FIRST = 9000;
+var FRONT_SPACING = 14000;      // ~4.5 minutes apart at a typical pace
+var FRONT_HALF = 1000;          // 2 km across: about 40 s of pushing
+var FRONT_DRAG = 0.34;          // airspeed lost at the heart of one while easing off
+var FRONT_SINK = 2.8;           // m/s pressed down, same condition
+var FRONT_TAIL = 0.18;          // tailwind for punching through
+var FRONT_TAIL_S = 20;
+/* Average push over the crossing that counts as through it. Across the level-to-high band this
+   works out at about 1.05x typical watts - a real lift above a normal row, still well under the
+   p90 this rower reaches, and reached by pulling harder rather than by sprinting. */
+var FRONT_THROUGH = 0.45;
+var FRONT_NAMES = ['a squall line', 'a rain band', 'a headwind front', 'a sea squall'];
+var FRONTS = [];
+var fronts = { quickW: 0, strength: 0, inside: null, next: null, nextIn: Infinity, pushSum: 0,
+  time: 0, drag: 0, tail: 0, count: 0, push: 0, squallShown: -1, rainShown: -1, rainOn: true };
+
+function buildFronts() {
+  var i = 0;
+  for (var m = FRONT_FIRST; m < routeLength - 2500; m += FRONT_SPACING) {
+    // A fixed spacing reads as a metronome; a deterministic jitter keeps them a surprise while
+    // staying in the same place every flight, so a stretch you know is a stretch you can learn.
+    var centre = m + ((i * 7919) % 4200) - 2100;
+    if (centre < FRONT_HALF + 3000) {
+      i++;
+      continue;
+    }
+    FRONTS.push({ start: centre - FRONT_HALF, end: centre + FRONT_HALF,
+      name: FRONT_NAMES[i % FRONT_NAMES.length] });
+    i++;
+  }
+}
+
+/**
+ * The band a front is scored against: from level flight (what merely holds your height) up to
+ * this rower's own high power, the profile's 90th percentile, sent in the feed as `h`.
+ *
+ * <p>Measured against `typical` instead, the ask came out at 0.82x typical - 106 W for a rower
+ * whose median is 129 - so a front was punched through by rowing normally and "push through it"
+ * asked for nothing. Simulated over 55 minutes that was 10 fronts out of 10 at a flat median row.
+ * Against the high band the ask lands just above a normal row and a front is a real effort.
+ */
+function frontLevel(typical) {
+  return typical * LEVEL_SHARE;
+}
+
+function frontSpan(typical) {
+  var high = Math.max(typical * 1.15, state.highWatts || 0);
+  return Math.max(25, high - frontLevel(typical));
+}
+
+/** The push a front asks for, 0..1, against this rower's own power. */
+function frontPush(typical) {
+  return clamp((fronts.quickW - frontLevel(typical)) / frontSpan(typical), 0, 1);
+}
+
+/** The watts that carry you through, shown in the banner so the ask is never a mystery. */
+function frontWatts(typical) {
+  return Math.round(frontLevel(typical) + frontSpan(typical) * FRONT_THROUGH);
+}
+
+/** Returns the downdraught (m/s, negative) this frame. Called only while flying. */
+function updateFronts(dt, typical, watts) {
+  // The monitor's watts really are zero between some strokes, so a short window makes the push
+  // figure - and with it the drag and the banner's percentage - flicker once a stroke. 2.5 s is
+  // still a fraction of the ~40 s crossing, so easing off inside a front shows up immediately.
+  fronts.quickW += (watts - fronts.quickW) * Math.min(1, dt / 2.5);
+  var m = mod(state.along);
+  var inside = null;
+  var next = null;
+  var nextIn = Infinity;
+  for (var i = 0; i < FRONTS.length; i++) {
+    var f = FRONTS[i];
+    if (m >= f.start && m < f.end) {
+      inside = f;
+    } else if (f.start > m && f.start - m < nextIn) {
+      nextIn = f.start - m;
+      next = f;
+    }
+  }
+  if (!next && FRONTS.length > 0) {
+    next = FRONTS[0];
+    nextIn = FRONTS[0].start + routeLength - m;
+  }
+  fronts.push = frontPush(typical);
+  if (inside !== fronts.inside) {
+    if (fronts.inside && fronts.time > 3) {
+      if (fronts.pushSum / fronts.time > FRONT_THROUGH) {
+        fronts.count++;
+        fronts.tail = FRONT_TAIL_S;
+        showToast('PUNCHED THROUGH — TAILWIND FOR ' + FRONT_TAIL_S + ' s');
+        if (bridge && bridge.recordFronts) {
+          try {
+            bridge.recordFronts(fronts.count);
+          } catch (e) { /* a record is a nicety */ }
+        }
+      } else {
+        showToast('THE FRONT PUSHED YOU BACK');
+      }
+    }
+    if (inside) {
+      showToast('INTO ' + inside.name.toUpperCase() + ' — PUSH THROUGH IT');
+    }
+    fronts.pushSum = 0;
+    fronts.time = 0;
+  }
+  fronts.inside = inside;
+  fronts.next = next;
+  fronts.nextIn = nextIn;
+  var target = inside ? clamp(Math.min(m - inside.start, inside.end - m) / 300, 0, 1) : 0;
+  fronts.strength += (target - fronts.strength) * Math.min(1, dt * 2.5);
+  if (inside) {
+    fronts.pushSum += fronts.push * dt;
+    fronts.time += dt;
+  }
+  fronts.tail = Math.max(0, fronts.tail - dt);
+  fronts.drag = FRONT_DRAG * fronts.strength * (1 - fronts.push);
+  return -FRONT_SINK * fronts.strength * (1 - fronts.push);
+}
+
+function frontTailBonus() {
+  return FRONT_TAIL * (fronts.tail / FRONT_TAIL_S);
+}
+
+/** The squall itself: a darkening and rain that eases as you push through it. */
+function drawWeather() {
+  // Snapped to zero at the tail: the strength decays exponentially, so without this the last
+  // step below the 0.01 threshold is never written and a faint squall sits over the coast for
+  // the rest of the flight.
+  var dark = fronts.strength > 0.012 ? fronts.strength * (0.78 - 0.3 * fronts.push) : 0;
+  if (Math.abs(dark - fronts.squallShown) > 0.004) {
+    fronts.squallShown = dark;
+    el('squall').style.opacity = dark.toFixed(3);
+  }
+  var rain = fronts.strength > 0.012 ? fronts.strength * (0.9 - 0.35 * fronts.push) : 0;
+  if (Math.abs(rain - fronts.rainShown) > 0.004) {
+    fronts.rainShown = rain;
+    el('rain').style.opacity = rain.toFixed(3);
+    // The rain is a running CSS animation; park it entirely in clear air.
+    var want = rain > 0.01;
+    if (want !== fronts.rainOn) {
+      fronts.rainOn = want;
+      el('rain').style.display = want ? 'block' : 'none';
+    }
+  }
+}
+
+/* ---- 10. photo challenges ---- */
+
+/* ~65 s of warning: from the 700 m ceiling a rower needs most of that to sink into a window,
+   and the gauge is no use if it arrives after the only chance to act on it. */
+var PHOTO_APPROACH = 3200;
+var PHOTO_LEAD = 300;           // the shutter goes just before the landmark is abeam
+var PHOTO_FINAL = 900;          // hold the height over this last stretch for the third star
+var PHOTO_SHOW_MS = 7000;
+var PHOTO_TARGETS = [];
+var photo = { target: null, at: 0, ahead: Infinity, prevAlong: -1, finalM: 0, finalIn: 0,
+  pending: false, shotTarget: null, stars: 0, shotAlt: 0, steadyPct: 0, hideAt: 0, count: 0,
+  lookAt: 0, lookPlace: null, look: { heading: 0, pitch: 0, w: 0 }, gaugeOn: -1, winShown: '',
+  youShown: -1, hitShown: '' };
+
+/**
+ * Metres along the route nearest a point, by projecting onto each leg.
+ *
+ * <p>alongOf() above samples the whole route every 500 m, which is fine for the nine cliffs and
+ * three postcards that use it at boot. Forty-six places is another matter, so this does the same
+ * job analytically: over tens of kilometres a leg is straight enough to project onto flat, and a
+ * route landmark lands exactly on its own leg start.
+ */
+function alongOfFast(lat, lon) {
+  var best = 0;
+  var bestD = Infinity;
+  for (var i = 0; i < LEGS.length; i++) {
+    var a = LEGS[i].from;
+    var b = LEGS[i].to;
+    var kx = Math.cos(toRad((a.lat + b.lat) / 2));   // degrees of longitude are shorter up here
+    var dx = (b.lon - a.lon) * kx;
+    var dy = b.lat - a.lat;
+    var px = (lon - a.lon) * kx;
+    var py = lat - a.lat;
+    var len2 = dx * dx + dy * dy;
+    var t = len2 > 0 ? clamp((px * dx + py * dy) / len2, 0, 1) : 0;
+    var ex = px - dx * t;
+    var ey = py - dy * t;
+    var d = ex * ex + ey * ey;
+    if (d < bestD) {
+      bestD = d;
+      best = LEGS[i].start + LEGS[i].length * t;
+    }
+  }
+  return best;
+}
+
+/**
+ * Every named place on the coast is a challenge, not just the leg destinations.
+ *
+ * <p>The legs are 36 km apart, which at 180 km/h is twelve minutes - far too long to wait for
+ * something to do. The towns in between bring it to one every six minutes or so, which is about
+ * the spacing of the weather fronts.
+ */
+function buildPhotoTargets() {
+  var taken = [];
+  for (var j = 0; j < POSTCARDS.length; j++) {
+    taken.push(POSTCARDS[j].shotAt);
+  }
+  var found = [];
+  for (var i = 0; i < PLACES.length; i++) {
+    var at = alongOfFast(PLACES[i].lat, PLACES[i].lon);
+    if (at < 3000) {
+      continue;   // no challenge before take-off
+    }
+    // Five different windows around the route, deterministic so a place always asks the same
+    // height every time you fly past it. They run 180-660 m: a rower holding their typical power
+    // sits at the 700 m ceiling, so every one of them is reached by easing off on the approach
+    // and none of them needs a dive to the deck.
+    var lo = 180 + ((i * 137) % 5) * 70;
+    found.push({ place: PLACES[i], at: Math.max(0, at - PHOTO_LEAD), lo: lo, hi: lo + 200 });
+  }
+  found.sort(function (a, b) { return a.at - b.at; });
+  for (var k = 0; k < found.length; k++) {
+    var clash = false;
+    for (var t = 0; t < taken.length; t++) {
+      // A postcard stop already owns its landmark, and two approaches cannot overlap.
+      if (Math.abs(taken[t] - found[k].at) < 4000) {
+        clash = true;
+      }
+    }
+    if (!clash) {
+      taken.push(found[k].at);
+      PHOTO_TARGETS.push(found[k]);
+    }
+  }
+}
+
+function photoTopPct(metres) {
+  return clamp((760 - metres) / 720, 0, 1) * 100;
+}
+
+function updatePhoto() {
+  if (photo.hideAt && Date.now() > photo.hideAt) {
+    photo.hideAt = 0;
+    el('photo').className = 'overlay hidden';
+  }
+  if (state.hovering || PHOTO_TARGETS.length === 0 || !state.started) {
+    photo.prevAlong = state.along;
+    setGauge(false);
+    return;
+  }
+  var lap = Math.floor(state.along / routeLength);
+  var nearest = null;
+  var nearestAt = 0;
+  var nearestAhead = Infinity;
+  for (var i = 0; i < PHOTO_TARGETS.length; i++) {
+    var t = PHOTO_TARGETS[i];
+    var at = lap * routeLength + t.at;
+    if (photo.prevAlong >= 0 && photo.prevAlong < at && state.along >= at) {
+      shootPhoto(t);
+    }
+    var ahead = at > state.along ? at - state.along : at + routeLength - state.along;
+    if (ahead < nearestAhead) {
+      nearestAhead = ahead;
+      nearest = t;
+      nearestAt = at > state.along ? at : at + routeLength;
+    }
+  }
+  if (nearest !== photo.target) {
+    photo.target = nearest;
+    photo.finalM = 0;
+    photo.finalIn = 0;
+  }
+  photo.at = nearestAt;
+  photo.ahead = nearestAhead;
+
+  var inWin = nearest && state.agl >= nearest.lo && state.agl <= nearest.hi;
+  var moved = Math.max(0, state.along - photo.prevAlong);
+  if (nearest && nearestAhead < PHOTO_FINAL) {
+    photo.finalM += moved;
+    if (inWin) {
+      photo.finalIn += moved;
+    }
+  }
+  if (nearest && nearestAhead < 900) {
+    photo.lookAt = nearestAt;
+    photo.lookPlace = nearest.place;
+  }
+  photo.prevAlong = state.along;
+
+  if (!nearest || nearestAhead > PHOTO_APPROACH) {
+    setGauge(false);
+    return;
+  }
+  setGauge(true);
+  var win = photoTopPct(nearest.hi).toFixed(1) + '|'
+    + (photoTopPct(nearest.lo) - photoTopPct(nearest.hi)).toFixed(1);
+  if (win !== photo.winShown) {
+    photo.winShown = win;
+    el('frameWin').style.top = photoTopPct(nearest.hi).toFixed(1) + '%';
+    el('frameWin').style.height =
+      (photoTopPct(nearest.lo) - photoTopPct(nearest.hi)).toFixed(1) + '%';
+  }
+  var you = photoTopPct(state.agl);
+  if (Math.abs(you - photo.youShown) > 0.3) {
+    photo.youShown = you;
+    el('frameYou').style.top = you.toFixed(1) + '%';
+  }
+  var hit = inWin ? 'hit' : '';
+  if (hit !== photo.hitShown) {
+    photo.hitShown = hit;
+    el('frameYou').className = hit;
+  }
+  setText('frameCap', nearestAhead < 400 ? 'SHUTTER'
+    : nearest.lo + '–' + nearest.hi + ' m');
+}
+
+function setGauge(on) {
+  var v = on ? 1 : 0;
+  if (v !== photo.gaugeOn) {
+    photo.gaugeOn = v;
+    el('frame').style.opacity = on ? '1' : '0';
+  }
+}
+
+function shootPhoto(target) {
+  photo.shotTarget = target;
+  photo.shotAlt = state.agl;
+  var inWin = state.agl >= target.lo && state.agl <= target.hi;
+  var steady = photo.finalM > 100 ? photo.finalIn / photo.finalM : 0;
+  photo.steadyPct = Math.round(steady * 100);
+  var stars = 1;
+  if (inWin && state.fog < 0.5) {
+    stars++;
+    if (steady > 0.75 && state.fog < 0.4) {
+      stars++;
+    }
+  }
+  photo.stars = stars;
+  photo.pending = true;   // taken in the next postRender, while the frame is still in the buffer
+}
+
+/** A glance at the landmark either side of the shutter. Reuses one object: no per-frame garbage. */
+function photoLook(here, altitude) {
+  if (!photo.lookPlace || photo.lookAt <= 0 || pc.active) {
+    return null;
+  }
+  var d = photo.lookAt - state.along;
+  var w = 1 - clamp(Math.abs(d) / 750, 0, 1);
+  if (w <= 0.02) {
+    return null;
+  }
+  var place = photo.lookPlace;
+  var dist = Math.max(200, haversine(here, place));
+  photo.look.heading = bearing(here, place);
+  photo.look.pitch = clamp(-toDeg(Math.atan2(altitude - 20, dist)), -35, 5);
+  photo.look.w = w * 0.8;   // a glance, not the postcard's full turn of the head
+  return photo.look;
+}
+
+/** Prints the frame Cesium just drew. Runs inside scene.postRender, like the postcards. */
+function capturePhoto() {
+  photo.pending = false;
+  var target = photo.shotTarget;
+  if (!target) {
+    return;
+  }
+  var cv = el('phCanvas');
+  var ctx = cv.getContext('2d');
+  try {
+    var src = viewer.scene.canvas;
+    var aspect = cv.width / cv.height;
+    var cw = src.width;
+    var ch = cw / aspect;
+    if (ch > src.height) {
+      ch = src.height;
+      cw = ch * aspect;
+    }
+    ctx.drawImage(src, (src.width - cw) / 2, Math.max(0, (src.height - ch) * 0.45), cw, ch,
+      0, 0, cv.width, cv.height);
+  } catch (e) {
+    var sky = ctx.createLinearGradient(0, 0, 0, cv.height);
+    sky.addColorStop(0, '#8fb3cf');
+    sky.addColorStop(1, '#3f6a86');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  if (fronts.strength > 0.05 || state.fog > 0.05) {
+    ctx.fillStyle = 'rgba(214,224,234,' + clamp(state.fog * 0.8 + fronts.strength * 0.4, 0, 0.9).toFixed(2) + ')';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  photo.count++;
+  el('phTitle').textContent = target.place.name;
+  el('phStars').textContent = starText(photo.stars);
+  el('phLine').textContent = Math.round(photo.shotAlt) + ' m · window ' + target.lo
+    + '–' + target.hi + ' m · ' + photo.steadyPct + '% framed';
+  el('photo').className = 'overlay';
+  photo.hideAt = Date.now() + PHOTO_SHOW_MS;
+  shutterFlash();
+  stampLandmark(target.place, photo.stars, 'PHOTO ' + starText(photo.stars));
+}
+
+function shutterFlash() {
+  var f = el('flash');
+  f.className = 'overlay';
+  var restart = f.offsetWidth;
+  if (restart >= 0) {
+    f.className = 'overlay go';
+  }
+}
+
+/* ---- what the five of them save on the way out ---- */
+
+function saveFlightRecords() {
+  saveLegTimes();
+  recordMigration();
+  if (bridge && bridge.recordFronts && fronts.count > 0) {
+    try {
+      bridge.recordFronts(fronts.count);
+    } catch (e) { /* a record is a nicety */ }
+  }
+}
+
+function initFlightExtras() {
+  loadLegTimes();
+  loadPassport();
+  loadMigration();
+  buildFronts();
+  buildPhotoTargets();   // after initPostcards: it skips the landmarks that have a postcard
+  el('migCard').addEventListener('click', tapMigration);
+  el('passCard').addEventListener('click', togglePassport);
+  el('passport').addEventListener('click', closePassport);
+}
+
 /* ---- the one line that says what matters in the next few seconds ---- */
 
 function updateBanner(now) {
@@ -1569,6 +2631,24 @@ function updateBanner(now) {
     if (pc.active) {
       text = 'Postcard from ' + pc.active.name + '!';
       cls = 'card good';
+    } else if (photo.target && photo.ahead < 1000) {
+      var shot = state.agl >= photo.target.lo && state.agl <= photo.target.hi;
+      text = 'PHOTO · ' + photo.target.place.name + ' in ' + Math.round(photo.ahead) + ' m · '
+        + photo.target.lo + '–' + photo.target.hi + ' m'
+        + (shot ? ' ✔ hold it' : state.agl < photo.target.lo ? ' ↑ climb' : ' ↓ ease off');
+      cls = shot ? 'card good' : 'card';
+    } else if (fronts.inside && fronts.strength > 0.1) {
+      text = 'PUSH THROUGH · ' + fronts.inside.name + ' · '
+        + frontWatts(Math.max(40, state.typicalWatts)) + ' W gets you out · '
+        + Math.round(fronts.push * 100) + '%';
+      cls = 'front';
+    } else if (mig.armed && mig.flying && !mig.lost && mig.gap > 300) {
+      text = 'THE LEADER IS PULLING AWAY · ' + Math.round(mig.gap) + ' m · '
+        + Math.round(mig.speed * 3.6) + ' km/h';
+      cls = 'lift';
+    } else if (mig.armed && mig.flying && !mig.lost && mig.gap < -300) {
+      text = 'YOU ARE AHEAD OF THE LEADER · ' + Math.round(-mig.gap) + ' m · ease back into its draft';
+      cls = 'lift';
     } else if (pc.next && pc.nextIn < POSTCARD_APPROACH) {
       var win = state.agl >= pc.next.lo && state.agl <= pc.next.hi;
       text = 'POSTCARD · ' + pc.next.name + ' in ' + (pc.nextIn / 1000).toFixed(1) + ' km · frame it at '
@@ -1583,10 +2663,20 @@ function updateBanner(now) {
     } else if (lifting.next && lifting.nextIn < 1200) {
       text = 'Rising air over ' + lifting.next.name + ' in ' + (lifting.nextIn / 1000).toFixed(1) + ' km — pull through it';
       cls = 'lift';
+    } else if (fronts.next && fronts.nextIn < 1800) {
+      text = fronts.next.name.charAt(0).toUpperCase() + fronts.next.name.substring(1) + ' in '
+        + (fronts.nextIn / 1000).toFixed(1) + ' km — wind up to '
+        + frontWatts(Math.max(40, state.typicalWatts)) + ' W';
+      cls = 'front';
     } else if (fogState.aheadIn < 2000) {
       text = 'Fog bank ahead in ' + (fogState.aheadIn / 1000).toFixed(1) + ' km — stay above '
         + Math.round(fogState.aheadTop) + ' m';
       cls = 'fog';
+    } else if (photo.target && photo.ahead < PHOTO_APPROACH) {
+      text = 'Photo challenge · ' + photo.target.place.name + ' in '
+        + (photo.ahead / 1000).toFixed(1) + ' km · be at ' + photo.target.lo + '–'
+        + photo.target.hi + ' m';
+      cls = 'card';
     }
   }
   setText('bannerText', text);
@@ -1604,10 +2694,14 @@ function initExtras() {
   buildUpdrafts();
   initPostcards();
   initGhost();
+  initFlightExtras();
   if (viewer) {
     viewer.scene.postRender.addEventListener(function () {
       if (pc.pending) {
         capturePostcard();
+      }
+      if (photo.pending) {
+        capturePhoto();
       }
     });
   }

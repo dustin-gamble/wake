@@ -32,20 +32,38 @@ final class ShuffleRecapView extends View {
         boolean settled;
         /** Vetoed by the rower: out of the rest of this shuffle. */
         boolean vetoed;
+        /** The boss round at the end of a round: double points, with a bar to empty. */
+        boolean boss;
+        boolean bossBeaten;
+        /** The wildcard this game was dealt with, or "" for a clean one. */
+        String wildcard = "";
+        /** Points carried in from a combo that survived the switch into this game. */
+        int carried;
 
         Leg(String title) {
             this.title = title;
         }
 
         String bestMoment() {
+            if (boss) {
+                return bossBeaten ? "BOSS DOWN  ·  double points" : "boss survived  ·  double points";
+            }
             if (record != null) {
                 return "NEW RECORD  ·  " + record;
             }
+            String wild = wildcard.isEmpty() ? ""
+                    : "  ·  wildcard: " + wildcard.toLowerCase(java.util.Locale.US);
             if (bestWatts <= 0) {
-                return strokes == 0 ? "skipped" : "steady strokes";
+                return (strokes == 0 ? "skipped" : "steady strokes") + wild;
             }
             String s = Math.round(bestWatts) + " W stroke at " + PersonalBests.formatTime(bestAtSeconds);
-            return bestMultiplier > 1 ? s + "  ·  x" + bestMultiplier + " combo" : s;
+            if (bestMultiplier > 1) {
+                s += "  ·  x" + bestMultiplier + " combo";
+            }
+            if (carried > 0) {
+                s += "  ·  +" + carried + " carried in";
+            }
+            return s + wild;
         }
     }
 
@@ -68,6 +86,7 @@ final class ShuffleRecapView extends View {
     private final int surface = Color.parseColor("#111722");
 
     private Leg[] legs = new Leg[0];
+    private String[] titles = new String[0];
     private String[] moments = new String[0];
     private String[] pointText = new String[0];
     private int hiddenEarlier;
@@ -103,11 +122,13 @@ final class ShuffleRecapView extends View {
         int start = Math.max(0, all.size() - MAX_ROWS);
         hiddenEarlier = start;
         legs = all.subList(start, all.size()).toArray(new Leg[0]);
+        titles = new String[legs.length];
         moments = new String[legs.length];
         pointText = new String[legs.length];
         maxPoints = 1;
         star = -1;
         for (int i = 0; i < legs.length; i++) {
+            titles[i] = legs[i].boss ? "BOSS  \u00b7  " + legs[i].title : legs[i].title;
             moments[i] = legs[i].bestMoment();
             pointText[i] = legs[i].points + " pts";
             if (legs[i].points > maxPoints) {
@@ -204,8 +225,11 @@ final class ShuffleRecapView extends View {
 
             float textSize = Math.min(dp(16f), rowH * 0.34f);
             name.setTextSize(textSize);
+            // The boss round is named in amber, so a round reads as a round in the recap.
+            name.setColor(legs[i].boss ? warn : textColor);
             name.setAlpha(alpha);
-            c.drawText(legs[i].title, rect.left + dp(14f), rect.top + textSize + dp(4f), name);
+            c.drawText(titles[i], rect.left + dp(14f), rect.top + textSize + dp(4f), name);
+            name.setColor(textColor);
             note.setTextSize(textSize * 0.78f);
             note.setColor(legs[i].record != null ? good : dim);
             note.setAlpha(alpha);

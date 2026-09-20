@@ -51,6 +51,32 @@ import java.io.FileOutputStream;
  *   <li><b>Photo mode.</b> Hides the HUD, stops the auto-pan, drag to turn the city, shutter renders
  *   the city at half resolution with a caption into the app's own files and an in-game album.</li>
  * </ul>
+ *
+ * <p>3.23, five more the rower approved. The theme is that the city now asks things of the rower
+ * rather than only accepting whatever they give it:
+ * <ul>
+ *   <li><b>The citizens' request.</b> A petitioner walks in from the street with a placard and asks
+ *   for one building - a hospital, a school, a library. Grant it by putting up the floors they ask
+ *   for in this session (about 75 s of the rower's own typical rowing, half again for each one
+ *   after) and the building is real: a civic sign that stays over that tower for good, counted in
+ *   {@code city.civic} and in the rating.</li>
+ *   <li><b>Rush hour.</b> Two minutes of real time and a floor count the rower starts themselves
+ *   from the HUD, set at {@link #RUSH_DEMAND} of their typical watts, with a pace line that is
+ *   either ahead of you or behind you this second. Cleared runs bank {@code city.rushwins} and the
+ *   best haul {@code city.rush}.</li>
+ *   <li><b>The city rating.</b> Everything ever done here in one score, five tiers, and each one
+ *   buys a way to clad a tower - brick and tile, glass, spires, golden crowns - and four more
+ *   floors of height limit, so a city that has filled its grid has somewhere to go again. Towers
+ *   carry whatever tier they last grew at, so an old city reads as layers of its own history.</li>
+ *   <li><b>This week against last.</b> Floors are banked per Monday-start week ({@code
+ *   city.week.*}) and drawn as two stacks that grow while you row, with last week's line across
+ *   this week's column and a banner the moment you pass it.</li>
+ *   <li><b>Storms and repairs.</b> A front rolls in every four minutes of the rowing clock: cloud,
+ *   rain, and a bolt every few seconds at the tallest towers. The city's shield is powered by the
+ *   rower's live watts across their own low-to-high band, so the ten seconds before a strike
+ *   genuinely matter. What gets through breaks floors, and while anything is broken every
+ *   watt-second goes into repairs and the skyline does not grow at all.</li>
+ * </ul>
  */
 final class SkylineGame extends GameView {
 
@@ -99,6 +125,43 @@ final class SkylineGame extends GameView {
     private static final int R_PARK = 1;
     private static final int R_BRIDGE = 2;
     private static final int R_PLAZA = 3;
+    private static final int R_PETITION = 4;
+
+    /* ------------------------------------------------------------------ 3.22, five more ------- */
+
+    /**
+     * Watt-seconds to repair one storm-damaged floor. Deliberately dearer than building it fresh
+     * (1.2x {@link #BLOCK_COST}): a storm that took eight floors is about half a minute of rowing
+     * back, which is the whole point of it - the city asks for strokes it had not asked for.
+     */
+    private static final float REPAIR_COST = BLOCK_COST * 1.2f;
+    /** A rush hour runs two minutes of real time, running clock or not. That is the stake. */
+    private static final float RUSH_SECONDS = 120f;
+    /** Floors asked for in a rush hour, as a multiple of what the rower's typical watts would lay. */
+    private static final float RUSH_DEMAND = 1.12f;
+
+    private static final String[] RATING_NAMES = {
+            "OUTPOST", "TOWN", "CITY", "METROPOLIS", "MEGACITY",
+    };
+    /** What each rating tier unlocks, in the order the city learns to build it. */
+    private static final String[] STYLE_NAMES = {
+            "CONCRETE BLOCKS", "BRICK AND TILE", "GLASS TOWERS", "SPIRES", "GOLDEN CROWNS",
+    };
+    /** Rating score at which each tier begins. Tier 1 lands with the park, so they arrive together. */
+    private static final float[] RATING_AT = {0f, 90f, 260f, 560f, 1000f};
+
+    private static final String[] CIVIC_NAMES = {
+            "HOSPITAL", "SCHOOL", "LIBRARY", "MARKET", "FIRE STATION", "THEATRE", "CLINIC", "MUSEUM",
+    };
+    private static final int[] CIVIC_COLORS = {
+            0xFFE0584E, 0xFF35D0BA, 0xFF6F8CFF, 0xFFF0B132,
+            0xFFE0582E, 0xFFE06BA8, 0xFF8BD05A, 0xFFB98CFF,
+    };
+
+    private static final int STORM_NONE = 0;
+    private static final int STORM_WARNING = 1;
+    private static final int STORM_OVERHEAD = 2;
+    private static final int STORM_CLEARING = 3;
 
     private static final class Falling {
         int gx;
@@ -237,6 +300,74 @@ final class SkylineGame extends GameView {
     private float lastTouchX;
     private boolean dragging;
 
+    // ---- 1. the citizens' request -------------------------------------------------------------
+    /** -1 on a plot with no civic building, else an index into {@link #CIVIC_NAMES}. */
+    private final int[][] civic = new int[GRID][GRID];
+    private boolean requestOpen;
+    private int requestKind;
+    private int requestNeed;
+    private int requestBase;
+    private int requestsThisSession;
+    private int civicCount;
+    private float requestCooldown;
+    private float requestPulse;
+    private int petitioner = -1;
+
+    // ---- 2. rush hour --------------------------------------------------------------------------
+    private boolean rushRunning;
+    private float rushLeft;
+    private int rushTarget;
+    private int rushBase;
+    private int rushWins;
+    private int rushBestFloors;
+    private float rushCooldown;
+    private float rushTint;
+    private final RectF rushBtn = new RectF();
+
+    // ---- 3. the city rating --------------------------------------------------------------------
+    /** Build style per plot: the tier the city could build at when that tower last grew. */
+    private final int[][] style = new int[GRID][GRID];
+    private float ratingScore;
+    private int ratingTier;
+    private int bestTier;
+    private float ratingShown;
+    private float ratingFlash;
+
+    // ---- 4. this week against last -------------------------------------------------------------
+    private int weekFloorsAtStart;
+    private int weekFloors;
+    private int lastWeekFloors;
+    private float weekBarA;
+    private float weekBarB;
+    private boolean passedLastWeek;
+
+    // ---- 5. the storm and the repairs ----------------------------------------------------------
+    private int stormPhase;
+    private float stormT;
+    private double nextStormAt = 170;
+    private float stormIntensity;
+    private float strikeIn;
+    private float shield;
+    private float boltT;
+    private int boltPlotX;
+    private int boltPlotY;
+    private boolean boltDeflected;
+    private final float[] boltJag = new float[7];
+    private final float[] rainX = new float[70];
+    private final float[] rainY = new float[70];
+    private final float[] rainV = new float[70];
+    private boolean rainSeeded;
+    /** Broken floors sitting at the top of each plot's stack, waiting on concrete. */
+    private final int[][] damage = new int[GRID][GRID];
+    private final float[][] repairFlash = new float[GRID][GRID];
+    private int damageTotal;
+    private int repairsLifetime;
+    private int repairsThisSession;
+    private int stormsWeathered;
+    private String stormNote;
+    private float stormNoteT;
+    private int wattsNow;
+
     private static final int[] PALETTE = {
             0xFF4C6EA8, 0xFF3E8C7E, 0xFF8A6BB0, 0xFF9A6B4F, 0xFF5E7A90, 0xFF7A8A4F,
     };
@@ -276,24 +407,53 @@ final class SkylineGame extends GameView {
         bannerT = 0f;
         zone = java.util.TimeZone.getDefault();
         lifetime = Math.round(bests.get("city.blocks", 0f));
+
+        // Everything the rating is made of has to be loaded before the rebuild, because the rating
+        // sets how tall a tower this city is allowed to raise.
+        districtsSeen = Math.round(bests.get("city.districts", 0f));
+        landmarksBuilt = Math.round(bests.get("city.landmarks", 0f));
+        civicCount = Math.round(bests.get("city.civic", 0f));
+        rushWins = Math.round(bests.get("city.rushwins", 0f));
+        rushBestFloors = Math.round(bests.get("city.rush", 0f));
+        repairsLifetime = Math.round(bests.get("city.repairs", 0f));
+        stormsWeathered = Math.round(bests.get("city.storms", 0f));
+        // Clamped: every tier name, style name and threshold is read by this index, so a stored
+        // value outside 1..5 (an older build, a hand-edited pref) would be an out-of-bounds read
+        // on the very first frame rather than a wrong star count.
+        bestTier = Math.max(0, Math.min(RATING_NAMES.length - 1,
+                Math.round(bests.get("city.rating", 1f)) - 1));
+        ratingTier = bestTier;
+        population = lifetime * 4;
+        damageTotal = 0;
+        repairsThisSession = 0;
+        requestsThisSession = 0;
+        recomputeRating();
+        ratingShown = ratingTier;
+
         // Rebuild the standing city from the lifetime total, filling plots evenly.
         for (int gx = 0; gx < GRID; gx++) {
             for (int gy = 0; gy < GRID; gy++) {
                 height[gx][gy] = 0;
                 sessionFloors[gx][gy] = 0;
                 doorGlow[gx][gy] = 0f;
+                damage[gx][gy] = 0;
+                repairFlash[gx][gy] = 0f;
+                civic[gx][gy] = -1;
                 tint[gx][gy] = PALETTE[(gx * GRID + gy) % PALETTE.length];
+                // An old city is a mixture: each plot was clad at whatever tier it last grew at.
+                // Unsigned shift, not Math.abs: abs(Long.MIN_VALUE) is still negative, which would
+                // have put a negative index in style[][] and quietly dropped that tower's cladding.
+                style[gx][gy] = (int) ((windowSeed[gx * GRID + gy] >>> 8) % (ratingTier + 1));
             }
         }
-        for (int i = 0; i < lifetime && i < GRID * GRID * MAX_HEIGHT; i++) {
+        for (int i = 0; i < lifetime && i < GRID * GRID * maxHeight(); i++) {
             lowestPlot();
             height[lowX][lowY]++;
         }
         recomputeTallest();
-        population = lifetime * 4;
+        assignCivic();
 
         // Districts: open silently what has already been celebrated, stage a ceremony for the rest.
-        districtsSeen = Math.round(bests.get("city.districts", 0f));
         parkOpen = lifetime >= PARK_AT && districtsSeen >= 1;
         bridgeOpen = lifetime >= BRIDGE_AT && districtsSeen >= 2;
         parkReveal = parkOpen ? 1f : 0f;
@@ -306,13 +466,32 @@ final class SkylineGame extends GameView {
         weekIndex = (localDays + 3) / 7;   // 1970-01-01 was a Thursday: weeks start on Monday
         landmarkKind = (int) (weekIndex % LANDMARK_NAMES.length);
         landmarkTarget = Math.max(1.0, profile.typicalWatts() * 60.0 * LANDMARK_MINUTES);
-        landmarksBuilt = Math.round(bests.get("city.landmarks", 0f));
         if (Math.round(bests.get("city.landmark.week", -1f)) == weekIndex) {
             landmarkWork = bests.get("city.landmark.work", 0f);
         } else {
             landmarkWork = 0;
         }
         landmarkDone = landmarkWork >= landmarkTarget;
+
+        loadWeek();
+
+        // The citizens' request waits for the first stroke, so the card is not already ticking while
+        // the rower is still settling onto the seat.
+        requestOpen = false;
+        requestCooldown = 0f;
+        petitioner = -1;
+        rushRunning = false;
+        rushCooldown = 0f;
+        rushTint = 0f;
+        stormPhase = STORM_NONE;
+        stormIntensity = 0f;
+        stormNote = null;
+        stormNoteT = 0f;
+        boltT = 0f;
+        shield = 0f;
+        wattsNow = 0;
+        // First storm at about three minutes of rowing, then one every four.
+        nextStormAt = 170;
 
         for (Resident r : residents) {
             r.active = false;
@@ -333,11 +512,127 @@ final class SkylineGame extends GameView {
         bests.recordHighest("city.blocks", lifetime);
         bests.recordHighest("city.tallest", tallest);
         saveLandmark();
+        saveWeek();
+        bests.recordHighest("city.civic", civicCount);
+        bests.recordHighest("city.rating", ratingTier + 1);
+        bests.recordHighest("city.rushwins", rushWins);
+        bests.recordHighest("city.rush", rushBestFloors);
+        bests.recordHighest("city.repairs", repairsLifetime + repairsThisSession);
+        bests.recordHighest("city.storms", stormsWeathered);
     }
 
     private void saveLandmark() {
         bests.putFloat("city.landmark.week", weekIndex);
         bests.putFloat("city.landmark.work", (float) landmarkWork);
+    }
+
+    /* ---------------------------------------------------------------- rating ---------- */
+
+    /**
+     * The city's rating: everything the rower has ever done here, in one number. It buys two things
+     * that are visible immediately - a new way to clad a tower, and permission to build higher, so
+     * an established city never runs out of plots to fill.
+     */
+    private void recomputeRating() {
+        ratingScore = lifetime + population / 8f + landmarksBuilt * 40f + civicCount * 25f
+                + districtsSeen * 30f + rushWins * 20f - damageTotal * 3f;
+        int t = 0;
+        for (int i = RATING_AT.length - 1; i >= 0; i--) {
+            if (ratingScore >= RATING_AT[i]) {
+                t = i;
+                break;
+            }
+        }
+        // A rating is a lifetime achievement and must never fall. Storm damage subtracts from the
+        // score, and a tier lost mid-storm would take four floors of height limit with it: every
+        // plot would then be over the limit, lowestPlot() would find nothing, and the rower's
+        // strokes would pour into a city with nowhere to put them. It also re-clads towers at the
+        // lower tier and re-fires the unlock banner once the repairs are done.
+        if (t < bestTier) {
+            t = bestTier;
+        }
+        if (t > ratingTier) {
+            ratingTier = t;
+            if (isRunning() && hasClockStarted()) {
+                showBanner(RATING_NAMES[t] + " - " + STYLE_NAMES[t] + " UNLOCKED");
+                ratingFlash = 1.6f;
+                shake.kick(dp(5f));
+                for (int k = 0; k < 4; k++) {
+                    fx.burst(getWidth() * (0.3f + k * 0.14f), getHeight() * 0.35f, 18, dp(170f), 1.1f,
+                            dp(3f), k % 2 == 0 ? 0xFFFFD24A : ACCENT, true);
+                }
+            }
+        } else {
+            ratingTier = t;
+        }
+        if (ratingTier > bestTier) {
+            bestTier = ratingTier;
+            bests.recordHighest("city.rating", ratingTier + 1);
+        }
+    }
+
+    /** Floors a tower may reach: four more per rating tier, so the grid grows with the city. */
+    private int maxHeight() {
+        return MAX_HEIGHT + ratingTier * 4;
+    }
+
+    /** Score still to go before the next tier, or -1 at the top. */
+    private float ratingToNext() {
+        if (ratingTier >= RATING_AT.length - 1) {
+            return -1f;
+        }
+        return RATING_AT[ratingTier + 1] - ratingScore;
+    }
+
+    /** Marks the tallest plots as the civic buildings the citizens have asked for over time. */
+    private void assignCivic() {
+        for (int gx = 0; gx < GRID; gx++) {
+            for (int gy = 0; gy < GRID; gy++) {
+                civic[gx][gy] = -1;
+            }
+        }
+        for (int n = 0; n < civicCount && n < CIVIC_NAMES.length; n++) {
+            int bx = -1;
+            int by = -1;
+            int best = 0;
+            for (int gx = 0; gx < GRID; gx++) {
+                for (int gy = 0; gy < GRID; gy++) {
+                    if (civic[gx][gy] < 0 && height[gx][gy] > best) {
+                        best = height[gx][gy];
+                        bx = gx;
+                        by = gy;
+                    }
+                }
+            }
+            if (bx < 0) {
+                return;
+            }
+            civic[bx][by] = n % CIVIC_NAMES.length;
+        }
+    }
+
+    /* ---------------------------------------------------------------- the week ---------- */
+
+    private void loadWeek() {
+        long stored = Math.round(bests.get("city.week.index", -1f));
+        weekFloors = Math.round(bests.get("city.week.floors", 0f));
+        lastWeekFloors = Math.round(bests.get("city.week.last", 0f));
+        if (stored != weekIndex) {
+            // A new week: last week's column is whatever the previous one finished on.
+            lastWeekFloors = stored == weekIndex - 1 ? weekFloors : 0;
+            weekFloors = 0;
+            saveWeek();
+        }
+        weekFloorsAtStart = weekFloors;
+        passedLastWeek = lastWeekFloors > 0 && weekFloors >= lastWeekFloors;
+        weekBarA = weekFloors;
+        weekBarB = lastWeekFloors;
+    }
+
+    private void saveWeek() {
+        bests.putFloat("city.week.index", weekIndex);
+        bests.putFloat("city.week.floors", weekFloors);
+        bests.putFloat("city.week.last", lastWeekFloors);
     }
 
     /** Sets {@link #lowX}/{@link #lowY} to the plot the next block should go on. */
@@ -351,7 +646,7 @@ final class SkylineGame extends GameView {
                 // Centre plots are favoured slightly so the skyline peaks in the middle.
                 int bias = Math.abs(gx - GRID / 2) + Math.abs(gy - GRID / 2);
                 int score = hh * 4 + bias;
-                if (hh < MAX_HEIGHT && score < best) {
+                if (hh < maxHeight() && score < best) {
                     best = score;
                     lowX = gx;
                     lowY = gy;
@@ -396,6 +691,9 @@ final class SkylineGame extends GameView {
         // Ten minutes of typical work lights every window.
         double work = Math.max(0, s.meter.workJoules - Math.max(0, workAtStart));
         litShare = (float) Math.min(1.0, work / Math.max(1.0, profile.typicalWatts() * 600.0));
+        // Power for the storm shield is read here, never in onStroke: by the time a stroke counts,
+        // instantaneous watts have already collapsed toward zero.
+        wattsNow = s.watts;
     }
 
     private void recomputeTallest() {
@@ -461,9 +759,15 @@ final class SkylineGame extends GameView {
         boolean building = isClockRunning() && watts > 0;
         if (building) {
             concrete += watts * dt;
-            while (concrete >= cost(nextUnits)) {
+            // Repairs come first: while anything is broken every stroke goes into putting it back,
+            // and the skyline does not grow an inch until the city is whole again.
+            while (damageTotal > 0 && concrete >= REPAIR_COST) {
+                concrete -= REPAIR_COST;
+                repairOne();
+            }
+            while (damageTotal == 0 && concrete >= cost(nextUnits)) {
                 lowestPlot();
-                int room = MAX_HEIGHT - height[lowX][lowY] - pendingFor(lowX, lowY);
+                int room = maxHeight() - height[lowX][lowY] - pendingFor(lowX, lowY);
                 int units = Math.min(nextUnits, room);
                 concrete -= cost(Math.max(1, units));
                 if (units > 0) {
@@ -491,10 +795,13 @@ final class SkylineGame extends GameView {
             f.z -= fall * dt;
             if (f.z <= f.target) {
                 int before = lifetime;
-                height[f.gx][f.gy] = Math.min(MAX_HEIGHT, height[f.gx][f.gy] + f.units);
+                height[f.gx][f.gy] = Math.min(maxHeight(), height[f.gx][f.gy] + f.units);
                 sessionFloors[f.gx][f.gy] += f.units;
                 lifetime += f.units;
                 placedThisSession += f.units;
+                // A tower that grows is re-clad in whatever the city can build today.
+                style[f.gx][f.gy] = ratingTier;
+                weekFloors = weekFloorsAtStart + placedThisSession;
                 recomputeTallest();
                 falling.remove(i);
                 project(f.gx, f.gy, f.target + 1);
@@ -576,7 +883,391 @@ final class SkylineGame extends GameView {
                 if (doorGlow[gx][gy] > 0f) {
                     doorGlow[gx][gy] = Math.max(0f, doorGlow[gx][gy] - dt * 0.4f);
                 }
+                if (repairFlash[gx][gy] > 0f) {
+                    repairFlash[gx][gy] = Math.max(0f, repairFlash[gx][gy] - dt * 1.1f);
+                }
             }
+        }
+
+        stepRequest(dt);
+        stepRush(dt);
+        stepStorm(dt);
+        stepWeek(dt);
+        recomputeRating();
+        ratingShown += (ratingTier - ratingShown) * Math.min(1f, dt * 3f);
+        ratingFlash = Math.max(0f, ratingFlash - dt);
+        requestPulse += dt;
+    }
+
+    /* ------------------------------------------------- 1. the citizens' request ---------- */
+
+    /**
+     * The citizens come and ask for one building a session: a petitioner walks in from the street,
+     * stands at the kerb with a placard and waits until the floors they asked for have gone up. The
+     * building they get is a real one - it keeps a civic sign over its roof for good, and counts
+     * toward the rating - so a request is not a scoreboard line, it is a thing in the city.
+     */
+    private void stepRequest(float dt) {
+        if (!hasClockStarted()) {
+            return;
+        }
+        if (requestOpen) {
+            int done = placedThisSession - requestBase;
+            if (done >= requestNeed) {
+                fulfilRequest();
+            }
+            return;
+        }
+        requestCooldown -= dt;
+        if (requestCooldown <= 0f && roomLeft() >= 8) {
+            openRequest();
+        }
+    }
+
+    private int roomLeft() {
+        int room = 0;
+        for (int gx = 0; gx < GRID; gx++) {
+            for (int gy = 0; gy < GRID; gy++) {
+                room += maxHeight() - height[gx][gy];
+            }
+        }
+        return room;
+    }
+
+    private void openRequest() {
+        requestOpen = true;
+        requestKind = (civicCount + requestsThisSession) % CIVIC_NAMES.length;
+        requestBase = placedThisSession;
+        // 75 seconds of the rower's own typical rowing for the first, half again for each after it.
+        double floors = profile.typicalWatts() * 75.0 / BLOCK_COST
+                * Math.pow(1.45, requestsThisSession);
+        requestNeed = (int) Math.max(6, Math.min(Math.min(120, roomLeft()), Math.round(floors)));
+        showBanner("THE CITIZENS WANT A " + CIVIC_NAMES[requestKind]);
+        spawnPetitioner();
+    }
+
+    private void fulfilRequest() {
+        requestOpen = false;
+        requestsThisSession++;
+        requestCooldown = 25f;
+        // The building goes on whatever tower this session raised highest: the one they watched go up.
+        int bx = -1;
+        int by = -1;
+        int best = 0;
+        for (int gx = 0; gx < GRID; gx++) {
+            for (int gy = 0; gy < GRID; gy++) {
+                if (civic[gx][gy] < 0 && sessionFloors[gx][gy] > best) {
+                    best = sessionFloors[gx][gy];
+                    bx = gx;
+                    by = gy;
+                }
+            }
+        }
+        if (bx < 0) {
+            // Nothing new went up on a free plot: put it on the tallest tower without a sign.
+            for (int gx = 0; gx < GRID; gx++) {
+                for (int gy = 0; gy < GRID; gy++) {
+                    if (civic[gx][gy] < 0 && height[gx][gy] > best) {
+                        best = height[gx][gy];
+                        bx = gx;
+                        by = gy;
+                    }
+                }
+            }
+        }
+        if (bx >= 0) {
+            civic[bx][by] = requestKind;
+            civicCount++;
+            bests.recordHighest("city.civic", civicCount);
+            project(bx, by, height[bx][by] + 1);
+            fx.burst(px, py, 26, dp(150f), 1.1f, dp(3f), CIVIC_COLORS[requestKind], true);
+            doorGlow[bx][by] = 1f;
+        }
+        population += 30 + requestNeed * 2;
+        shake.kick(dp(5f));
+        showBanner(CIVIC_NAMES[requestKind] + " OPENS - THE CITY THANKS YOU");
+        if (petitioner >= 0 && residents[petitioner].active
+                && residents[petitioner].kind == R_PETITION) {
+            Resident r = residents[petitioner];
+            project(r.x, r.y, 0.4f);
+            fx.burst(px, py - gTw * 0.3f, 14, dp(80f), 0.8f, dp(2.5f), 0xFFFFD24A, true);
+            r.active = false;
+        }
+        petitioner = -1;
+        recomputeRating();
+    }
+
+    private void spawnPetitioner() {
+        Resident r = freeResident();
+        if (r == null) {
+            petitioner = -1;
+            return;
+        }
+        petitioner = -1;
+        for (int i = 0; i < residents.length; i++) {
+            if (residents[i] == r) {
+                petitioner = i;
+            }
+        }
+        r.active = true;
+        r.kind = R_PETITION;
+        r.shirt = CIVIC_COLORS[requestKind];
+        r.skin = SKINS[rng.nextInt(SKINS.length)];
+        r.speed = 0.5f;
+        r.phase = 0f;
+        r.wait = 0f;
+        r.leg = 0;
+        r.legs = 1;
+        r.x = -0.45f;
+        r.y = -0.62f;
+        r.wx[0] = 1.6f;
+        r.wy[0] = -0.62f;
+    }
+
+    /* ------------------------------------------------- 2. rush hour ---------- */
+
+    /**
+     * Two minutes, a number of floors, and a pace line that is either ahead of you or behind you
+     * right now. The rower starts it themselves from the HUD, because a demand that arrives
+     * unannounced in the middle of a warm-up is just an interruption.
+     */
+    private void stepRush(float dt) {
+        rushCooldown = Math.max(0f, rushCooldown - dt);
+        if (!rushRunning) {
+            rushTint = Math.max(0f, rushTint - dt * 1.5f);
+            return;
+        }
+        rushTint = Math.min(1f, rushTint + dt * 1.5f);
+        rushLeft -= dt;
+        int done = placedThisSession - rushBase;
+        if (done >= rushTarget) {
+            endRush(true, done);
+        } else if (rushLeft <= 0f) {
+            endRush(false, done);
+        }
+    }
+
+    private boolean rushAvailable() {
+        return !rushRunning && rushCooldown <= 0f && stormPhase == STORM_NONE && damageTotal == 0
+                && hasClockStarted() && roomLeft() >= 16;
+    }
+
+    private void startRush() {
+        rushRunning = true;
+        rushLeft = RUSH_SECONDS;
+        rushBase = placedThisSession;
+        double floors = profile.typicalWatts() * RUSH_DEMAND * RUSH_SECONDS / BLOCK_COST;
+        rushTarget = (int) Math.max(10, Math.min(roomLeft() - 4, Math.round(floors)));
+        showBanner("RUSH HOUR - " + rushTarget + " FLOORS IN TWO MINUTES");
+        shake.kick(dp(4f));
+    }
+
+    private void endRush(boolean cleared, int done) {
+        rushRunning = false;
+        rushCooldown = cleared ? 40f : 60f;
+        if (cleared) {
+            rushWins++;
+            bests.recordHighest("city.rushwins", rushWins);
+            population += rushTarget * 3;
+            showBanner("RUSH HOUR CLEARED - " + done + " FLOORS");
+            shake.kick(dp(8f));
+            for (int k = 0; k < 5; k++) {
+                fx.burst(getWidth() * (0.25f + k * 0.13f), getHeight() * (0.28f + (k % 2) * 0.12f),
+                        24, dp(190f), 1.2f, dp(3.5f), k % 2 == 0 ? 0xFFFFD24A : ACCENT, true);
+            }
+        } else {
+            showBanner("RUSH HOUR OVER - " + done + " OF " + rushTarget);
+        }
+        if (done > rushBestFloors) {
+            rushBestFloors = done;
+            bests.recordHighest("city.rush", rushBestFloors);
+        }
+        recomputeRating();
+    }
+
+    /* ------------------------------------------------- 5. the storm ---------- */
+
+    /**
+     * Weather with teeth. A warning, then a front overhead that throws lightning at the tallest
+     * towers every few seconds; the city's shield is powered by whatever the rower is pulling right
+     * now, so the ten seconds before a strike genuinely matter. What gets through breaks floors,
+     * and broken floors take every watt-second until they are back - which is the point of it.
+     */
+    private void stepStorm(float dt) {
+        // Shield strength is the rower's live power across their own low-to-high band.
+        double lo = profile.lowWatts();
+        double hi = Math.max(lo + 1, profile.highWatts());
+        float want = (float) Math.max(0, Math.min(1, (wattsNow - lo) / (hi - lo)));
+        // Rises with the drive, bleeds away like the boat does. A single rate cannot work here:
+        // 088 is instantaneous power and reads a true zero in 27% of samples taken while actively
+        // rowing, in runs measured up to 9.7 s, so a symmetric follow would show THE SHIELD IS
+        // DOWN to a rower who is pulling hard. The decay is still a decay - about three seconds to
+        // the floor - so easing off really does open the city up.
+        float rate = want > shield ? 3f : 0.35f;
+        shield += (want - shield) * Math.min(1f, dt * rate);
+        boltT = Math.max(0f, boltT - dt * 1.6f);
+        stormNoteT = Math.max(0f, stormNoteT - dt);
+
+        switch (stormPhase) {
+            case STORM_NONE:
+                stormIntensity = Math.max(0f, stormIntensity - dt * 0.5f);
+                if (activeSeconds >= nextStormAt && !rushRunning && lifetime >= 12
+                        && damageTotal == 0 && isClockRunning()) {
+                    stormPhase = STORM_WARNING;
+                    stormT = 9f;
+                    showBanner("STORM WARNING - KEEP THE POWER UP");
+                }
+                break;
+            case STORM_WARNING:
+                stormIntensity = Math.min(0.55f, stormIntensity + dt * 0.12f);
+                stormT -= dt;
+                if (stormT <= 0f) {
+                    stormPhase = STORM_OVERHEAD;
+                    stormT = 45f;
+                    strikeIn = 4f;
+                }
+                break;
+            case STORM_OVERHEAD:
+                stormIntensity = Math.min(1f, stormIntensity + dt * 0.5f);
+                stormT -= dt;
+                strikeIn -= dt;
+                if (strikeIn <= 0f) {
+                    strike();
+                    strikeIn = 4.5f + rng.nextFloat() * 2f;
+                }
+                if (stormT <= 0f) {
+                    stormPhase = STORM_CLEARING;
+                    stormT = 8f;
+                    stormsWeathered++;
+                    bests.recordHighest("city.storms", stormsWeathered);
+                    showBanner(damageTotal > 0
+                            ? "STORM PASSED - " + damageTotal + " FLOORS NEED REPAIR"
+                            : "STORM PASSED - NOT A SCRATCH");
+                }
+                break;
+            default:
+                stormIntensity = Math.max(0f, stormIntensity - dt * 0.14f);
+                stormT -= dt;
+                if (stormT <= 0f) {
+                    stormPhase = STORM_NONE;
+                    nextStormAt = activeSeconds + 240;
+                }
+                break;
+        }
+        if (stormIntensity > 0.02f) {
+            stepRain(dt);
+        }
+    }
+
+    private void stepRain(float dt) {
+        if (!rainSeeded) {
+            rainSeeded = true;
+            for (int i = 0; i < rainX.length; i++) {
+                rainX[i] = rng.nextFloat();
+                rainY[i] = rng.nextFloat();
+                rainV[i] = 0.9f + rng.nextFloat() * 0.8f;
+            }
+        }
+        for (int i = 0; i < rainX.length; i++) {
+            rainY[i] += rainV[i] * dt * (0.5f + stormIntensity);
+            rainX[i] -= rainV[i] * dt * 0.16f;
+            if (rainY[i] > 1f) {
+                rainY[i] -= 1f;
+                rainX[i] = rng.nextFloat();
+            }
+            if (rainX[i] < 0f) {
+                rainX[i] += 1f;
+            }
+        }
+    }
+
+    /** One bolt at one tower: deflected if the shield is up, floors off it if not. */
+    private void strike() {
+        int bx = -1;
+        int by = -1;
+        int best = -1;
+        for (int gx = 0; gx < GRID; gx++) {
+            for (int gy = 0; gy < GRID; gy++) {
+                // Lightning goes for height, with a little randomness so it is not always one tower.
+                int score = height[gx][gy] * 3 - damage[gx][gy] * 4 + rng.nextInt(7);
+                if (height[gx][gy] - damage[gx][gy] > 0 && score > best) {
+                    best = score;
+                    bx = gx;
+                    by = gy;
+                }
+            }
+        }
+        if (bx < 0) {
+            return;
+        }
+        boltPlotX = bx;
+        boltPlotY = by;
+        boltT = 1f;
+        for (int i = 0; i < boltJag.length; i++) {
+            boltJag[i] = (rng.nextFloat() - 0.5f) * 2f;
+        }
+        boltDeflected = rng.nextFloat() < shield;
+        project(bx, by, height[bx][by]);
+        if (boltDeflected) {
+            fx.burst(px, py, 18, dp(130f), 0.6f, dp(3f), 0xFF7FD8FF, false);
+            stormNote = "DEFLECTED";
+            stormNoteT = 1.6f;
+            shake.kick(dp(3f));
+        } else {
+            int hit = Math.min(height[bx][by] - damage[bx][by], 1 + rng.nextInt(2));
+            damage[bx][by] += hit;
+            damageTotal += hit;
+            fx.burst(px, py, 22, dp(150f), 0.9f, dp(3.5f), 0xFFF0655D, true);
+            stormNote = "-" + hit + (hit == 1 ? " FLOOR" : " FLOORS");
+            stormNoteT = 2f;
+            shake.kick(dp(9f));
+            flash = 0.5f;
+            recomputeRating();
+        }
+    }
+
+    /** Puts one broken floor back. Repairs work down from the worst-hit tower. */
+    private void repairOne() {
+        int bx = -1;
+        int by = -1;
+        int best = 0;
+        for (int gx = 0; gx < GRID; gx++) {
+            for (int gy = 0; gy < GRID; gy++) {
+                if (damage[gx][gy] > best) {
+                    best = damage[gx][gy];
+                    bx = gx;
+                    by = gy;
+                }
+            }
+        }
+        if (bx < 0) {
+            damageTotal = 0;
+            return;
+        }
+        damage[bx][by]--;
+        damageTotal = Math.max(0, damageTotal - 1);
+        repairsThisSession++;
+        repairFlash[bx][by] = 1f;
+        project(bx, by, height[bx][by] - damage[bx][by]);
+        fx.burst(px, py, 10, dp(80f), 0.5f, dp(2.5f), 0xFFFFE8A8, true);
+        if (damageTotal == 0) {
+            showBanner("THE CITY IS WHOLE AGAIN");
+            bests.recordHighest("city.repairs", repairsLifetime + repairsThisSession);
+            recomputeRating();
+        }
+    }
+
+    /* ------------------------------------------------- 4. this week ---------- */
+
+    private void stepWeek(float dt) {
+        weekBarA += (weekFloors - weekBarA) * Math.min(1f, dt * 2.5f);
+        weekBarB += (lastWeekFloors - weekBarB) * Math.min(1f, dt * 2.5f);
+        if (!passedLastWeek && lastWeekFloors > 0 && weekFloors >= lastWeekFloors) {
+            passedLastWeek = true;
+            showBanner("AHEAD OF LAST WEEK - " + weekFloors + " FLOORS");
+            shake.kick(dp(4f));
+            fx.burst(getWidth() * 0.18f, getHeight() * 0.14f, 22, dp(150f), 1.1f, dp(3f),
+                    0xFFFFD24A, true);
         }
     }
 
@@ -593,7 +1284,7 @@ final class SkylineGame extends GameView {
         float ext = 1.414f * (float) Math.sqrt(hx * hx + hy * hy);
         float fit = Math.min(1f, 5.8f / ext);
         // Tile size shrinks as the city grows so it stays on screen.
-        float tallScale = 1f - Math.min(0.35f, tallest / (float) MAX_HEIGHT * 0.35f);
+        float tallScale = 1f - Math.min(0.42f, tallest / (float) maxHeight() * 0.42f);
         gTw = Math.min(w, h) * 0.105f * tallScale * fit;
         gTh = gTw * 0.52f;
         gBh = gTw * 0.62f;
@@ -789,7 +1480,11 @@ final class SkylineGame extends GameView {
             if (r.leg < r.legs) {
                 continue;
             }
-            if (r.kind == R_MOVER) {
+            if (r.kind == R_PETITION) {
+                // The petitioner reaches the kerb and stays there with the placard until the
+                // building they came for is standing.
+                r.wait = 9999f;
+            } else if (r.kind == R_MOVER) {
                 r.active = false;
                 population += r.family;
                 doorGlow[r.plotX][r.plotY] = 1f;
@@ -806,8 +1501,9 @@ final class SkylineGame extends GameView {
 
     /** Everything but the HUD: this is also what photo mode renders into a bitmap. */
     private void drawWorld(Canvas c, float w, float h, boolean forPhoto) {
-        // Sky: a slow day-night cycle so a long row visibly passes time.
-        float tod = timeOfDay();
+        // Sky: a slow day-night cycle so a long row visibly passes time. A storm front pulls the
+        // whole scene down toward night, so the city darkens with the weather and not just the sky.
+        float tod = skyTod();
         int key = (int) (tod * 48) * 100000 + (int) h;
         if (skyShader == null || key != skyKey) {
             float q = (int) (tod * 48) / 48f;
@@ -821,6 +1517,11 @@ final class SkylineGame extends GameView {
         paint.setShader(skyShader);
         c.drawRect(0, 0, w, h, paint);
         paint.setShader(null);
+        if (rushTint > 0.02f) {
+            // Rush hour puts the city under a hard amber light for its two minutes.
+            paint.setColor(((int) (rushTint * 54) << 24) | 0xFFB347);
+            c.drawRect(0, 0, w, h, paint);
+        }
         if (tod < 0.5f) {
             paint.setColor(0xFFFFFFFF);
             paint.setAlpha((int) ((0.5f - tod) * 2 * 200));
@@ -836,6 +1537,9 @@ final class SkylineGame extends GameView {
         paint.setColor(tod > 0.5f ? 0xFFFFE8A8 : 0xFFE9EEF5);
         c.drawCircle(sunX, sunY, dp(20f), paint);
         drawSkyTraffic(c, w, h, tod);
+        if (stormIntensity > 0.02f) {
+            drawStormSky(c, w, h);
+        }
         drawSiteLife(c, w, h, tod);
 
         drawGround(c, tod, forPhoto);
@@ -942,10 +1646,98 @@ final class SkylineGame extends GameView {
             c.drawLine(fx0, fy0, px, py, paint);
         }
         fx.draw(c);
+        if (stormIntensity > 0.02f) {
+            drawStormFront(c, w, h);
+        }
     }
 
     private float timeOfDay() {
         return (float) ((Math.sin(activeSeconds / 150.0 - Math.PI / 2) + 1) / 2);   // 0 night..1 day
+    }
+
+    /** Daylight as the city actually sees it: the storm front takes most of it away. */
+    private float skyTod() {
+        return timeOfDay() * (1f - 0.72f * Math.min(1f, stormIntensity));
+    }
+
+    /* ---------------------------------------------------------------- storm ---------- */
+
+    /** The front itself: low cloud running across the top of the sky, fast and dark. */
+    private void drawStormSky(Canvas c, float w, float h) {
+        double t = sessionSeconds;
+        paint.setStyle(Paint.Style.FILL);
+        int a = (int) (Math.min(1f, stormIntensity) * 170);
+        for (int i = 0; i < 6; i++) {
+            float span = w + dp(520f);
+            float cx = (float) (((i * 353 + 40) + t * dp(52f + i * 9f)) % span) - dp(260f);
+            float cy = h * (0.04f + (i % 3) * 0.055f);
+            float sc = 1.1f + (i % 2) * 0.5f;
+            paint.setColor((a << 24) | 0x1B2230);
+            c.drawOval(cx - dp(150f) * sc, cy - dp(26f) * sc, cx + dp(150f) * sc, cy + dp(26f) * sc, paint);
+            paint.setColor(((a * 3 / 4) << 24) | 0x2A3448);
+            c.drawOval(cx - dp(70f) * sc, cy - dp(52f) * sc, cx + dp(80f) * sc, cy + dp(8f) * sc, paint);
+        }
+    }
+
+    /**
+     * Rain, the bolt, and the shield the rower is holding up with their own power. The shield dome
+     * is the feedback that makes the storm a game rather than a cutscene: it visibly thickens while
+     * you pull and thins the moment you ease off.
+     */
+    private void drawStormFront(Canvas c, float w, float h) {
+        float v = Math.min(1f, stormIntensity);
+        // This is the last thing drawn in the world pass, and both blocks below are conditional:
+        // without this the shared paint could reach the HUD (and the photo bitmap) still in STROKE.
+        paint.setStyle(Paint.Style.FILL);
+        // Shield: a dome over the city, brighter the harder you are pulling.
+        float dome = shield * v;
+        if (dome > 0.04f) {
+            float r = Math.max(dp(120f), gTw * 6.2f);
+            paint.setStyle(Paint.Style.STROKE);
+            for (int k = 0; k < 2; k++) {
+                float rr = r * (1f + k * 0.07f);
+                paint.setStrokeWidth(dp(k == 0 ? 3f : 1.4f));
+                paint.setColor(((int) (dome * (k == 0 ? 150 : 80)) << 24) | 0x7FD8FF);
+                c.drawArc(gCx - rr, gCy - rr * 0.92f, gCx + rr, gCy + rr * 0.92f, 190, 160, false, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            // A pulse running around the rim while the shield is strong.
+            float u = (float) ((sessionSeconds * 0.6) % 1.0);
+            double ang = Math.toRadians(190 + 160 * u);
+            paint.setColor(((int) (dome * 220) << 24) | 0xDFF3FF);
+            c.drawCircle(gCx + (float) Math.cos(ang) * r, gCy + (float) Math.sin(ang) * r * 0.92f,
+                    dp(4f), paint);
+        }
+        // Rain.
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(((int) (v * 120) << 24) | 0xC8DCF0);
+        float len = dp(26f) * (0.5f + v);
+        for (int i = 0; i < rainX.length; i++) {
+            float x = rainX[i] * w;
+            float y = rainY[i] * h;
+            c.drawLine(x, y, x - len * 0.28f, y + len, paint);
+        }
+        // The bolt, redrawn each frame from the plot it hit so it stays on the tower as we pan.
+        if (boltT > 0f) {
+            project(boltPlotX, boltPlotY, height[boltPlotX][boltPlotY]);
+            float tx = px;
+            float ty = py;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(3.5f) * boltT);
+            paint.setColor(((int) (Math.min(1f, boltT) * 255) << 24)
+                    | (boltDeflected ? 0x7FD8FF : 0xFFF1C4));
+            path.reset();
+            path.moveTo(tx + boltJag[0] * dp(60f), 0);
+            for (int i = 1; i < boltJag.length; i++) {
+                float f = i / (float) (boltJag.length - 1);
+                path.lineTo(tx + boltJag[i] * dp(46f) * (1f - f), ty * f);
+            }
+            c.drawPath(path, paint);
+            paint.setStyle(Paint.Style.FILL);
+            Fx.glow(c, tx, ty, dp(70f), ((int) (boltT * 0x99) << 24)
+                    | (boltDeflected ? 0x7FD8FF : 0xFFC0A0));
+        }
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private void addItem(int kind, int ref, float gx, float gy) {
@@ -1247,6 +2039,24 @@ final class SkylineGame extends GameView {
             c.drawRect(x - s * 0.6f, y - s * 4.4f - bob, x + s * 0.6f, y - s * 3.35f - bob, paint);
             paint.setColor(0xFF8A6238);
             c.drawRect(x - s * 0.6f, y - s * 3.95f - bob, x + s * 0.6f, y - s * 3.8f - bob, paint);
+        } else if (r.kind == R_PETITION) {
+            // A placard waved over the head, and the ask spelled out above it.
+            float wave = (float) Math.sin(sessionSeconds * 3.2) * 0.22f;
+            c.save();
+            c.rotate(wave * 24f, x, y - s * 2.6f);
+            paint.setColor(0xFF8A6238);
+            c.drawRect(x - s * 0.08f, y - s * 4.6f, x + s * 0.08f, y - s * 2.2f, paint);
+            paint.setColor(r.shirt);
+            c.drawRect(x - s * 1.05f, y - s * 6.1f, x + s * 1.05f, y - s * 4.4f, paint);
+            paint.setColor(0x66FFFFFF);
+            c.drawRect(x - s * 0.8f, y - s * 5.7f, x + s * 0.8f, y - s * 5.45f, paint);
+            c.drawRect(x - s * 0.8f, y - s * 5.2f, x + s * 0.35f, y - s * 4.95f, paint);
+            c.restore();
+            if (requestOpen) {
+                int left = Math.max(0, requestNeed - (placedThisSession - requestBase));
+                bold(c, CIVIC_NAMES[requestKind] + "  " + left, x, y - s * 7.2f, 9f,
+                        CIVIC_COLORS[requestKind], Paint.Align.CENTER);
+            }
         }
     }
 
@@ -1517,10 +2327,13 @@ final class SkylineGame extends GameView {
             Fx.glow(c, sx, sy, tw * 0.9f, ((int) (on * 0x50) << 24) | (crown & 0xFFFFFF));
         }
 
+        drawStyle(c, gx, gy, sx, sy, tw, th, bh, bodyH, color, tod, on);
+
         // Windows: one row per floor. Floors built this session burn gold after dark; the older
         // city lights up by the energy put in this session.
         long seed = windowSeed[seedIdx];
         int todayFrom = floors - sessionFloors[gx][gy];
+        int brokenFrom = floors - damage[gx][gy];
         boolean cool = (seed & 1L) == 0;
         int litOld = cool ? 0xFFDDEBFF : 0xFFFFE8A8;
         int dark = blend(color, 0xFF000000, 0.55f);
@@ -1529,7 +2342,9 @@ final class SkylineGame extends GameView {
             for (int k = 0; k < 2; k++) {
                 long bits = seed >>> ((f * 3 + k * 5) % 56);
                 int wcol;
-                if (f >= todayFrom) {
+                if (f >= brokenFrom) {
+                    wcol = 0xFF14100C;                   // blown out by the storm
+                } else if (f >= todayFrom) {
                     wcol = blend(dark, 0xFFFFC94A, Math.max(on, 0.15f));
                 } else {
                     boolean lit = ((bits & 0xFFL) / 255f) < 0.45f + 0.55f * litShare;
@@ -1550,6 +2365,185 @@ final class SkylineGame extends GameView {
             paint.setColor(blink ? 0xFFFF4D4D : 0x66FF4D4D);
             c.drawCircle(sx, sy - th - dp(24f), dp(3f), paint);
         }
+        if (damage[gx][gy] > 0) {
+            drawDamage(c, gx, gy, sx, sy, tw, th, bh);
+        }
+        if (repairFlash[gx][gy] > 0f) {
+            Fx.glow(c, sx, sy + th, tw * 1.1f,
+                    ((int) (repairFlash[gx][gy] * 0x88) << 24) | 0xFFE8A8);
+        }
+        if (civic[gx][gy] >= 0) {
+            drawCivicSign(c, gx, gy, sx, sy, th, tod);
+        }
+    }
+
+    /**
+     * What the rating unlocked, drawn on the tower itself: tile roofs, glass, spires, gold crowns.
+     * A plot is clad at whatever tier the city could build at when that tower last grew, so a old
+     * city reads as layers of its own history.
+     */
+    private void drawStyle(Canvas c, int gx, int gy, float sx, float sy, float tw, float th,
+                           float bh, float bodyH, int color, float tod, float on) {
+        switch (style[gx][gy]) {
+            case 1: {
+                // Brick and tile: a hipped roof over the prism.
+                float apex = sy - tw * 0.5f;
+                int tile = blend(0xFF6A2E24, 0xFFC2553F, tod);
+                paint.setColor(blend(tile, 0xFF000000, 0.3f));
+                path.reset();
+                path.moveTo(sx - tw, sy);
+                path.lineTo(sx, sy + th);
+                path.lineTo(sx, apex);
+                path.close();
+                c.drawPath(path, paint);
+                paint.setColor(tile);
+                path.reset();
+                path.moveTo(sx + tw, sy);
+                path.lineTo(sx, sy + th);
+                path.lineTo(sx, apex);
+                path.close();
+                c.drawPath(path, paint);
+                break;
+            }
+            case 2: {
+                // Glass: a mirrored band running the full height of each face. It has to be bodyH,
+                // not bh - one floor's worth is a sliver at the roof line that reads as nothing on
+                // a ten-storey tower, which is the whole point of the tier.
+                paint.setColor(0x33FFFFFF);
+                bandOnFace(c, sx, sy, tw, th, bodyH, 0.34f, 0.56f, true);
+                paint.setColor(0x22FFFFFF);
+                bandOnFace(c, sx, sy, tw, th, bodyH, 0.42f, 0.62f, false);
+                break;
+            }
+            case 3: {
+                // Spires: a tapered cap and a needle.
+                paint.setColor(blend(color, 0xFFFFFFFF, 0.42f));
+                path.reset();
+                path.moveTo(sx - tw * 0.5f, sy - th * 0.1f);
+                path.lineTo(sx + tw * 0.5f, sy - th * 0.1f);
+                path.lineTo(sx, sy - tw * 0.95f);
+                path.close();
+                c.drawPath(path, paint);
+                paint.setStrokeWidth(dp(2f));
+                paint.setColor(0xFFCBD5E4);
+                c.drawLine(sx, sy - tw * 0.95f, sx, sy - tw * 1.45f, paint);
+                if (on > 0.05f) {
+                    Fx.glow(c, sx, sy - tw * 1.45f, dp(16f), ((int) (on * 0xAA) << 24) | 0xBFE4FF);
+                }
+                break;
+            }
+            case 4: {
+                // Golden crowns: a gold band at the parapet and a helipad on the roof.
+                paint.setColor(0xFFE8C05A);
+                path.reset();
+                path.moveTo(sx - tw, sy);
+                path.lineTo(sx, sy + th);
+                path.lineTo(sx, sy + th + bh * 0.3f);
+                path.lineTo(sx - tw, sy + bh * 0.3f);
+                path.close();
+                c.drawPath(path, paint);
+                paint.setColor(0xFFC79A33);
+                path.reset();
+                path.moveTo(sx + tw, sy);
+                path.lineTo(sx, sy + th);
+                path.lineTo(sx, sy + th + bh * 0.3f);
+                path.lineTo(sx + tw, sy + bh * 0.3f);
+                path.close();
+                c.drawPath(path, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1.6f));
+                paint.setColor(0xFFF4F1E8);
+                c.drawOval(sx - tw * 0.36f, sy - th * 0.34f, sx + tw * 0.36f, sy + th * 0.34f, paint);
+                paint.setStyle(Paint.Style.FILL);
+                bold(c, "H", sx, sy + th * 0.22f, 9f, 0xFFF4F1E8, Paint.Align.CENTER);
+                if (on > 0.05f) {
+                    Fx.glow(c, sx, sy, tw * 1.2f, ((int) (on * 0x66) << 24) | 0xFFD24A);
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /** A vertical band down one face of the prism, between two fractions of its top edge. */
+    private void bandOnFace(Canvas c, float sx, float sy, float tw, float th, float bh,
+                            float u0, float u1, boolean rightFace) {
+        float s = rightFace ? 1f : -1f;
+        float x0 = sx + s * tw * u0;
+        float y0 = sy + th * (1f - u0);
+        float x1 = sx + s * tw * u1;
+        float y1 = sy + th * (1f - u1);
+        path.reset();
+        path.moveTo(x0, y0);
+        path.lineTo(x1, y1);
+        path.lineTo(x1, y1 + bh);
+        path.lineTo(x0, y0 + bh);
+        path.close();
+        c.drawPath(path, paint);
+    }
+
+    /** Broken floors: a charred, scaffolded band at the top of the stack, sparking. */
+    private void drawDamage(Canvas c, int gx, int gy, float sx, float sy, float tw, float th,
+                            float bh) {
+        float broken = damage[gx][gy] * bh;
+        float top = sy + th;
+        float bottom = top + broken;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xAA100C08);
+        path.reset();
+        path.moveTo(sx - tw, sy);
+        path.lineTo(sx, top);
+        path.lineTo(sx, bottom);
+        path.lineTo(sx - tw, sy + broken);
+        path.close();
+        c.drawPath(path, paint);
+        path.reset();
+        path.moveTo(sx + tw, sy);
+        path.lineTo(sx, top);
+        path.lineTo(sx, bottom);
+        path.lineTo(sx + tw, sy + broken);
+        path.close();
+        c.drawPath(path, paint);
+        // Hazard tape across the break line, and a blinking marker above it.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xFFF0B132);
+        c.drawLine(sx - tw, sy + broken, sx, bottom, paint);
+        c.drawLine(sx, bottom, sx + tw, sy + broken, paint);
+        paint.setStyle(Paint.Style.FILL);
+        boolean blink = ((int) (sessionSeconds * 2.5)) % 2 == 0;
+        paint.setColor(blink ? 0xFFF0655D : 0x55F0655D);
+        c.drawCircle(sx, sy - th - dp(8f), dp(4f), paint);
+        // Embers drifting off the break, one every few frames so nothing accumulates.
+        if (rng.nextFloat() < 0.08f) {
+            fx.spawn(sx + (rng.nextFloat() - 0.5f) * tw, sy + broken * 0.5f,
+                    (rng.nextFloat() - 0.5f) * dp(20f), -dp(24f), 0.9f, dp(2f), 0xAAFFA05A, false);
+        }
+    }
+
+    /** The sign over a building the citizens asked for. It stays for good. */
+    private void drawCivicSign(Canvas c, int gx, int gy, float sx, float sy, float th, float tod) {
+        int k = civic[gx][gy];
+        int col = CIVIC_COLORS[k];
+        float y = sy - th - dp(14f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(col);
+        c.drawRoundRect(sx - dp(9f), y - dp(9f), sx + dp(9f), y + dp(9f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFF10141C);
+        // A plus for a hospital, otherwise the building's initial.
+        if (k == 0 || k == 6) {
+            c.drawRect(sx - dp(5f), y - dp(1.6f), sx + dp(5f), y + dp(1.6f), paint);
+            c.drawRect(sx - dp(1.6f), y - dp(5f), sx + dp(1.6f), y + dp(5f), paint);
+        } else {
+            bold(c, CIVIC_NAMES[k].substring(0, 1), sx, y + dp(4f), 11f, 0xFF10141C,
+                    Paint.Align.CENTER);
+        }
+        if (tod < 0.45f) {
+            Fx.glow(c, sx, y, dp(26f), 0x66000000 | (col & 0xFFFFFF));
+        }
+        label(c, CIVIC_NAMES[k], sx, y - dp(14f), 7.5f, 0xCC000000 | (col & 0xFFFFFF),
+                Paint.Align.CENTER);
     }
 
     private void drawBlock(Canvas c, int gx, int gy, float z, int color) {
@@ -1742,7 +2736,7 @@ final class SkylineGame extends GameView {
             next = "PARK OPENS IN " + (PARK_AT - lifetime) + " BLOCKS";
         } else if (lifetime < BRIDGE_AT) {
             next = "RIVER AND BRIDGE OPEN IN " + (BRIDGE_AT - lifetime) + " BLOCKS";
-        } else if (lifetime >= GRID * GRID * MAX_HEIGHT) {
+        } else if (lifetime >= GRID * GRID * maxHeight()) {
             next = "EVERY PLOT IS BUILT - ROW FOR THE LANDMARK";
         }
         if (next != null) {
@@ -1753,13 +2747,271 @@ final class SkylineGame extends GameView {
         drawTodayTower(c, w, h);
         drawLandmarkPanel(c, w);
         drawPhotoButton(c);
+        drawRatingPanel(c, w);
+        drawWeekPanel(c);
+        drawRequestCard(c, w);
+        drawCentrePanel(c, w);
 
         float fy = h - dp(12f);
-        float col = w / 4f;
+        float col = w / 5f;
         stat(c, col * 0.5f, fy, String.valueOf(placedThisSession), "THIS SESSION");
         stat(c, col * 1.5f, fy, tallest + " floors", "TALLEST");
         stat(c, col * 2.5f, fy, String.valueOf(population), "RESIDENTS");
-        stat(c, col * 3.5f, fy, falling.isEmpty() ? "--" : String.valueOf(falling.size()), "IN THE AIR");
+        stat(c, col * 3.5f, fy, String.valueOf(civicCount), "CIVIC BUILDINGS");
+        stat(c, col * 4.5f, fy, damageTotal > 0 ? damageTotal + " broken"
+                : (falling.isEmpty() ? "--" : String.valueOf(falling.size())),
+                damageTotal > 0 ? "REPAIRS DUE" : "IN THE AIR");
+    }
+
+    /* ---------------------------------------------------------------- HUD panels ---------- */
+
+    /** Stars, the tier's name, and what the next one unlocks. */
+    private void drawRatingPanel(Canvas c, float w) {
+        float x0 = dp(132f);
+        float y = dp(26f);
+        paint.setStyle(Paint.Style.FILL);
+        float starX = x0;
+        for (int i = 0; i < RATING_NAMES.length; i++) {
+            float fill = Math.max(0f, Math.min(1f, ratingShown - i + 1f));
+            float pulse = i == ratingTier ? 1f + ratingFlash * 0.25f : 1f;
+            star(c, starX + i * dp(22f), y, dp(9f) * pulse, fill);
+        }
+        float tx = x0 + RATING_NAMES.length * dp(22f) + dp(6f);
+        bold(c, RATING_NAMES[ratingTier], tx, y + dp(5f), 14f,
+                ratingFlash > 0f ? 0xFFFFD24A : TEXT, Paint.Align.LEFT);
+        float next = ratingToNext();
+        String line = next < 0
+                ? "TOP RATING - " + STYLE_NAMES[ratingTier] + ", " + maxHeight() + " FLOOR LIMIT"
+                : STYLE_NAMES[ratingTier] + "  -  " + (int) Math.ceil(next) + " TO "
+                        + RATING_NAMES[ratingTier + 1] + " (" + STYLE_NAMES[ratingTier + 1] + ")";
+        label(c, line, tx, y + dp(20f), 8.5f, next < 0 ? ACCENT : DIM, Paint.Align.LEFT);
+    }
+
+    private void star(Canvas c, float cx, float cy, float r, float fill) {
+        path.reset();
+        for (int i = 0; i < 10; i++) {
+            double a = -Math.PI / 2 + i * Math.PI / 5;
+            float rr = (i % 2 == 0) ? r : r * 0.45f;
+            float x = cx + (float) Math.cos(a) * rr;
+            float y = cy + (float) Math.sin(a) * rr;
+            if (i == 0) {
+                path.moveTo(x, y);
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(blend(0xFF2A3446, 0xFFFFD24A, fill));
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x66E6EDF7);
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** This week's floors beside last week's, as two stacks that grow while you row. */
+    private void drawWeekPanel(Canvas c) {
+        float x0 = dp(206f);
+        float y0 = dp(58f);
+        float wpx = dp(268f);
+        float hpx = dp(96f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x44000000);
+        c.drawRoundRect(x0, y0, x0 + wpx, y0 + hpx, dp(8f), dp(8f), paint);
+        label(c, "THIS WEEK", x0 + dp(10f), y0 + dp(14f), 8.5f, FAINT, Paint.Align.LEFT);
+        String verdict;
+        int colr;
+        if (lastWeekFloors <= 0) {
+            verdict = "FIRST WEEK";
+            colr = DIM;
+        } else if (weekFloors >= lastWeekFloors) {
+            verdict = "+" + (weekFloors - lastWeekFloors) + " AHEAD";
+            colr = ACCENT;
+        } else {
+            verdict = (lastWeekFloors - weekFloors) + " TO BEAT";
+            colr = WARN;
+        }
+        bold(c, verdict, x0 + wpx - dp(10f), y0 + dp(15f), 10f, colr, Paint.Align.RIGHT);
+
+        float base = y0 + hpx - dp(20f);
+        float top = y0 + dp(24f);
+        float scale = Math.max(1f, Math.max(weekBarA, weekBarB));
+        float bw = dp(54f);
+        for (int i = 0; i < 2; i++) {
+            float v = i == 0 ? weekBarA : weekBarB;
+            float bx = x0 + dp(34f) + i * dp(96f);
+            float bh2 = (base - top) * Math.min(1f, v / scale);
+            paint.setColor(0x22FFFFFF);
+            c.drawRect(bx, top, bx + bw, base, paint);
+            paint.setColor(i == 0 ? (passedLastWeek ? 0xFF35D0BA : 0xFF6F8CFF) : 0xFF5D6B80);
+            c.drawRect(bx, base - bh2, bx + bw, base, paint);
+            // Floor lines, so the column reads as a stack of storeys rather than a bar.
+            paint.setColor(0x33000000);
+            for (float yy = base - dp(6f); yy > base - bh2; yy -= dp(6f)) {
+                c.drawRect(bx, yy, bx + bw, yy + dp(1f), paint);
+            }
+            if (i == 0 && passedLastWeek) {
+                Fx.glow(c, bx + bw / 2f, base - bh2, dp(30f), 0x66FFD24A);
+            }
+            bold(c, String.valueOf(i == 0 ? weekFloors : lastWeekFloors), bx + bw / 2f,
+                    base - bh2 - dp(5f), 11f, i == 0 ? TEXT : DIM, Paint.Align.CENTER);
+            label(c, i == 0 ? "NOW" : "LAST WEEK", bx + bw / 2f, base + dp(13f), 8f, FAINT,
+                    Paint.Align.CENTER);
+        }
+        // Last week's line drawn across this week's column: the bar to clear.
+        if (lastWeekFloors > 0) {
+            float ly = base - (base - top) * Math.min(1f, weekBarB / scale);
+            paint.setColor(0x99FFD24A);
+            c.drawRect(x0 + dp(28f), ly - dp(1f), x0 + dp(96f), ly + dp(1f), paint);
+        }
+    }
+
+    /** The citizens' ask, top right under the landmark. */
+    private void drawRequestCard(Canvas c, float w) {
+        float x0 = w - dp(392f);
+        float x1 = w - dp(96f);
+        float y0 = dp(122f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x44000000);
+        c.drawRoundRect(x0, y0, x1, y0 + dp(80f), dp(8f), dp(8f), paint);
+        if (!requestOpen) {
+            label(c, "THE CITIZENS", x0 + dp(12f), y0 + dp(20f), 8.5f, FAINT, Paint.Align.LEFT);
+            String line = !hasClockStarted() ? "A DELEGATION IS ON ITS WAY"
+                    : requestCooldown > 0f ? "TALKING IT OVER - " + (int) Math.ceil(requestCooldown) + "s"
+                    : "NOTHING ASKED FOR";
+            bold(c, line, x0 + dp(12f), y0 + dp(42f), 12f, DIM, Paint.Align.LEFT);
+            label(c, requestsThisSession + " GRANTED TODAY  -  " + civicCount + " IN THE CITY",
+                    x0 + dp(12f), y0 + dp(64f), 8.5f, FAINT, Paint.Align.LEFT);
+            return;
+        }
+        int done = Math.max(0, placedThisSession - requestBase);
+        float f = Math.min(1f, done / (float) Math.max(1, requestNeed));
+        int col = CIVIC_COLORS[requestKind];
+        label(c, "THE CITIZENS ASK FOR", x0 + dp(12f), y0 + dp(20f), 8.5f, FAINT, Paint.Align.LEFT);
+        float bob = (float) Math.sin(requestPulse * 3.0) * dp(1.5f);
+        bold(c, CIVIC_NAMES[requestKind], x0 + dp(12f), y0 + dp(42f) + bob, 17f, col, Paint.Align.LEFT);
+        bold(c, done + " / " + requestNeed, x1 - dp(12f), y0 + dp(42f), 15f,
+                f >= 1f ? ACCENT : TEXT, Paint.Align.RIGHT);
+        float by = y0 + dp(54f);
+        paint.setColor(0x33FFFFFF);
+        c.drawRoundRect(x0 + dp(12f), by, x1 - dp(12f), by + dp(9f), dp(4.5f), dp(4.5f), paint);
+        paint.setColor(col);
+        c.drawRoundRect(x0 + dp(12f), by, x0 + dp(12f) + (x1 - x0 - dp(24f)) * f, by + dp(9f),
+                dp(4.5f), dp(4.5f), paint);
+        label(c, "FLOORS THIS SESSION - IT GOES ON YOUR TALLEST NEW TOWER", x0 + dp(12f),
+                by + dp(22f), 8f, FAINT, Paint.Align.LEFT);
+    }
+
+    /**
+     * The middle of the top bar: a rush hour if one is running or offered, the storm if one is
+     * overhead, and the repair queue while anything is broken. They never overlap - a storm cannot
+     * start during a rush, and a rush cannot be started during a storm or with repairs outstanding.
+     */
+    private void drawCentrePanel(Canvas c, float w) {
+        float cx = w * 0.5f;
+        float x0 = cx - dp(200f);
+        float x1 = cx + dp(200f);
+        float y0 = dp(80f);
+        rushBtn.setEmpty();
+        paint.setStyle(Paint.Style.FILL);
+
+        if (rushRunning) {
+            int done = Math.max(0, placedThisSession - rushBase);
+            float f = Math.min(1f, done / (float) Math.max(1, rushTarget));
+            float elapsed = 1f - Math.max(0f, rushLeft) / RUSH_SECONDS;
+            boolean behind = f < elapsed;
+            paint.setColor(0x66000000);
+            c.drawRoundRect(x0, y0, x1, y0 + dp(78f), dp(8f), dp(8f), paint);
+            int secs = (int) Math.ceil(Math.max(0f, rushLeft));
+            boolean urgent = secs <= 10;
+            float beat = urgent ? 1f + 0.12f * (float) Math.abs(Math.sin(sessionSeconds * 6)) : 1f;
+            bold(c, "RUSH HOUR", x0 + dp(14f), y0 + dp(24f), 13f, 0xFFFFD24A, Paint.Align.LEFT);
+            bold(c, clock(secs), x1 - dp(14f), y0 + dp(26f), 18f * beat,
+                    urgent ? BAD : TEXT, Paint.Align.RIGHT);
+            bold(c, done + " / " + rushTarget + " FLOORS", cx, y0 + dp(24f), 14f,
+                    behind ? WARN : ACCENT, Paint.Align.CENTER);
+            float by = y0 + dp(36f);
+            paint.setColor(0x33FFFFFF);
+            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), dp(7f), dp(7f), paint);
+            paint.setColor(behind ? WARN : ACCENT);
+            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * f, by + dp(14f),
+                    dp(7f), dp(7f), paint);
+            // The pace line: where the city expects you to be this second.
+            float px2 = x0 + dp(14f) + (x1 - x0 - dp(28f)) * Math.min(1f, elapsed);
+            paint.setColor(0xFFFFFFFF);
+            c.drawRect(px2 - dp(1.5f), by - dp(4f), px2 + dp(1.5f), by + dp(18f), paint);
+            label(c, behind ? "BEHIND THE PACE - PULL" : "AHEAD OF THE PACE", cx, y0 + dp(66f), 9f,
+                    behind ? WARN : ACCENT, Paint.Align.CENTER);
+            return;
+        }
+
+        if (stormPhase != STORM_NONE) {
+            paint.setColor(0x66000000);
+            c.drawRoundRect(x0, y0, x1, y0 + dp(78f), dp(8f), dp(8f), paint);
+            String title = stormPhase == STORM_WARNING ? "STORM INCOMING"
+                    : stormPhase == STORM_OVERHEAD ? "STORM OVERHEAD" : "STORM CLEARING";
+            bold(c, title, x0 + dp(14f), y0 + dp(24f), 13f, stormPhase == STORM_OVERHEAD ? BAD : WARN,
+                    Paint.Align.LEFT);
+            if (stormPhase == STORM_OVERHEAD) {
+                bold(c, "NEXT BOLT " + (int) Math.ceil(Math.max(0f, strikeIn)) + "s", x1 - dp(14f),
+                        y0 + dp(24f), 13f, strikeIn < 2f ? BAD : TEXT, Paint.Align.RIGHT);
+            } else {
+                bold(c, (int) Math.ceil(Math.max(0f, stormT)) + "s", x1 - dp(14f), y0 + dp(24f), 13f,
+                        TEXT, Paint.Align.RIGHT);
+            }
+            float by = y0 + dp(36f);
+            paint.setColor(0x33FFFFFF);
+            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), dp(7f), dp(7f), paint);
+            paint.setColor(shield > 0.55f ? 0xFF7FD8FF : shield > 0.25f ? WARN : BAD);
+            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * shield,
+                    by + dp(14f), dp(7f), dp(7f), paint);
+            label(c, "STORM SHIELD - YOUR POWER RIGHT NOW", x0 + dp(14f), y0 + dp(66f), 9f,
+                    shield > 0.55f ? ACCENT : WARN, Paint.Align.LEFT);
+            if (stormNoteT > 0f && stormNote != null) {
+                bold(c, stormNote, x1 - dp(14f), y0 + dp(68f), 14f,
+                        stormNote.startsWith("-") ? BAD : 0xFF7FD8FF, Paint.Align.RIGHT);
+            }
+            return;
+        }
+
+        if (damageTotal > 0) {
+            paint.setColor(0x66000000);
+            c.drawRoundRect(x0, y0, x1, y0 + dp(60f), dp(8f), dp(8f), paint);
+            bold(c, "REPAIRS", x0 + dp(14f), y0 + dp(24f), 13f, WARN, Paint.Align.LEFT);
+            bold(c, damageTotal + (damageTotal == 1 ? " FLOOR" : " FLOORS"), x1 - dp(14f),
+                    y0 + dp(24f), 14f, WARN, Paint.Align.RIGHT);
+            float by = y0 + dp(32f);
+            float f = Math.min(1f, concrete / REPAIR_COST);
+            paint.setColor(0x33FFFFFF);
+            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(10f), dp(5f), dp(5f), paint);
+            paint.setColor(WARN);
+            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * f, by + dp(10f),
+                    dp(5f), dp(5f), paint);
+            label(c, "EVERY STROKE GOES INTO THE REPAIRS - NOTHING NEW UNTIL THEY ARE DONE",
+                    cx, y0 + dp(54f), 8.5f, FAINT, Paint.Align.CENTER);
+            return;
+        }
+
+        // Idle: the offer.
+        rushBtn.set(cx - dp(120f), y0, cx + dp(120f), y0 + dp(44f));
+        boolean ready = rushAvailable();
+        float pulse = ready ? 0.5f + 0.5f * (float) Math.abs(Math.sin(sessionSeconds * 2.2)) : 0f;
+        paint.setColor(ready ? (((int) (40 + 60 * pulse)) << 24) | 0xFFD24A : 0x33000000);
+        c.drawRoundRect(rushBtn, dp(10f), dp(10f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(ready ? 0xFFFFD24A : 0x44E6EDF7);
+        c.drawRoundRect(rushBtn, dp(10f), dp(10f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        String offer = ready ? "START RUSH HOUR"
+                : !hasClockStarted() ? "ROW TO WAKE THE CITY"
+                : rushCooldown > 0f ? "RUSH HOUR IN " + (int) Math.ceil(rushCooldown) + "s"
+                : "RUSH HOUR UNAVAILABLE";
+        bold(c, offer, cx, y0 + dp(27f), 14f, ready ? 0xFFFFD24A : DIM, Paint.Align.CENTER);
+        label(c, rushWins + " CLEARED  -  BEST " + rushBestFloors + " FLOORS IN TWO MINUTES", cx,
+                y0 + dp(58f), 8.5f, FAINT, Paint.Align.CENTER);
     }
 
     private void drawLandmarkPanel(Canvas c, float w) {
@@ -1848,14 +3100,30 @@ final class SkylineGame extends GameView {
         float hy = topY + dp(46f);
         paint.setColor(0x55FFFFFF);
         c.drawRect(hx, hy, hx + hopW, hy + hopH, paint);
-        float full = Math.min(1f, concrete / cost(nextUnits));
-        paint.setColor(nextUnits >= 3 ? ACCENT : nextUnits == 2 ? BLUE : WARN);
+        boolean repairing = damageTotal > 0;
+        float full = Math.min(1f, concrete / (repairing ? REPAIR_COST : cost(nextUnits)));
+        paint.setColor(repairing ? WARN : nextUnits >= 3 ? ACCENT : nextUnits == 2 ? BLUE : WARN);
         c.drawRect(hx, hy + hopH * (1f - full), hx + hopW, hy + hopH, paint);
-        bold(c, nextUnits + (nextUnits == 1 ? " FLOOR" : " FLOORS"), hookX, hy + hopH + dp(16f), 11f,
-                nextUnits > 1 ? ACCENT : TEXT, Paint.Align.CENTER);
+        bold(c, repairing ? "REPAIR" : nextUnits + (nextUnits == 1 ? " FLOOR" : " FLOORS"), hookX,
+                hy + hopH + dp(16f), 11f,
+                repairing ? WARN : nextUnits > 1 ? ACCENT : TEXT, Paint.Align.CENTER);
         boolean working = isClockRunning();
-        label(c, working ? "pull harder for bigger blocks" : "CRANES IDLE - ROW TO BUILD", hookX,
-                hy + hopH + dp(30f), 8.5f, working ? FAINT : WARN, Paint.Align.CENTER);
+        String hint;
+        int hintCol;
+        if (!working) {
+            hint = "CRANES IDLE - ROW TO BUILD";
+            hintCol = WARN;
+        } else if (repairing) {
+            hint = damageTotal + " floors to put back";
+            hintCol = WARN;
+        } else if (stormPhase == STORM_OVERHEAD && shield < 0.5f) {
+            hint = "THE SHIELD IS DOWN - PULL HARD";
+            hintCol = BAD;
+        } else {
+            hint = "pull harder for bigger blocks";
+            hintCol = FAINT;
+        }
+        label(c, hint, hookX, hy + hopH + dp(30f), 8.5f, hintCol, Paint.Align.CENTER);
     }
 
     /** This session's floors as their own tower on the right, windows lit by today's energy. */
@@ -2136,6 +3404,8 @@ final class SkylineGame extends GameView {
             if (photoBtn.contains(x, y)) {
                 photoMode = true;
                 loadAlbum();
+            } else if (!rushBtn.isEmpty() && rushBtn.contains(x, y) && rushAvailable()) {
+                startRush();
             }
             return;
         }

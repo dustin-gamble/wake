@@ -159,6 +159,64 @@
         </section>
       </div>
 
+      <section class="panel history" id="historyPanel">
+        <div class="panel-head">
+          <h2>History</h2>
+          <div class="filters" id="historyProfiles"><span class="small" style="margin:0">Looking for profiles...</span></div>
+        </div>
+
+        <div class="history-controls">
+          <div class="filters" id="historyRanges">
+            <button class="chip" type="button" data-days="30" aria-pressed="true">30 days</button>
+            <button class="chip" type="button" data-days="90" aria-pressed="false">90 days</button>
+            <button class="chip" type="button" data-days="365" aria-pressed="false">1 year</button>
+            <button class="chip" type="button" data-days="0" aria-pressed="false">All</button>
+          </div>
+          <div class="actions">
+            <a class="button" id="backupLink" href="#">Download backup</a>
+            <button id="historyRefresh" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="stats history-summary">
+          <div><p class="stat-label">Sessions</p><p class="stat-value" id="hSessions">0</p></div>
+          <div><p class="stat-label">Distance</p><p class="stat-value" id="hMeters">0<span class="unit">km</span></p></div>
+          <div><p class="stat-label">Rowing time</p><p class="stat-value" id="hTime">0:00</p></div>
+          <div><p class="stat-label">Avg / 500m</p><p class="stat-value" id="hSplit">--:--</p></div>
+          <div><p class="stat-label">Best / 500m</p><p class="stat-value" id="hBest">--:--</p></div>
+          <div><p class="stat-label">Avg power</p><p class="stat-value" id="hWatts">0<span class="unit">W</span></p></div>
+        </div>
+
+        <div class="grid-2 history-charts">
+          <div class="history-chart">
+            <div class="panel-head">
+              <h2>Distance per day</h2>
+              <span class="small" style="margin:0" id="hDistanceNote">&nbsp;</span>
+            </div>
+            <canvas id="historyDistance" width="900" height="260"></canvas>
+          </div>
+          <div class="history-chart">
+            <div class="panel-head">
+              <h2>Split trend</h2>
+              <span class="small" style="margin:0">Higher is faster</span>
+            </div>
+            <canvas id="historySplit" width="900" height="260"></canvas>
+          </div>
+        </div>
+
+        <div class="overflow-x">
+          <table class="map-table history-table">
+            <thead>
+              <tr><th>When</th><th>Screen</th><th>Distance</th><th>Time</th><th>/500m</th><th>spm</th><th>Power</th></tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr><td colspan="7" class="empty" style="font-family:var(--sans)">No sessions recorded yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small" id="historyNote">Rows are pushed from the tablet and kept in server/data/history. Backups live in server/data/backups.</p>
+      </section>
+
       <section class="panel">
         <div class="panel-head">
           <h2>Event stream</h2>

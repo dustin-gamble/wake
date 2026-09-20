@@ -40,6 +40,24 @@ import android.view.MotionEvent;
  * the gap in metres), and the finish projection compares against its total. The finish screen charts
  * time in each zone.
  *
+ * <p>3.23.0 adds five things, all built on the above:
+ * <ul>
+ *   <li><b>COACH</b> builds a plan at the start of every piece from the zone the rower is furthest
+ *       behind on - the zone the last piece asked for and got least of ({@code zonerow.last}), or
+ *       failing that the one thinnest against this week's share. Intervals at that zone, long and
+ *       few at the bottom of the scale, short and many at the top.</li>
+ *   <li><b>WEEK IN ZONE</b> keeps this week's seconds per zone ({@code zonerow.week}, Monday to
+ *       Sunday) against the rower's own weekly goal split {@link #WEEK_SHARE}, and the bars fill as
+ *       they row.</li>
+ *   <li><b>SPLIT RESCUE</b>: a lock worth keeping does not die when it slips. A 30 s window opens,
+ *       chevrons point at the zone that wins it back, and 1.5 s back on target hands the whole lock
+ *       back at the level it broke at. Most rescues in a piece is {@code zonerow.rescues}.</li>
+ *   <li><b>PAST PIECES</b>: the last dozen scores of this kind of piece as a sparkline, the last one
+ *       dashed across it as the mark to beat, this piece's live score running along the right.</li>
+ *   <li><b>COOL DOWN</b>: three descending rate steps drawn as a staircase with a rower walking down
+ *       it, over the live rate bar. Share held in band is {@code zonerow.cool}.</li>
+ * </ul>
+ *
  * <p>Shown without the vitals strip, since it is the vitals. Calories come from {@link PulseMeter}'s
  * work at a 25% muscle efficiency: measured from the paddle's pulses, and absolute once the rower
  * has done the load-scale calibration (the label then reads MEASURED).
@@ -56,6 +74,8 @@ final class ZoneRowGame extends GameView {
     /** Workout plans. Each segment is {zone, seconds}; FREE and STREAK use the length chip. */
     enum Plan {
         FREE(null),
+        /** Built at the start of every piece from the zone the rower is furthest behind on. */
+        COACH(null),
         PYRAMID(new int[][]{{0, 120}, {1, 120}, {2, 120}, {3, 60}, {2, 120}, {1, 120}, {0, 60}}),
         LADDER(new int[][]{{1, 180}, {0, 60}, {2, 180}, {0, 60}, {3, 120}, {0, 60}, {2, 180}, {1, 120}}),
         SPRINTS(sprints()),
@@ -206,6 +226,81 @@ final class ZoneRowGame extends GameView {
     private final double[] zoneSeconds = new double[4];
     private float chartAnim;
 
+    /* ---------- COACH: a plan built from the zone the rower is furthest behind on ---------- */
+
+    /** Last finished piece as "got:asked" seconds per zone, which is what COACH reads. */
+    private static final String LAST_KEY = "zonerow.last";
+    private int[][] coach = {{1, 120}, {2, 120}, {0, 60}, {2, 120}, {0, 60}, {0, 120}};
+    private int coachZone = 2;
+    private String coachWhy = "";
+    private final double[] zoneAsked = new double[4];
+    private final double[] lastGot = new double[4];
+    private final double[] lastAsked = new double[4];
+
+    /* ---------- weekly minutes in each zone ---------- */
+
+    private static final String WEEK_KEY = "zonerow.week";
+    /**
+     * How the weekly goal is split across the zones: mostly easy volume, a little at the top. The
+     * total comes from the rower's own weekly goal (Progress), not from a constant.
+     */
+    private static final float[] WEEK_SHARE = {0.34f, 0.30f, 0.22f, 0.14f};
+    private final float[] weekSeconds = new float[4];
+    private final float[] weekGoal = new float[4];
+    private final float[] weekShown = new float[4];
+    private long weekDay;
+    private float weekFlush;
+    /** "12 / 20" per zone, rebuilt only when a whole minute turns over - it is drawn every frame. */
+    private final String[] weekLabel = new String[4];
+    private final int[] weekLabelDone = {-1, -1, -1, -1};
+    private final int[] weekLabelGoal = {-1, -1, -1, -1};
+
+    /* ---------- split rescue: 30 s to take a broken lock back ---------- */
+
+    private static final float RESCUE_WINDOW = 30f;
+    /** Back in the zone and the band for this long, and the lock is handed back. */
+    private static final float RESCUE_HOLD = 1.5f;
+    /** Below this a broken lock is not worth rescuing - the window would be noise. */
+    private static final float RESCUE_MIN = 8f;
+    private static final String RESCUE_KEY = "zonerow.rescues";
+    private float rescueLeft;
+    private double rescueSeconds;
+    private int rescueLevel;
+    private float rescueHold;
+    private float rescueFlash;
+    private float rescuePulse;
+    private int rescuesMade;
+
+    /* ---------- the sparkline of past pieces ---------- */
+
+    private static final int HISTORY_MAX = 12;
+    private final float[] history = new float[HISTORY_MAX];
+    private int historyCount;
+    private float historyAnim;
+    /** Eased live score, so the sparkline's leading point moves rather than steps. */
+    private float shownLive;
+    /** "BEAT 1842 M" changes once a piece, so it is built once rather than every frame. */
+    private String beatLabel;
+    private float beatLabelFor = Float.NaN;
+
+    /* ---------- the guided cool-down rate ladder ---------- */
+
+    private static final int COOL_STEPS = 3;
+    private static final float COOL_STEP_SECONDS = 45f;
+    private static final String COOL_KEY = "zonerow.cool";
+    /** The rate band the bar shows right now: the zone's, or the cool-down step's. */
+    private final float[] coolBand = new float[2];
+    private boolean cooling;
+    private boolean coolDone;
+    private int coolStep;
+    private float coolLeft;
+    private double coolInBand;
+    private double coolElapsed;
+    private float coolBob;
+    private float coolGlow;
+    private final RectF coolHit = new RectF();
+    private final RectF skipHit = new RectF();
+
     private float shaderW = -1f;
     private float shaderH = -1f;
     private Shader background;
@@ -313,7 +408,7 @@ final class ZoneRowGame extends GameView {
     }
 
     private int[][] scheduleFor(Plan p) {
-        return p == Plan.CUSTOM ? custom : p.segments;
+        return p == Plan.CUSTOM ? custom : p == Plan.COACH ? coach : p.segments;
     }
 
     private static int secondsOf(int[][] schedule) {
@@ -391,7 +486,34 @@ final class ZoneRowGame extends GameView {
     }
 
     private void restart() {
+        applyProfile();
+        if (weekDay != 0) {
+            saveWeek();   // bank what this piece added before the week is read back
+        }
+        loadWeek();
+        if (plan == Plan.COACH) {
+            coachZone = weakestZone();
+            coach = buildCoach();
+        }
         segs = scheduleFor(plan);
+        loadHistory();
+        historyAnim = 0f;
+        shownLive = 0f;
+        // The kind of piece may have changed, so the units behind the cached label may have too.
+        beatLabel = null;
+        rescueLeft = 0f;
+        rescueHold = 0f;
+        rescueFlash = 0f;
+        rescueSeconds = 0;
+        rescueLevel = 1;
+        rescuesMade = 0;
+        cooling = false;
+        coolDone = false;
+        coolStep = 0;
+        coolLeft = COOL_STEP_SECONDS;
+        coolInBand = 0;
+        coolElapsed = 0;
+        java.util.Arrays.fill(zoneAsked, 0);
         editing = plan == Plan.CUSTOM;
         editIndex = Math.max(0, Math.min(custom.length - 1, editIndex));
         lockSeconds = 0;
@@ -457,6 +579,244 @@ final class ZoneRowGame extends GameView {
         return Math.max(0, Math.min(3, (int) (fraction * 4f)));
     }
 
+    /* ---------- COACH ---------- */
+
+    /** Seconds held / seconds asked per zone in the last finished piece. False if there is none. */
+    private boolean loadLastPiece() {
+        String raw = bests.getString(LAST_KEY);
+        if (raw == null || raw.isEmpty()) {
+            return false;
+        }
+        String[] parts = raw.split(",");
+        if (parts.length != 4) {
+            return false;
+        }
+        try {
+            for (int i = 0; i < 4; i++) {
+                String[] pair = parts[i].split(":");
+                lastGot[i] = Double.parseDouble(pair[0].trim());
+                lastAsked[i] = Double.parseDouble(pair[1].trim());
+            }
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return true;
+    }
+
+    private void saveLastPiece() {
+        StringBuilder b = new StringBuilder();
+        for (int z = 0; z < 4; z++) {
+            if (z > 0) {
+                b.append(',');
+            }
+            b.append(Math.round(zoneSeconds[z])).append(':').append(Math.round(zoneAsked[z]));
+        }
+        bests.putString(LAST_KEY, b.toString());
+    }
+
+    /**
+     * The zone to work on: the one the last piece asked for and got least of, and failing that the
+     * one furthest behind its share of this week's minutes. Sets {@link #coachWhy} to say which.
+     */
+    private int weakestZone() {
+        double worst = Double.MAX_VALUE;
+        int fromPiece = -1;
+        if (loadLastPiece()) {
+            for (int z = 0; z < 4; z++) {
+                if (lastAsked[z] < 20) {
+                    continue;   // barely asked for: no evidence either way
+                }
+                double attained = lastGot[z] / lastAsked[z];
+                if (attained < worst) {
+                    worst = attained;
+                    fromPiece = z;
+                }
+            }
+        }
+        if (fromPiece >= 0 && worst < 0.85) {
+            coachWhy = "LAST PIECE HELD " + Math.round(worst * 100) + "% OF " + ZONES[fromPiece];
+            return fromPiece;
+        }
+        int thinnest = 0;
+        double least = Double.MAX_VALUE;
+        for (int z = 0; z < 4; z++) {
+            double share = weekGoal[z] > 0 ? weekSeconds[z] / weekGoal[z] : 1;
+            if (share < least) {
+                least = share;
+                thinnest = z;
+            }
+        }
+        coachWhy = (fromPiece >= 0 ? "LAST PIECE ON SCHEDULE  ·  " : "")
+                + ZONES[thinnest] + " IS THIS WEEK'S THINNEST AT " + Math.round(least * 100) + "%";
+        return thinnest;
+    }
+
+    /**
+     * Intervals at the weak zone with easy rowing between, long and few at the bottom of the scale,
+     * short and many at the top. Warm-up one zone below, cool-down in GLIDE.
+     */
+    private int[][] buildCoach() {
+        int w = coachZone;
+        int rest = w == 0 ? 1 : 0;
+        int reps = w == 3 ? 6 : w == 2 ? 4 : 3;
+        int work = w == 3 ? 45 : w == 2 ? 120 : w == 1 ? 180 : 240;
+        int easy = w == 3 ? 75 : 60;
+        int[][] out = new int[2 + reps * 2][];
+        out[0] = new int[]{w == 0 ? 1 : w - 1, 120};
+        for (int i = 0; i < reps; i++) {
+            out[1 + i * 2] = new int[]{w, work};
+            out[2 + i * 2] = new int[]{rest, easy};
+        }
+        out[out.length - 1] = new int[]{0, 120};
+        return out;
+    }
+
+    /* ---------- weekly minutes in each zone ---------- */
+
+    /**
+     * This week's seconds per zone, reset when the week turns over. Goals are the rower's own
+     * weekly goal (from Progress, Monday to Sunday) split by {@link #WEEK_SHARE}; the goal is read
+     * straight off the stored string rather than decoding 400 days of history for one number.
+     */
+    private void loadWeek() {
+        weekDay = Progress.weekStart(RegattaGame.today());
+        java.util.Arrays.fill(weekSeconds, 0f);
+        String raw = bests.getString(WEEK_KEY);
+        if (raw != null) {
+            String[] p = raw.split(",");
+            if (p.length == 5) {
+                try {
+                    if (Long.parseLong(p[0].trim()) == weekDay) {
+                        for (int i = 0; i < 4; i++) {
+                            weekSeconds[i] = Math.max(0f, Float.parseFloat(p[i + 1].trim()));
+                        }
+                    }
+                } catch (RuntimeException e) {
+                    java.util.Arrays.fill(weekSeconds, 0f);
+                }
+            }
+        }
+        float goal = Progress.DEFAULT_GOAL_MINUTES;
+        String stored = bests.getString("progress");
+        if (stored != null && stored.startsWith("g=")) {
+            int semi = stored.indexOf(';');
+            if (semi > 2) {
+                try {
+                    goal = Math.max(10f, Float.parseFloat(stored.substring(2, semi)));
+                } catch (NumberFormatException e) {
+                    goal = Progress.DEFAULT_GOAL_MINUTES;
+                }
+            }
+        }
+        for (int z = 0; z < 4; z++) {
+            weekGoal[z] = goal * 60f * WEEK_SHARE[z];
+        }
+        System.arraycopy(weekSeconds, 0, weekShown, 0, 4);
+        weekFlush = 0f;
+    }
+
+    private void saveWeek() {
+        if (weekDay == 0) {
+            // loadWeek() has never run, so weekSeconds are all zero and weekDay is not a real
+            // Monday. Writing that would blank a week the rower has already banked - stop() can
+            // reach here without start(), and the zeroes would win.
+            return;
+        }
+        StringBuilder b = new StringBuilder();
+        b.append(weekDay);
+        for (int z = 0; z < 4; z++) {
+            b.append(',').append(Math.round(weekSeconds[z]));
+        }
+        bests.putString(WEEK_KEY, b.toString());
+    }
+
+    /* ---------- the history of past pieces ---------- */
+
+    /** One list per kind of piece, so a 10 min row is never charted against a SPRINTS score. */
+    private String historyKey() {
+        if (segs != null) {
+            return "zonerow.hist." + plan.name().toLowerCase(java.util.Locale.US);
+        }
+        if (plan == Plan.STREAK) {
+            return "zonerow.hist.streak";
+        }
+        // HEART keeps its own list: its metres are rowed to a different instruction.
+        return "zonerow.hist." + (plan == Plan.HEART ? "heart" : "min") + pieceMinutes();
+    }
+
+    private void loadHistory() {
+        historyCount = 0;
+        String raw = bests.getString(historyKey());
+        if (raw == null || raw.isEmpty()) {
+            return;
+        }
+        String[] parts = raw.split(",");
+        for (String part : parts) {
+            if (historyCount >= HISTORY_MAX) {
+                break;
+            }
+            try {
+                history[historyCount++] = Float.parseFloat(part.trim());
+            } catch (NumberFormatException e) {
+                historyCount = 0;
+                return;
+            }
+        }
+    }
+
+    private void saveHistory(float score) {
+        StringBuilder b = new StringBuilder();
+        int from = historyCount >= HISTORY_MAX ? historyCount - HISTORY_MAX + 1 : 0;
+        for (int i = from; i < historyCount; i++) {
+            b.append(Math.round(history[i] * 10f) / 10f).append(',');
+        }
+        b.append(Math.round(score * 10f) / 10f);
+        bests.putString(historyKey(), b.toString());
+    }
+
+    /** The score this piece is being judged on: schedule share, streak seconds, or metres. */
+    private float liveScore() {
+        if (segs != null) {
+            return (float) planScore();
+        }
+        if (plan == Plan.STREAK) {
+            return (float) bestStreak;
+        }
+        double projected = finished ? pieceMeters() : projectedMeters();
+        return (float) (projected >= 0 ? projected : pieceMeters());
+    }
+
+    /** The score to beat: the last piece of this kind. -1 when this is the first. */
+    private float beatTarget() {
+        return historyCount > 0 ? history[historyCount - 1] : -1f;
+    }
+
+    private String scoreText(float v) {
+        if (segs != null) {
+            return Math.round(v) + "%";
+        }
+        return plan == Plan.STREAK ? clock(v) : Math.round(v) + " M";
+    }
+
+    /* ---------- the cool-down ladder ---------- */
+
+    /** Descending rate steps around the rower's own typical rate, never below a slow paddle. */
+    private float coolTargetRate(int step) {
+        float base = (float) profile.typicalRate();
+        return Math.max(13f, base - 4f - 3f * step);
+    }
+
+    /** The band the rate bar is drawing against right now. */
+    private float[] activeRateBand() {
+        if (cooling && !coolDone) {
+            float target = coolTargetRate(coolStep);
+            coolBand[0] = target - 1.5f;
+            coolBand[1] = target + 1.5f;
+            return coolBand;
+        }
+        return rateBands[targetZone];
+    }
+
     /* ---------- state ---------- */
 
     private void advance(float dt) {
@@ -474,6 +834,23 @@ final class ZoneRowGame extends GameView {
         energyMeasured = status != null && status.meter.source == PulseMeter.EnergySource.PULSES_CALIBRATED;
         // The zone the rower sees on the bar (eased), which is what the lock and the chart count.
         int shownZone = shownPace > 0f ? zoneAt(shownSplitFrac) : -1;
+        // The week's minutes count all real rowing on this screen, the cool-down included.
+        if (!paused && !editing && isClockRunning()) {
+            int weekZone = plan == Plan.HEART ? zone : shownZone;
+            if (weekZone >= 0) {
+                weekSeconds[weekZone] += dt;
+            }
+            if ((weekFlush += dt) >= 10f) {
+                weekFlush = 0f;
+                saveWeek();
+            }
+        }
+        for (int z = 0; z < 4; z++) {
+            weekShown[z] += (weekSeconds[z] - weekShown[z]) * Math.min(1f, 4f * dt);
+        }
+        if (cooling) {
+            advanceCooldown(dt);
+        }
         if (!paused && !finished && !editing && isClockRunning()) {
             pieceSeconds += dt;
             joules += workStep;
@@ -495,6 +872,8 @@ final class ZoneRowGame extends GameView {
                     segmentInZone[seg] += dt;
                 }
             }
+            // What the piece asked of each zone, against what it got: this is what COACH reads.
+            zoneAsked[targetZone] += dt;
             if (zone == targetZone) {
                 inZoneSeconds += dt;
             }
@@ -510,8 +889,15 @@ final class ZoneRowGame extends GameView {
             if (pieceSeconds >= pieceLength()) {
                 pieceSeconds = pieceLength();
                 finished = true;
+                rescueLeft = 0f;
                 finalMeters = Math.max(0, sessionMeters - pieceStartMeters);
                 saveTrace();
+                saveLastPiece();
+                saveWeek();
+                saveHistory(liveScore());
+                if (rescuesMade > 0) {
+                    bests.recordHighest(RESCUE_KEY, rescuesMade);
+                }
                 if (bestLock >= 1.0) {
                     bests.recordHighest(LOCK_KEY, (float) bestLock);
                 }
@@ -527,6 +913,11 @@ final class ZoneRowGame extends GameView {
 
         lockFlash = Math.max(0f, lockFlash - 1.6f * dt);
         lockBreak = Math.max(0f, lockBreak - 1.2f * dt);
+        rescueFlash = Math.max(0f, rescueFlash - 0.8f * dt);
+        rescuePulse += dt;
+        historyAnim = Math.min(1f, historyAnim + 0.9f * dt);
+        float live = liveScore();
+        shownLive += (live - shownLive) * Math.min(1f, 2.5f * dt);
         if (finished) {
             chartAnim = Math.min(1f, chartAnim + 1.3f * dt);
         }
@@ -570,6 +961,7 @@ final class ZoneRowGame extends GameView {
         float[] band = rateBands[targetZone];
         boolean zoneOk = plan == Plan.STREAK ? shownZone >= targetZone : shownZone == targetZone;
         boolean rateOk = shownRate >= band[0] && shownRate <= band[1];
+        advanceRescue(dt, zoneOk && rateOk);
         if (zoneOk && rateOk) {
             lockSeconds += dt;
             lockGrace = 0;
@@ -584,9 +976,79 @@ final class ZoneRowGame extends GameView {
             if (lockSeconds >= LOCK_STEP) {
                 lockBreak = 1f;
             }
+            // The lock is not gone yet: it goes into the rescue window, where it can be won back.
+            if (lockSeconds >= RESCUE_MIN) {
+                rescueLeft = RESCUE_WINDOW;
+                rescueSeconds = lockSeconds;
+                rescueLevel = lockLevel;
+                rescueHold = 0f;
+            }
             lockSeconds = 0;
             lockGrace = 0;
             lockLevel = 1;
+        }
+    }
+
+    /**
+     * SPLIT RESCUE. A lock worth keeping does not die the moment it slips: a 30 s window opens, and
+     * getting the split back into the zone and the rate back into the band for a second and a half
+     * hands the whole lock back at the level it broke at. Let the window run out and it is gone.
+     * That is the thing at stake in the next ten seconds whenever the rower drifts.
+     */
+    private void advanceRescue(float dt, boolean onTarget) {
+        if (rescueLeft <= 0f) {
+            return;
+        }
+        if (onTarget) {
+            rescueHold += dt;
+            if (rescueHold >= RESCUE_HOLD) {
+                lockSeconds = rescueSeconds;
+                lockLevel = Math.min(LOCK_MAX_LEVEL, Math.max(1, rescueLevel));
+                lockGrace = 0;
+                rescuesMade++;
+                rescueFlash = 1f;
+                rescueLeft = 0f;
+                rescueHold = 0f;
+                lockBreak = 0f;
+                return;
+            }
+        } else {
+            rescueHold = Math.max(0f, rescueHold - dt * 2f);
+        }
+        rescueLeft = Math.max(0f, rescueLeft - dt);
+    }
+
+    /**
+     * The cool-down ladder: three 45 s steps at descending rates around the rower's own typical
+     * rate. The clock only runs while they are actually rowing, so stopping holds the step rather
+     * than skipping it, and the share of it held in band is the score.
+     */
+    private void advanceCooldown(float dt) {
+        coolGlow += dt;
+        if (coolDone) {
+            return;
+        }
+        if (paused || !isClockRunning()) {
+            return;
+        }
+        coolBob += dt * (1f + Math.max(0f, shownRate) / 20f);
+        coolElapsed += dt;
+        float[] band = activeRateBand();
+        if (shownRate >= band[0] && shownRate <= band[1]) {
+            coolInBand += dt;
+        }
+        coolLeft -= dt;
+        if (coolLeft <= 0f) {
+            coolStep++;
+            coolLeft = COOL_STEP_SECONDS;
+            if (coolStep >= COOL_STEPS) {
+                coolStep = COOL_STEPS - 1;
+                coolDone = true;
+                coolLeft = 0f;
+                if (coolElapsed > 30) {
+                    bests.recordHighest(COOL_KEY, (float) (100.0 * coolInBand / coolElapsed));
+                }
+            }
         }
     }
 
@@ -727,11 +1189,17 @@ final class ZoneRowGame extends GameView {
 
         drawSplitBar(c, h, x0, x1, currentZone);
         drawRateBar(c, h, x0, x1);
+        drawPanels(c, h, x0, x1);
         drawMiddle(c, h, x0, x1);
         drawStats(c, w, h, x0, x1, currentZone);
+        drawRescue(c, h, x0, x1);
 
+        coolHit.setEmpty();
+        skipHit.setEmpty();
         if (editing) {
             drawEditor(c, w, h, x0, x1);
+        } else if (cooling) {
+            drawCooldown(c, w, h, x0, x1);
         } else if (finished) {
             drawFinished(c, w, h);
         }
@@ -818,7 +1286,9 @@ final class ZoneRowGame extends GameView {
                     FAINT, Paint.Align.CENTER, labels, 0.25f);
             text(c, "BUILD YOUR PLAN", cx, valueY, valueSize * 0.7f, ACCENT, Paint.Align.CENTER, numbers, 0.12f);
         } else if (!hasClockStarted() || pieceSeconds <= 0) {
-            String hint = segs != null
+            String hint = plan == Plan.COACH
+                    ? "COACH  ·  MORE " + ZONES[coachZone] + "  ·  " + coachWhy
+                    : segs != null
                     ? plan.name() + "  ·  " + segs.length + " SEGMENTS  ·  " + lengthLabel()
                     : plan == Plan.STREAK ? "STREAK  ·  TAP A ZONE TO SET THE BAR"
                     : plan == Plan.HEART ? (heartRate() > 0 ? "HEART ZONES  ·  TAP A ZONE" : "CONNECT A HEART STRAP IN DIAGNOSTICS")
@@ -869,8 +1339,9 @@ final class ZoneRowGame extends GameView {
         }
         fill.setShader(null);
 
-        if (shownLastFrac >= 0f) {
+        if (shownLastFrac >= 0f && rescueLeft <= 0f) {
             // The last piece of this length, at the same moment: a hollow post and a tag beneath.
+            // Hidden during a rescue: the rescue strip lives in the same band and matters more.
             float lx = left + (right - left) * shownLastFrac;
             line.setShader(null);
             line.setColor(DIM);
@@ -897,6 +1368,30 @@ final class ZoneRowGame extends GameView {
         if (shownPace > 0f) {
             fill.setColor(TEXT);
             c.drawRect(fillX - dp(2f), top - dp(12f), fillX + dp(2f), bottom + dp(12f), fill);
+        }
+
+        if (rescueLeft > 0f) {
+            // Chevrons marching from the marker toward the zone that would win the lock back.
+            float targetCx = left + (right - left) * (targetZone + 0.5f) / 4f;
+            float dir = targetCx > fillX ? 1f : targetCx < fillX ? -1f : 0f;
+            if (dir != 0f) {
+                float cy = (top + bottom) / 2f;
+                float size = (bottom - top) * 0.32f;
+                line.setShader(null);
+                line.setColor(rescueLeft < 10f ? BAD : WARN);
+                line.setStrokeWidth(dp(3f));
+                for (int i = 0; i < 3; i++) {
+                    float t = ((rescuePulse * 1.4f + i * 0.34f) % 1f);
+                    float cxc = fillX + dir * (dp(22f) + t * dp(78f));
+                    line.setAlpha((int) (230 * (1f - t)));
+                    path.rewind();
+                    path.moveTo(cxc - dir * size, cy - size);
+                    path.lineTo(cxc, cy);
+                    path.lineTo(cxc - dir * size, cy + size);
+                    c.drawPath(path, line);
+                }
+                line.setAlpha(255);
+            }
         }
 
         String split = shownPace > 0f ? PersonalBests.formatPace(shownPace) : "--:--";
@@ -926,7 +1421,7 @@ final class ZoneRowGame extends GameView {
         float radius = (bottom - top) / 2f;
         float scale = (right - left) / RATE_MAX;
         float rateX = left + Math.min(RATE_MAX, Math.max(0f, shownRate)) * scale;
-        float[] band = rateBands[targetZone];
+        float[] band = activeRateBand();
         boolean inBand = shownRate >= band[0] && shownRate <= band[1];
 
         rect.set(left, top, right, bottom);
@@ -934,10 +1429,10 @@ final class ZoneRowGame extends GameView {
         c.drawRoundRect(rect, radius, radius, fill);
 
         rect.set(left + band[0] * scale, top - dp(7f), left + band[1] * scale, bottom + dp(7f));
-        fill.setColor(0x553A5BD9);
+        fill.setColor(cooling ? 0x5535D0BA : 0x553A5BD9);
         c.drawRoundRect(rect, dp(4f), dp(4f), fill);
         line.setShader(null);
-        line.setColor(0xAA6F8CFF);
+        line.setColor(cooling ? 0xAA35D0BA : 0xAA6F8CFF);
         line.setStrokeWidth(dp(1.5f));
         c.drawRoundRect(rect, dp(4f), dp(4f), line);
 
@@ -955,16 +1450,18 @@ final class ZoneRowGame extends GameView {
         }
 
         String rate = shownRate >= 1f ? String.format(java.util.Locale.US, "%.1f", shownRate) : "--";
-        float bigSize = h * 0.1f;
+        // Sits below the two panels added in 3.23.0, so the figure clears them at any rate.
+        float bigSize = h * 0.088f;
         ink.setTypeface(numbers);
         ink.setTextSize(bigSize);
         ink.setLetterSpacing(0.02f);
         float rateW = ink.measureText(rate);
         float unitW = dp(70f);
         float cx = Math.max(left + rateW / 2f, Math.min(right - rateW / 2f - unitW, rateX));
-        float baseline = bottom + h * 0.125f;
+        float baseline = bottom + h * 0.142f;
         text(c, rate, cx, baseline, bigSize, inBand ? ACCENT : TEXT, Paint.Align.CENTER, numbers, 0.02f);
-        text(c, "SPM", cx + rateW / 2f + dp(10f), baseline, h * 0.032f, FAINT, Paint.Align.LEFT, labels, 0.2f);
+        text(c, cooling ? "SPM  ·  COOL" : "SPM", cx + rateW / 2f + dp(10f), baseline, h * 0.032f,
+                cooling ? ACCENT : FAINT, Paint.Align.LEFT, labels, 0.2f);
     }
 
     /** In the HEART plan the lower bar is heart rate, with the target zone's band of beats. */
@@ -993,11 +1490,224 @@ final class ZoneRowGame extends GameView {
             c.drawRect(hx - dp(2f), top - dp(10f), hx + dp(2f), bottom + dp(10f), fill);
         }
         String value = heartRate() > 0 ? String.valueOf(Math.round(shownHeart)) : "--";
-        float baseline = bottom + h * 0.125f;
-        text(c, value, Math.max(left + dp(60f), Math.min(right - dp(140f), hx)), baseline, h * 0.1f,
+        float baseline = bottom + h * 0.142f;
+        text(c, value, Math.max(left + dp(60f), Math.min(right - dp(140f), hx)), baseline, h * 0.088f,
                 inBand ? ACCENT : TEXT, Paint.Align.CENTER, numbers, 0.02f);
         text(c, "BPM  ·  MAX " + Math.round(maxHeart), Math.max(left + dp(60f), Math.min(right - dp(140f), hx)) + dp(70f),
                 baseline, h * 0.03f, FAINT, Paint.Align.LEFT, labels, 0.2f);
+    }
+
+    /**
+     * The band between the rate bar and the figures: past pieces on the left with the score to beat,
+     * this week's minutes in each zone on the right.
+     */
+    private void drawPanels(Canvas c, float h, float left, float right) {
+        float top = h * 0.645f;
+        float bottom = h * 0.706f;
+        float width = right - left;
+        drawHistory(c, h, left, left + width * 0.30f, top, bottom);
+        float weekLeft = left + width * 0.34f;
+        text(c, "WEEK IN ZONE", weekLeft, top + h * 0.021f, h * 0.022f, FAINT, Paint.Align.LEFT,
+                labels, 0.25f);
+        drawWeekZones(c, h, weekLeft + dp(118f), right, top, bottom);
+    }
+
+    /**
+     * The last dozen pieces of this kind as a sparkline, with the last one drawn as the line to beat
+     * and this piece's live score running along the right of it. The whole thing draws itself in
+     * over the first second, and the live point pulses, so it is never a still picture.
+     */
+    private void drawHistory(Canvas c, float h, float left, float right, float top, float bottom) {
+        float textRight = right;
+        // Never let the plot collapse or invert on a narrow panel: step below would go negative
+        // and the sparkline would draw backwards out of the band.
+        float plotRight = Math.max(left + dp(24f), right - dp(104f));
+        float plotTop = top + h * 0.026f;
+        float plotBottom = bottom;
+        float live = Math.max(0f, shownLive);
+        float target = beatTarget();
+
+        text(c, "PAST PIECES", left, top + h * 0.021f, h * 0.022f, FAINT, Paint.Align.LEFT, labels, 0.25f);
+
+        if (historyCount == 0) {
+            text(c, "FIRST ONE", textRight, top + h * 0.021f, h * 0.024f, DIM, Paint.Align.RIGHT, numbers, 0.15f);
+            text(c, "SET THE MARK  ·  " + scoreText(live), textRight, bottom, h * 0.024f, ACCENT,
+                    Paint.Align.RIGHT, numbers, 0.1f);
+            return;
+        }
+
+        // The range comes from the past pieces, NOT from the live score. The live score starts at
+        // zero every piece (metres rowed, or share of the schedule held), so letting it set the
+        // floor crushed the whole history and the line to beat into the top two pixels of a plot
+        // this short for the first half of every piece - the panel read as a flat line exactly
+        // when the rower is looking at it. It may raise the ceiling, so a piece beating everything
+        // still grows the plot, and the live point is clamped into the band until it comes up.
+        float lo = history[0];
+        float hi = history[0];
+        for (int i = 1; i < historyCount; i++) {
+            lo = Math.min(lo, history[i]);
+            hi = Math.max(hi, history[i]);
+        }
+        hi = Math.max(hi, live);
+        if (hi - lo < 1f) {
+            hi = lo + 1f;
+        }
+        float pad = (hi - lo) * 0.2f;
+        lo -= pad;
+        hi += pad;
+        float scale = (plotBottom - plotTop) / (hi - lo);
+
+        // The line to beat: the last piece of this kind, dashed across the whole plot.
+        float targetY = plotBottom - (target - lo) * scale;
+        line.setShader(null);
+        line.setColor(WARN);
+        line.setAlpha(150);
+        line.setStrokeWidth(dp(1.4f));
+        float dash = dp(12f);
+        float ink6 = dp(6f);
+        for (float x = left; x < plotRight; x += dash) {
+            c.drawLine(x, targetY, Math.min(plotRight, x + ink6), targetY, line);
+        }
+        line.setAlpha(255);
+
+        int points = historyCount + 1;
+        float step = (plotRight - left) / (points - 1);
+        int shown = Math.max(2, (int) Math.ceil(historyAnim * points));
+        path.rewind();
+        for (int i = 0; i < Math.min(shown, points); i++) {
+            float v = i < historyCount ? history[i] : live;
+            float x = left + step * i;
+            float y = Math.max(plotTop, Math.min(plotBottom, plotBottom - (v - lo) * scale));
+            if (i == 0) {
+                path.moveTo(x, y);
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        line.setColor(DIM);
+        line.setStrokeWidth(dp(2f));
+        c.drawPath(path, line);
+
+        for (int i = 0; i < Math.min(shown, historyCount); i++) {
+            float x = left + step * i;
+            float y = plotBottom - (history[i] - lo) * scale;
+            fill.setColor(i == historyCount - 1 ? WARN : FAINT);
+            c.drawCircle(x, y, dp(i == historyCount - 1 ? 3.5f : 2.5f), fill);
+        }
+
+        boolean ahead = live >= target;
+        float liveY = Math.max(plotTop, Math.min(plotBottom, plotBottom - (live - lo) * scale));
+        float pulse = 0.5f + 0.5f * (float) Math.sin(rescuePulse * 3.4);
+        fill.setColor(ahead ? ACCENT : BAD);
+        fill.setAlpha((int) (70 + 70 * pulse));
+        c.drawCircle(plotRight, liveY, dp(5f) + dp(3f) * pulse, fill);
+        fill.setAlpha(255);
+        c.drawCircle(plotRight, liveY, dp(3.5f), fill);
+
+        if (beatLabel == null || beatLabelFor != target) {
+            beatLabelFor = target;
+            beatLabel = "BEAT " + scoreText(target);
+        }
+        text(c, beatLabel, textRight, top + h * 0.021f, h * 0.024f, WARN,
+                Paint.Align.RIGHT, numbers, 0.1f);
+        float delta = live - target;
+        String note = (delta >= 0 ? "+" : "−") + scoreText(Math.abs(delta));
+        text(c, note, textRight, bottom, h * 0.026f, ahead ? ACCENT : BAD, Paint.Align.RIGHT, numbers, 0.1f);
+    }
+
+    /** This week's minutes in each zone against its share of the rower's own weekly goal. */
+    private void drawWeekZones(Canvas c, float h, float left, float right, float top, float bottom) {
+        float cell = (right - left) / 4f;
+        float barTop = top + h * 0.030f;
+        float barH = dp(9f);
+        for (int z = 0; z < 4; z++) {
+            float cx = left + cell * z;
+            float cr = cx + cell - dp(14f);
+            float goal = Math.max(60f, weekGoal[z]);
+            float done = weekShown[z];
+            float frac = Math.min(1f, done / goal);
+            boolean met = done >= goal;
+            text(c, ZONES[z], cx, top + h * 0.021f, h * 0.022f, met ? ZONE_COLORS[z] : DIM,
+                    Paint.Align.LEFT, met ? numbers : labels, 0.15f);
+            int doneMin = Math.round(done / 60f);
+            int goalMin = Math.round(goal / 60f);
+            if (weekLabel[z] == null || weekLabelDone[z] != doneMin || weekLabelGoal[z] != goalMin) {
+                weekLabelDone[z] = doneMin;
+                weekLabelGoal[z] = goalMin;
+                weekLabel[z] = doneMin + " / " + goalMin;
+            }
+            text(c, weekLabel[z], cr, top + h * 0.021f,
+                    h * 0.022f, met ? ZONE_COLORS[z] : FAINT, Paint.Align.RIGHT, numbers, 0.05f);
+            rect.set(cx, barTop, cr, barTop + barH);
+            fill.setColor(TRACK);
+            c.drawRoundRect(rect, barH / 2f, barH / 2f, fill);
+            if (frac > 0.005f) {
+                rect.right = cx + Math.max(barH, (cr - cx) * frac);
+                fill.setColor(ZONE_COLORS[z]);
+                // The zone being rowed right now glows; the rest sit flat.
+                fill.setAlpha(z == targetZone ? 255 : 170);
+                c.drawRoundRect(rect, barH / 2f, barH / 2f, fill);
+                fill.setAlpha(255);
+            }
+            if (met) {
+                fill.setColor(ZONE_COLORS[z]);
+                c.drawCircle(cr + dp(7f), barTop + barH / 2f, dp(3.5f), fill);
+            }
+        }
+    }
+
+    /**
+     * SPLIT RESCUE: the window that opens when a lock worth keeping slips. A strip under the split
+     * bar drains away in real time, and the chevrons on the bar itself point at the zone that wins
+     * it back.
+     */
+    private void drawRescue(Canvas c, float h, float left, float right) {
+        if (rescueLeft <= 0f && rescueFlash <= 0f) {
+            return;
+        }
+        boolean won = rescueLeft <= 0f;
+        float top = h * 0.497f;
+        float bottom = h * 0.545f;
+        float pulse = 0.5f + 0.5f * (float) Math.sin(rescuePulse * 7.0);
+        int color = won ? ACCENT : rescueLeft < 10f ? BAD : WARN;
+
+        rect.set(left, top, right, bottom);
+        fill.setColor(PILL);
+        c.drawRoundRect(rect, dp(10f), dp(10f), fill);
+        rect.right = left + Math.max(dp(24f),
+                (right - left) * (won ? rescueFlash : rescueLeft / RESCUE_WINDOW));
+        fill.setColor(color);
+        fill.setAlpha(won ? (int) (110 * rescueFlash) : (int) (55 + 70 * pulse));
+        c.drawRoundRect(rect, dp(10f), dp(10f), fill);
+        fill.setAlpha(255);
+        rect.set(left, top, right, bottom);
+        line.setShader(null);
+        line.setColor(color);
+        line.setStrokeWidth(dp(2f));
+        c.drawRoundRect(rect, dp(10f), dp(10f), line);
+
+        float[] band = rateBands[targetZone];
+        String msg = won
+                ? "RESCUED  ·  LOCK ×" + lockLevel + " BACK  ·  " + rescuesMade + " THIS PIECE"
+                : "SPLIT RESCUE  " + (int) Math.ceil(rescueLeft) + " S  ·  BACK TO " + ZONES[targetZone]
+                        + " AT " + Math.round(band[0]) + "–" + Math.round(band[1]) + " SPM";
+        text(c, msg, (left + right) / 2f, bottom - h * 0.014f, h * 0.026f, won ? ACCENT : TEXT,
+                Paint.Align.CENTER, numbers, 0.15f);
+
+        if (!won) {
+            // How much of the hold has been banked: fill it and the lock comes straight back.
+            float hw = dp(70f);
+            float hx = right - hw - dp(14f);
+            float hy = (top + bottom) / 2f;
+            rect.set(hx, hy - dp(5f), hx + hw, hy + dp(5f));
+            fill.setColor(TRACK);
+            c.drawRoundRect(rect, dp(5f), dp(5f), fill);
+            rect.right = hx + hw * Math.min(1f, rescueHold / RESCUE_HOLD);
+            fill.setColor(ACCENT);
+            c.drawRoundRect(rect, dp(5f), dp(5f), fill);
+            text(c, "×" + rescueLevel, hx - dp(10f), hy + h * 0.011f, h * 0.026f, color,
+                    Paint.Align.RIGHT, numbers, 0.05f);
+        }
     }
 
     /**
@@ -1360,6 +2070,128 @@ final class ZoneRowGame extends GameView {
         saveCustom();
     }
 
+    /**
+     * The guided cool-down: three descending rate steps drawn as a staircase with a rower walking
+     * down it, over the live rate bar so the band below is the one to sit in. Only the top of the
+     * screen is covered - the bar, the panels and the figures keep working underneath.
+     */
+    private void drawCooldown(Canvas c, float w, float h, float left, float right) {
+        fill.setColor(0xF2050D19);
+        c.drawRect(0, h * 0.18f, w, h * 0.578f, fill);
+        float cx = w / 2f;
+        float target = coolTargetRate(coolStep);
+        float[] band = activeRateBand();
+        boolean inBand = shownRate >= band[0] && shownRate <= band[1];
+
+        text(c, coolDone ? "COOL DOWN COMPLETE" : "COOL DOWN  ·  STEP " + (coolStep + 1) + " / " + COOL_STEPS,
+                cx, h * 0.232f, h * 0.032f, ACCENT, Paint.Align.CENTER, numbers, 0.3f);
+        text(c, coolDone
+                        ? Math.round(100.0 * coolInBand / Math.max(1.0, coolElapsed)) + "% HELD IN BAND"
+                        : "EASE THE RATE DOWN - THE BAR BELOW IS THE STEP",
+                cx, h * 0.268f, h * 0.024f, DIM, Paint.Align.CENTER, labels, 0.2f);
+
+        // The staircase, one block per step, descending left to right. It stops above the button
+        // row: with a taller floor the two buttons were drawn straight over the blocks, hiding the
+        // middle step's rate and countdown entirely.
+        float stairsLeft = left + (right - left) * 0.18f;
+        float stairsRight = right - (right - left) * 0.18f;
+        float stepW = (stairsRight - stairsLeft) / COOL_STEPS;
+        float topY = h * 0.345f;
+        float dropY = h * 0.036f;
+        float floorY = h * 0.486f;
+        for (int i = 0; i < COOL_STEPS; i++) {
+            float sx = stairsLeft + stepW * i;
+            float sy = topY + dropY * i;
+            rect.set(sx + dp(6f), sy, sx + stepW - dp(6f), floorY);
+            boolean done = i < coolStep || (coolDone && i <= coolStep);
+            boolean now = i == coolStep && !coolDone;
+            fill.setColor(now ? ACCENT : done ? 0xFF1E6F66 : TRACK);
+            fill.setAlpha(now ? 255 : done ? 220 : 255);
+            c.drawRoundRect(rect, dp(10f), dp(10f), fill);
+            fill.setAlpha(255);
+            if (now) {
+                line.setShader(null);
+                line.setColor(ACCENT);
+                line.setAlpha((int) (90 + 90 * (0.5f + 0.5f * (float) Math.sin(coolGlow * 4.0))));
+                line.setStrokeWidth(dp(3f));
+                rect.inset(-dp(5f), -dp(5f));
+                c.drawRoundRect(rect, dp(13f), dp(13f), line);
+                line.setAlpha(255);
+            }
+            float mx = sx + stepW / 2f;
+            text(c, Math.round(coolTargetRate(i)) + " SPM", mx, sy + h * 0.034f, h * 0.032f,
+                    now ? 0xFF05101E : done ? TEXT : DIM, Paint.Align.CENTER, numbers, 0.1f);
+            text(c, i < coolStep || coolDone ? "DONE" : i == coolStep ? clock(Math.ceil(coolLeft)) : "0:45",
+                    mx, sy + h * 0.064f, h * 0.026f, now ? 0xFF05101E : FAINT, Paint.Align.CENTER,
+                    labels, 0.15f);
+        }
+
+        // The rower on the current step: bobs with the stroke, green when the rate is in band.
+        float px = stairsLeft + stepW * (coolStep + 0.5f);
+        float py = topY + dropY * coolStep - dp(8f) - (float) Math.abs(Math.sin(coolBob * 2.0)) * dp(6f);
+        drawCoolRower(c, px, py, h, inBand);
+
+        float btnW = dp(230f);
+        float btnH = h * 0.048f;
+        float btnY = h * 0.505f;
+        rect.set(cx - btnW - dp(10f), btnY, cx - dp(10f), btnY + btnH);
+        skipHit.set(rect.left, rect.top - dp(8f), rect.right, rect.bottom + dp(8f));
+        fill.setColor(PILL);
+        c.drawRoundRect(rect, dp(12f), dp(12f), fill);
+        line.setShader(null);
+        line.setColor(PILL_EDGE);
+        line.setStrokeWidth(dp(1.5f));
+        c.drawRoundRect(rect, dp(12f), dp(12f), line);
+        text(c, coolDone ? "ROW AGAIN" : "SKIP STEP", cx - btnW / 2f - dp(10f), btnY + btnH * 0.66f,
+                h * 0.028f, TEXT, Paint.Align.CENTER, numbers, 0.15f);
+
+        rect.set(cx + dp(10f), btnY, cx + dp(10f) + btnW, btnY + btnH);
+        coolHit.set(rect.left, rect.top - dp(8f), rect.right, rect.bottom + dp(8f));
+        fill.setColor(coolDone ? ACCENT : PILL);
+        c.drawRoundRect(rect, dp(12f), dp(12f), fill);
+        if (!coolDone) {
+            line.setColor(PILL_EDGE);
+            c.drawRoundRect(rect, dp(12f), dp(12f), line);
+        }
+        text(c, coolDone ? "FINISH" : "END COOL DOWN", cx + dp(10f) + btnW / 2f, btnY + btnH * 0.66f,
+                h * 0.028f, coolDone ? 0xFF05101E : TEXT, Paint.Align.CENTER, numbers, 0.15f);
+
+        // The live rate, under the buttons and directly above the rate bar it is read off.
+        text(c, shownRate >= 1f ? String.format(java.util.Locale.US, "%.1f", shownRate) + " SPM  ·  TARGET "
+                        + Math.round(target) : "TARGET " + Math.round(target) + " SPM",
+                cx, h * 0.574f, h * 0.026f, inBand ? ACCENT : WARN, Paint.Align.CENTER, numbers, 0.15f);
+
+        if (!isClockRunning() && !coolDone) {
+            text(c, "KEEP ROWING - THE STEP HOLDS WHILE YOU REST", cx, h * 0.31f, h * 0.024f, WARN,
+                    Paint.Align.CENTER, numbers, 0.2f);
+        }
+    }
+
+    /** A little rower on the staircase: head, body, and an oar that sweeps with the real stroke. */
+    private void drawCoolRower(Canvas c, float x, float footY, float h, boolean inBand) {
+        float unit = h * 0.018f;
+        int body = inBand ? ACCENT : TEXT;
+        float lean = (strokePhase() - 0.5f) * unit * 1.1f;
+        fill.setColor(body);
+        c.drawCircle(x + lean, footY - unit * 3.4f, unit * 0.78f, fill);
+        line.setShader(null);
+        line.setColor(body);
+        line.setStrokeWidth(unit * 0.5f);
+        c.drawLine(x, footY, x + lean, footY - unit * 2.6f, line);
+        // Legs, planted, knees bending a little with the bob.
+        c.drawLine(x, footY, x - unit * 0.8f, footY - unit * 0.1f, line);
+        c.drawLine(x, footY, x + unit * 0.9f, footY - unit * 0.1f, line);
+        // The oar: sweeps through the drive, feathers back through the recovery.
+        float angle = (float) Math.toRadians(-20 + 70 * strokePhase());
+        float ox = (float) Math.cos(angle) * unit * 2.6f;
+        float oy = (float) Math.sin(angle) * unit * 2.6f;
+        line.setColor(inBand ? ACCENT : DIM);
+        line.setStrokeWidth(unit * 0.35f);
+        c.drawLine(x + lean - ox, footY - unit * 2.1f - oy, x + lean + ox, footY - unit * 2.1f + oy, line);
+        fill.setColor(inBand ? ACCENT : DIM);
+        c.drawCircle(x + lean + ox, footY - unit * 2.1f + oy, unit * 0.42f, fill);
+    }
+
     private void drawFinished(Canvas c, float w, float h) {
         fill.setColor(0xD8050D19);
         c.drawRect(0, h * 0.18f, w, h * 0.77f, fill);
@@ -1404,7 +2236,31 @@ final class ZoneRowGame extends GameView {
                     cx, h * 0.635f, h * 0.03f, d >= 0 ? ACCENT : BAD, Paint.Align.CENTER, numbers, 0.15f);
         }
         drawZoneChart(c, w, h);
-        text(c, "TAP  \u21BA  TO ROW AGAIN", w / 2f, h * 0.735f, h * 0.024f, FAINT, Paint.Align.CENTER, labels, 0.25f);
+
+        // The cool-down is offered here rather than started for them: the piece is theirs to end.
+        float btnW = dp(300f);
+        float btnH = h * 0.058f;
+        float btnTop = h * 0.665f;
+        rect.set(cx - btnW / 2f, btnTop, cx + btnW / 2f, btnTop + btnH);
+        coolHit.set(rect.left - dp(10f), rect.top - dp(10f), rect.right + dp(10f), rect.bottom + dp(10f));
+        fill.setColor(coolDone ? PILL : ACCENT);
+        c.drawRoundRect(rect, dp(14f), dp(14f), fill);
+        if (coolDone) {
+            line.setShader(null);
+            line.setColor(PILL_EDGE);
+            line.setStrokeWidth(dp(1.5f));
+            c.drawRoundRect(rect, dp(14f), dp(14f), line);
+        }
+        String coolLabel = coolDone
+                ? "COOL DOWN DONE  \u00B7  " + Math.round(100.0 * coolInBand / Math.max(1.0, coolElapsed)) + "% IN BAND"
+                : "COOL DOWN  \u00B7  " + COOL_STEPS + " RATE STEPS";
+        text(c, coolLabel, cx, btnTop + btnH * 0.66f, h * 0.030f, coolDone ? DIM : 0xFF05101E,
+                Paint.Align.CENTER, numbers, 0.15f);
+        if (rescuesMade > 0) {
+            text(c, rescuesMade + (rescuesMade == 1 ? " RESCUE" : " RESCUES"), cx, h * 0.745f, h * 0.026f,
+                    WARN, Paint.Align.CENTER, numbers, 0.2f);
+        }
+        text(c, "TAP  \u21BA  TO ROW AGAIN", w / 2f, h * 0.762f, h * 0.024f, FAINT, Paint.Align.CENTER, labels, 0.25f);
     }
 
     /** Time in each zone, as bars that grow in once the piece ends. */
@@ -1498,6 +2354,47 @@ final class ZoneRowGame extends GameView {
         return false;
     }
 
+    /**
+     * The two cool-down buttons. On the finish screen the right-hand one starts it; inside the
+     * cool-down the left one skips a step (or rows again once it is done) and the right one ends it.
+     */
+    private void handleCooldownTap(boolean skip) {
+        if (!cooling) {
+            if (!skip) {
+                cooling = true;
+                coolDone = false;
+                coolStep = 0;
+                coolLeft = COOL_STEP_SECONDS;
+                coolInBand = 0;
+                coolElapsed = 0;
+            }
+            return;
+        }
+        if (skip) {
+            if (coolDone) {
+                restart();
+                return;
+            }
+            coolStep++;
+            coolLeft = COOL_STEP_SECONDS;
+            if (coolStep >= COOL_STEPS) {
+                coolStep = COOL_STEPS - 1;
+                coolDone = true;
+                coolLeft = 0f;
+            }
+            return;
+        }
+        if (!coolDone && coolElapsed > 30) {
+            bests.recordHighest(COOL_KEY, (float) (100.0 * coolInBand / coolElapsed));
+        }
+        cooling = false;
+    }
+
+    @Override
+    protected void onStop() {
+        saveWeek();
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         if (e.getActionMasked() == MotionEvent.ACTION_UP) {
@@ -1505,6 +2402,8 @@ final class ZoneRowGame extends GameView {
             float y = e.getY();
             if (editing && handleEditorTap(x, y)) {
                 postInvalidateOnAnimation();
+            } else if (!editing && (coolHit.contains(x, y) || skipHit.contains(x, y))) {
+                handleCooldownTap(skipHit.contains(x, y));
             } else if (restartHit.contains(x, y)) {
                 restart();
             } else if (pauseHit.contains(x, y)) {
@@ -1515,7 +2414,12 @@ final class ZoneRowGame extends GameView {
                 } else {
                     paused = !paused;
                 }
-            } else if (y >= zoneTop && y <= zoneBottom && span > 0f && segs == null) {
+            } else if (!editing && !cooling && !finished && y >= zoneTop && y <= zoneBottom
+                    && span > 0f && segs == null) {
+                // Only when the zone names are actually on screen. The editor, the cool-down and
+                // the finish card all cover this band, and a miss on one of them used to change
+                // the target zone invisibly - which moves the week bar, the lock colour and the
+                // finish card's "LONGEST AT" line.
                 int z = (int) ((x - x0) / (span / 4f));
                 if (z >= 0 && z < 4) {
                     targetZone = z;

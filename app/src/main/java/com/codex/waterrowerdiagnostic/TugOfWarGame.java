@@ -29,10 +29,32 @@ import android.view.MotionEvent;
  * <li><b>A tournament.</b> An eight-team knockout bracket, toggled with the button top right.</li>
  * <li><b>Mud splashes</b> from the feet of whichever team is sliding into the pit.</li>
  * </ul>
+ *
+ * <p>3.23.0, the second set the rower approved:
+ * <ul>
+ * <li><b>A league with promotion and relegation.</b> Three divisions of four sides, a season of
+ * three matchdays, three points a win. Win the division and you go up, finish bottom and you go
+ * down; a division above pulls 18% harder. The table, the other tie's result and the season verdict
+ * are all on screen. State lives in {@link TugOfWarLeague}.</li>
+ * <li><b>Anchor rounds.</b> Mid-pull the referee calls one: a hold line is pegged at wherever the
+ * marker is and you have thirty seconds to not let it slip a hand's width. Hold it and they tire;
+ * lose it and they surge. Something at stake, on a clock, every minute or so.</li>
+ * <li><b>Rivals who taunt, and a comeback.</b> Every team has its own lines and gloats when it is
+ * ahead; a side that has beaten you twice more than you have beaten it taunts harder. Being
+ * behind arms the comeback meter - out-pull them from back there and it fills, then you get eight
+ * seconds at +35%, which is enough to take a pull back from almost anywhere.</li>
+ * <li><b>Best of three, with a rest between.</b> A match is first to two pulls. Between them the
+ * losing side picks itself out of the mud and there is a twenty second breather with the score up,
+ * the rival talking, and the next pull counting down.</li>
+ * <li><b>A strength rating that grows across sessions.</b> Time on the rope, pulls, matches, anchor
+ * rounds and comebacks all feed it; it carries a rank from ROOKIE to TITAN and is worth up to 10%
+ * on the rope, against divisions that are 18% apart - so it opens the way up rather than
+ * flattening the game.</li>
+ * </ul>
  */
 final class TugOfWarGame extends GameView {
 
-    private enum Phase { READY, PULLING, WON, LOST }
+    private enum Phase { READY, PULLING, REST, WON, LOST }
 
     /* ---------- the teams ---------- */
 
@@ -88,13 +110,40 @@ final class TugOfWarGame extends GameView {
             "WINDING UP - BRACE  1", "WINDING UP - BRACE  2", "WINDING UP - BRACE  3"};
     static final String[] LEVEL_NAMES = {"EASY", "STEADY", "EVEN", "STRONG", "BRUTAL"};
 
+    /** What each side shouts when it is ahead, in the order of the style constants above. */
+    private static final String[][] TAUNTS = {
+            {"IS THAT IT?", "WAKE US WHEN YOU PULL", "WE'RE HAVING A SIT DOWN"},          // LAZY
+            {"IN  TIME,  LADS", "ONE... TWO... GONE", "TICK. TOCK."},                     // RHYTHM
+            {"DIDN'T SEE THAT, DID YOU?", "SNOOZE, LOSE", "MIND THE ROPE"},               // SNEAKY
+            {"WE DO THIS ALL DAY", "SLOW AND SURE", "YOU'LL TIRE FIRST"},                 // GRINDER
+            {"BRACE YOURSELF", "HERE IT COMES", "TIMBERRR"},                              // HEAVER
+            {"WE'RE ONLY WARMING UP", "WAIT FOR IT", "THE LATE SHIFT STARTS NOW"},        // SLOWSTART
+            {"TOO SLOW!", "OFF LIKE A SHOT", "CATCH US IF YOU CAN"},                      // FRONTRUN
+    };
+    /** Reserved for a side that has beaten you twice more than you have beaten it. */
+    private static final String[] NEMESIS_TAUNTS = {
+            "AGAIN? YOU NEVER LEARN", "SAME ROPE, SAME ENDING", "WE OWN YOU"};
+
+    /* ---------- the team table, for the league ---------- */
+
+    static int teamCount() {
+        return TEAMS.length;
+    }
+
+    static String teamName(int i) {
+        return TEAMS[Math.max(0, Math.min(TEAMS.length - 1, i))].name;
+    }
+
+    static float teamShare(int i) {
+        return TEAMS[Math.max(0, Math.min(TEAMS.length - 1, i))].share;
+    }
+
     /* ---------- the cup ---------- */
 
     private static final int YOU = -1;
     private static final int NONE = -2;
     private static final String[] ROUND_NAMES = {"QUARTER-FINAL", "SEMI-FINAL", "FINAL"};
     private static final String CUP_KEY = "tugcup.wins";
-    private boolean cup;
     private final int[] cupQuarter = new int[8];
     private final int[] cupSemi = new int[4];
     private final int[] cupFinal = new int[2];
@@ -118,6 +167,68 @@ final class TugOfWarGame extends GameView {
     private double endedAt;
     private float heave;
     private int lastStrokes = -1;
+
+    /* ---------- league, best-of-three, anchor rounds, rivals, rating ---------- */
+
+    private static final int MODE_MATCH = 0;
+    private static final int MODE_LEAGUE = 1;
+    private static final int MODE_CUP = 2;
+    private static final String[] MODE_NAMES = {"SINGLE MATCH", "LEAGUE", "TOURNAMENT"};
+    /** Pre-lowered, because the button is drawn every frame it is up. */
+    private static final String[] MODE_NEXT = {"tap for league", "tap for tournament", "tap for single match"};
+    /** Pulls needed to take a match, and the breather between them. */
+    private static final int PULLS_TO_WIN = 2;
+    private static final double REST_SECONDS = 20.0;
+    /** An anchor round is thirty seconds, and the line breaks if the marker slips this far. */
+    private static final double ROUND_SECONDS = 30.0;
+    /**
+     * How far the marker may slip before the line breaks, as a share of half the field. A heave
+     * from the STORM CREW is +42% for about three seconds, which costs 0.34 unanchored and 0.085
+     * with the anchor dug in - so this is set above one unanchored heave and the anchor is what
+     * makes a round comfortable rather than a coin toss.
+     */
+    private static final double ROUND_SLACK = 0.30;
+
+    private final TugOfWarLeague league;
+    private int mode = MODE_LEAGUE;
+
+    /** Best of three. */
+    private int yourPulls;
+    private int theirPulls;
+    private int pullResult;         // the last pull: +1 you, -1 them, 0 none
+    private double matchSeconds;    // runs across the whole match, so a team can tire in the third pull
+    private double restSeconds;
+
+    /** Anchor round: hold the line for thirty seconds. */
+    private boolean roundActive;
+    private double roundEndsAt;
+    private double nextRoundAt;
+    private double roundLine;
+    private float roundFlash;
+    private boolean roundFlashGood;
+    private boolean roundBurstPending;
+    private int roundsThisMatch;
+
+    /** A fatigue or surge the opponent is carrying out of an anchor round. */
+    private float themEventMul = 1f;
+    private double themEventUntil;
+
+    /** Comeback: arms when you are well behind, fills while you out-pull them, then pays out. */
+    private float comeback;
+    private float comebackBoost;
+    private boolean comebackUsed;
+    private float comebackFlash;
+    private boolean comebackBurstPending;
+    private boolean tauntedThisPull;
+
+    /** What the rival is shouting right now. */
+    private String taunt;
+    private float tauntLife;
+    private double nextTauntAt;
+    private int tauntSeed;
+
+    /** Rating is awarded a point for every ten seconds on the rope. */
+    private float ratingTick;
 
     private int level = 2;          // 1 easy .. 5 brutal
     private int matchTeam = 1;
@@ -162,6 +273,7 @@ final class TugOfWarGame extends GameView {
     TugOfWarGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        this.league = new TugOfWarLeague(bests);
         this.scenery = new RiverScenery(getResources().getDisplayMetrics().density);
         for (int i = 0; i < chantAge.length; i++) {
             chantAge[i] = 99f;
@@ -169,10 +281,18 @@ final class TugOfWarGame extends GameView {
         newCup();
     }
 
-    /** Picking a level from the header chip is a single match, so it leaves the cup. */
+    private boolean cup() {
+        return mode == MODE_CUP;
+    }
+
+    private boolean leagueMode() {
+        return mode == MODE_LEAGUE;
+    }
+
+    /** Picking a level from the header chip is a single match, so it leaves the cup and the league. */
     void setLevel(int l) {
         level = Math.max(1, Math.min(5, l));
-        cup = false;
+        mode = MODE_MATCH;
         phase = Phase.READY;
     }
 
@@ -186,7 +306,10 @@ final class TugOfWarGame extends GameView {
     }
 
     private int opponentIndex() {
-        if (!cup) {
+        if (leagueMode()) {
+            return league.opponentTeam();
+        }
+        if (!cup()) {
             return level - 1;
         }
         if (cupRound == 0) {
@@ -200,7 +323,7 @@ final class TugOfWarGame extends GameView {
 
     @Override
     protected void onStart() {
-        if (cup && (cupOut || cupChampion != NONE)) {
+        if (cup() && (cupOut || cupChampion != NONE)) {
             newCup();
         }
         resetMatch();
@@ -213,9 +336,25 @@ final class TugOfWarGame extends GameView {
         anchorSteady = false;
     }
 
+    /** A whole new match: new opponent, best of three back to 0-0. */
     private void resetMatch() {
         matchTeam = opponentIndex();
         phase = Phase.READY;
+        yourPulls = 0;
+        theirPulls = 0;
+        pullResult = 0;
+        matchSeconds = 0;
+        restSeconds = 0;
+        roundsThisMatch = 0;
+        league.clearSeasonMessage();
+        taunt = null;
+        tauntLife = 0;
+        nextTauntAt = 12;
+        resetPull();
+    }
+
+    /** One pull of the best of three. The match score and the match clock survive it. */
+    private void resetPull() {
         position = 0;
         pullSeconds = 0;
         slide = 0;
@@ -223,6 +362,26 @@ final class TugOfWarGame extends GameView {
         anchorBurstDone = false;
         themMul = 1f;
         teamCall = null;
+        roundActive = false;
+        // The first call has to land before the marker has run past the +/-0.7 gate below, or the
+        // round is never called at all. A pull is scaled so a 40 W edge covers the field in 12 s,
+        // and the easiest league fixture (0.75 share x 0.88 division = 93 W against this rower's
+        // 129 W typical) is a ~36 W edge - the marker is at 0.68 by 11 s and past the gate by 12 s.
+        // 18 s meant that fixture never saw a round. 10 s leaves room in every fixture measured.
+        nextRoundAt = 10;
+        roundEndsAt = 0;
+        themEventMul = 1f;
+        themEventUntil = 0;
+        comeback = 0;
+        comebackBoost = 0;
+        comebackUsed = false;
+        tauntedThisPull = false;
+        nextTauntAt = 12;
+    }
+
+    @Override
+    protected void onStop() {
+        league.save();
     }
 
     @Override
@@ -279,22 +438,89 @@ final class TugOfWarGame extends GameView {
             return super.onTouchEvent(event);
         }
         if (phase != Phase.PULLING && modeButton.contains(event.getX(), event.getY())) {
-            cup = !cup;
-            if (cup) {
+            mode = (mode + 1) % MODE_NAMES.length;
+            if (cup()) {
                 newCup();
             }
             start();
             return true;
         }
+        if (phase == Phase.REST) {
+            startNextPull();           // skip the breather
+            return true;
+        }
         if (phase == Phase.WON || phase == Phase.LOST) {
-            if (cup && !cupOut && cupChampion == NONE) {
+            if (cup() && !cupOut && cupChampion == NONE) {
                 resetMatch();          // on to the next round
+            } else if (leagueMode()) {
+                resetMatch();          // on to the next fixture
             } else {
                 start();
             }
             return true;
         }
         return super.onTouchEvent(event);
+    }
+
+    /* ---------- best of three ---------- */
+
+    /** A pull has been taken. Scores it, then either ends the match or calls a breather. */
+    private void endPull(boolean youWon) {
+        pullResult = youWon ? 1 : -1;
+        // A pull ending ends whatever was live on it. Neither is stepped outside PULLING, so left
+        // set they freeze: the anchor round panel would sit through the twenty second breather with
+        // a stopped countdown and its HOLD/BREAK lines still pegged to the rope, and the comeback
+        // would keep multiplying the watts readout and the MARGIN stat by 1.35 while nobody pulls.
+        roundActive = false;
+        comebackBoost = 0f;
+        if (youWon) {
+            yourPulls++;
+        } else {
+            theirPulls++;
+        }
+        league.award(youWon ? 6f * team().share : 1.5f);
+        if (yourPulls >= PULLS_TO_WIN || theirPulls >= PULLS_TO_WIN) {
+            boolean won = yourPulls >= PULLS_TO_WIN;
+            phase = won ? Phase.WON : Phase.LOST;
+            endedAt = sessionSeconds;
+            finishMatch(won);
+        } else {
+            phase = Phase.REST;
+            restSeconds = 0;
+            if (!youWon) {
+                speak(tauntLine());
+            }
+        }
+    }
+
+    private void finishMatch(boolean won) {
+        league.award(won ? 18f * team().share : 4f);
+        if (!won) {
+            speak(tauntLine());
+        }
+        if (leagueMode()) {
+            league.recordMatch(won, yourPulls, theirPulls);
+        } else if (cup()) {
+            league.noteRival(matchTeam, won);
+            if (won) {
+                cupWon();
+            } else {
+                cupLost();
+            }
+            league.save();
+        } else {
+            league.noteRival(matchTeam, won);
+            if (won) {
+                bests.recordHighest("tug." + level, (float) matchSeconds);
+            }
+            league.save();
+        }
+    }
+
+    private void startNextPull() {
+        resetPull();
+        phase = Phase.PULLING;
+        pullResult = 0;
     }
 
     /* ---------- personalities ---------- */
@@ -383,10 +609,117 @@ final class TugOfWarGame extends GameView {
         }
     }
 
-    /** Opponent watts: the team's share of YOUR typical power, shaped by how it pulls, ramping 1 W every four seconds. */
+    /**
+     * Opponent watts: the team's share of YOUR typical power, scaled by the division, shaped by how
+     * it pulls, carrying any fatigue or surge from the last anchor round, and ramping through the
+     * pull so a stalemate always breaks.
+     */
     private float opponentWatts() {
-        float base = (float) profile.typicalWatts() * team().share;
-        return base * themMul + (float) pullSeconds * 0.25f;
+        float share = team().share * (leagueMode() ? league.divisionStrength() : 1f);
+        float base = (float) profile.typicalWatts() * share;
+        return base * themMul * themEventMul + (float) pullSeconds * 0.25f + (float) matchSeconds * 0.06f;
+    }
+
+    /**
+     * What you are actually putting on the rope: the reading, plus what the strength rating is
+     * worth (up to 10%), times the comeback boost while it is running.
+     */
+    private float yourWatts(int watts) {
+        return watts * (1f + league.rankBonus()) * (comebackBoost > 0 ? 1.35f : 1f);
+    }
+
+    /* ---------- anchor rounds, comebacks, taunts ---------- */
+
+    /**
+     * The referee's anchor round: a hold line pegged at wherever the marker is, thirty seconds to
+     * not let it slip a hand's width. Holding it leaves them blowing; losing it lets them surge.
+     */
+    private void stepAnchorRound(float dt) {
+        if (!roundActive) {
+            if (pullSeconds > nextRoundAt && Math.abs(position) < 0.7) {
+                roundActive = true;
+                roundLine = position;
+                roundEndsAt = pullSeconds + ROUND_SECONDS;
+                roundsThisMatch++;
+            }
+            return;
+        }
+        if (position < roundLine - ROUND_SLACK) {
+            roundActive = false;
+            nextRoundAt = pullSeconds + 45;
+            roundFlash = 1f;
+            roundFlashGood = false;
+            roundBurstPending = true;
+            themEventMul = 1.10f;                 // they smell blood
+            themEventUntil = matchSeconds + 10;
+            speak(tauntLine());
+        } else if (pullSeconds >= roundEndsAt) {
+            roundActive = false;
+            nextRoundAt = pullSeconds + 55;
+            roundFlash = 1f;
+            roundFlashGood = true;
+            roundBurstPending = true;
+            themEventMul = 0.86f;                 // thirty seconds of nothing has cost them
+            themEventUntil = matchSeconds + 15;
+            position = Math.min(1.0, position + 0.06);
+            league.award(10f);
+            league.noteAnchorHeld();
+        }
+    }
+
+    /**
+     * The comeback: being well behind arms it, out-pulling them from back there fills it, and it
+     * pays out eight seconds at +35% - enough to take a pull back from almost anywhere.
+     */
+    private void stepComeback(float dt, float yours, float them) {
+        comebackBoost = Math.max(0f, comebackBoost - dt);
+        if (comebackUsed) {
+            comeback = Math.max(0f, comeback - dt * 0.35f);
+            return;
+        }
+        if (position < -0.22) {
+            comeback += dt * (yours > them ? 0.14f : -0.1f);
+            comeback = Math.max(0f, Math.min(1f, comeback));
+            if (comeback >= 1f) {
+                comebackUsed = true;
+                comebackBoost = 8f;
+                comebackFlash = 1f;
+                comebackBurstPending = true;
+                // Worth more when they have been mouthing off about it.
+                league.award(tauntedThisPull ? 14f : 8f);
+                taunt = null;
+                tauntLife = 0f;
+            }
+        } else {
+            comeback = Math.max(0f, comeback - dt * 0.15f);
+        }
+    }
+
+    private void stepTaunts(float dt) {
+        tauntLife = Math.max(0f, tauntLife - dt);
+        if (tauntLife <= 0f) {
+            taunt = null;
+        }
+        if (phase == Phase.PULLING && position < -0.3 && pullSeconds > nextTauntAt) {
+            speak(tauntLine());
+            nextTauntAt = pullSeconds + 14 + Math.random() * 8;
+        }
+    }
+
+    private void speak(String line) {
+        taunt = line;
+        tauntLife = 3.8f;
+        tauntedThisPull = true;
+        tauntSeed++;
+    }
+
+    /** A line from this team's own book, or a gloat if they have your number. */
+    private String tauntLine() {
+        if (league.nemesis(matchTeam) && Math.random() < 0.5) {
+            return NEMESIS_TAUNTS[(int) (Math.random() * NEMESIS_TAUNTS.length)];
+        }
+        String[] lines = TAUNTS[Math.max(0, Math.min(TAUNTS.length - 1, team().style))];
+        return lines[(int) (Math.random() * lines.length)];
     }
 
     /* ---------- the cup ---------- */
@@ -462,20 +795,36 @@ final class TugOfWarGame extends GameView {
 
         float target = 1f;
         if (phase == Phase.PULLING) {
-            target = teamMultiplier(team, pullSeconds);
+            // The personality runs on the match clock, so the grinder really does tire by the
+            // third pull and the slow starter is awake for it.
+            target = teamMultiplier(team, matchSeconds);
         } else {
             teamCall = null;
         }
         // Eased so a heave builds over a few frames instead of teleporting the marker.
         themMul += (target - themMul) * Math.min(1f, dt * 4f);
+        if (matchSeconds > themEventUntil) {
+            themEventMul += (1f - themEventMul) * Math.min(1f, dt * 1.5f);
+        }
         float them = opponentWatts();
+        float yours = yourWatts(watts);
 
         if (phase == Phase.PULLING) {
             pullSeconds += dt;
+            matchSeconds += dt;
             anchor = anchorSteady ? Math.min(1f, anchor + dt / 4f) : Math.max(0f, anchor - dt / 1.2f);
+            stepAnchorRound(dt);
+            stepComeback(dt, yours, them);
+            stepTaunts(dt);
+            // A point of strength for every ten seconds actually spent on the rope.
+            ratingTick += dt;
+            while (ratingTick >= 10f) {
+                ratingTick -= 10f;
+                league.award(1f);
+            }
             // Marker velocity proportional to the power difference, scaled so a 40 W edge
             // covers the field in about 12 seconds. The anchor only slows your slipping.
-            double diff = (watts - them) / 40.0;
+            double diff = (yours - them) / 40.0;
             if (diff < 0) {
                 diff *= 1.0 - 0.75 * anchor;
             }
@@ -484,27 +833,34 @@ final class TugOfWarGame extends GameView {
             slide += ((float) vel - slide) * Math.min(1f, dt * 3f);
             position = Math.max(-1, Math.min(1, position));
             if (position >= 1) {
-                phase = Phase.WON;
-                endedAt = sessionSeconds;
-                if (cup) {
-                    cupWon();
-                } else {
-                    bests.recordHighest("tug." + level, (float) pullSeconds);
-                }
+                endPull(true);
             } else if (position <= -1) {
-                phase = Phase.LOST;
-                endedAt = sessionSeconds;
-                if (cup) {
-                    cupLost();
-                }
+                endPull(false);
+            }
+        } else if (phase == Phase.REST) {
+            restSeconds += dt;
+            matchSeconds += dt;
+            // Both teams walk the rope back to the middle while they get their breath.
+            position += (0 - position) * Math.min(1f, dt * 1.2f);
+            slide += (0f - slide) * Math.min(1f, dt * 3f);
+            anchor = Math.max(0f, anchor - dt);
+            stepTaunts(dt);
+            if (restSeconds >= REST_SECONDS) {
+                startNextPull();
             }
         } else {
             slide += (0f - slide) * Math.min(1f, dt * 3f);
             anchor = Math.max(0f, anchor - dt);
+            stepTaunts(dt);
         }
-        // Between cup rounds: a short breather, then the next opponent steps up by itself, so the
-        // rower does not have to leave the handle to tap.
-        if (cup && phase == Phase.WON && cupChampion == NONE && sessionSeconds - endedAt > 8) {
+        roundFlash = Math.max(0f, roundFlash - dt * 0.55f);
+        comebackFlash = Math.max(0f, comebackFlash - dt * 0.5f);
+        // Between cup rounds and between league fixtures: a short breather, then the next opponent
+        // steps up by itself, so the rower does not have to leave the handle to tap.
+        boolean cupRolls = cup() && phase == Phase.WON && cupChampion == NONE;
+        boolean leagueRolls = leagueMode() && (phase == Phase.WON || phase == Phase.LOST)
+                && league.seasonMessage() == null;
+        if ((cupRolls || leagueRolls) && sessionSeconds - endedAt > 8) {
             resetMatch();
             team = team();
         }
@@ -540,17 +896,42 @@ final class TugOfWarGame extends GameView {
         c.drawPath(rope, paint);
         fx.draw(c);
 
-        // Your side: watts, and the anchor gauge under it.
-        bold(c, watts + " W", right - dp(10f), ropeY - dp(50f), 30f, ACCENT, Paint.Align.RIGHT);
-        label(c, "YOU", right - dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT, Paint.Align.RIGHT);
+        // Your side: what is actually on the rope, and the anchor gauge under it.
+        bold(c, Math.round(yours) + " W", right - dp(10f), ropeY - dp(50f), 30f,
+                comebackBoost > 0 ? WARN : ACCENT, Paint.Align.RIGHT);
+        String mine = "YOU";
+        if (comebackBoost > 0) {
+            mine = "COMEBACK +35%  ·  " + String.format(java.util.Locale.US, "%.1f s", comebackBoost);
+        } else if (league.rankBonus() > 0) {
+            mine = league.rank() + "  +" + Math.round(league.rankBonus() * 100) + "%  ·  " + watts + " W RAW";
+        }
+        label(c, mine, right - dp(10f), ropeY - dp(50f) + dp(16f), 9f,
+                comebackBoost > 0 ? WARN : FAINT, Paint.Align.RIGHT);
         drawAnchorGauge(c, right - dp(10f), ropeY - dp(170f));
         // Their side: name, how they pull, and what they are doing right now.
         bold(c, Math.round(them) + " W", left + dp(10f), ropeY - dp(50f), 30f, team.shirt, Paint.Align.LEFT);
-        String who = cup ? ROUND_NAMES[Math.min(2, cupRound)] : "LEVEL " + level + " " + LEVEL_NAMES[level - 1];
-        label(c, team.name + "  ·  " + who + "  ·  " + Math.round(team.share * 100) + "% OF YOUR "
+        String who = leagueMode() ? league.divisionName() + "  ·  MATCHDAY " + (league.matchday() + 1)
+                + " / " + TugOfWarLeague.FIXTURES
+                : cup() ? ROUND_NAMES[Math.min(2, cupRound)]
+                : "LEVEL " + level + " " + LEVEL_NAMES[level - 1];
+        float shown = team.share * (leagueMode() ? league.divisionStrength() : 1f);
+        label(c, team.name + "  ·  " + who + "  ·  " + Math.round(shown * 100) + "% OF YOUR "
                         + Math.round(profile.typicalWatts()) + " W",
                 left + dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT, Paint.Align.LEFT);
-        label(c, team.motto, left + dp(10f), ropeY - dp(50f) + dp(29f), 9f, DIM, Paint.Align.LEFT);
+        String motto = team.motto;
+        int h2hW = league.rivalWins(matchTeam);
+        int h2hL = league.rivalLosses(matchTeam);
+        if (h2hW + h2hL > 0) {
+            motto = motto + "  ·  YOU " + h2hW + " - " + h2hL + (league.nemesis(matchTeam) ? "  ·  NEMESIS" : "");
+        }
+        label(c, motto, left + dp(10f), ropeY - dp(50f) + dp(29f), 9f,
+                league.nemesis(matchTeam) ? BAD : DIM, Paint.Align.LEFT);
+        if (themEventMul < 0.97f) {
+            label(c, "THEY'RE BLOWING AFTER THAT HOLD", left + dp(10f), ropeY - dp(50f) + dp(42f), 9f,
+                    ACCENT, Paint.Align.LEFT);
+        } else if (themEventMul > 1.03f) {
+            label(c, "THEY SMELL BLOOD", left + dp(10f), ropeY - dp(50f) + dp(42f), 9f, BAD, Paint.Align.LEFT);
+        }
         if (teamCall != null) {
             float pulse = teamCallUrgent ? 0.6f + 0.4f * (float) Math.abs(Math.sin(sessionSeconds * 6)) : 1f;
             int a = (int) (255 * pulse);
@@ -558,66 +939,112 @@ final class TugOfWarGame extends GameView {
                     (a << 24) | ((teamCallUrgent ? WARN : TEXT) & 0x00FFFFFF), Paint.Align.LEFT);
         }
 
-        boolean showBracket = cup && phase != Phase.PULLING;
+        boolean showBracket = cup() && phase != Phase.PULLING && phase != Phase.REST;
+        boolean showTable = leagueMode() && phase != Phase.PULLING && phase != Phase.REST;
         float titleY = h * 0.22f;
-        if (showBracket) {
+        if (showBracket || showTable) {
             // Clear of the mode button (190 dp + margins) on the right, on any width.
             float bw = Math.max(dp(300f), Math.min(w - dp(430f), dp(820f)));
             float bh = dp(200f);
             float bx = (w - bw) / 2f;
             float by = dp(10f);
-            drawBracket(c, bx, by, bw, bh);
+            if (showBracket) {
+                drawBracket(c, bx, by, bw, bh);
+            } else {
+                drawLeagueTable(c, bx, by, bw, bh);
+            }
             titleY = by + bh + dp(34f);
         }
+        // Best of three, the anchor round's clock and the comeback meter stack under the title,
+        // which moves down when the bracket or the table is up.
+        if (!showBracket && !showTable) {
+            drawScore(c, w, titleY + dp(52f), team);
+        }
+        drawAnchorRound(c, w, titleY + dp(118f), mid, travel, ropeY);
+        drawComebackMeter(c, w, titleY + dp(186f), team);
 
         String big;
         String cap;
         int col;
         switch (phase) {
             case READY:
-                big = cup ? ROUND_NAMES[cupRound] + " v " + team.name : "GRAB THE ROPE";
-                cap = cup ? "take a stroke to start  ·  " + team.motto : "take a stroke to start pulling";
-                col = cup ? TEXT : DIM;
+                if (leagueMode()) {
+                    big = "MATCHDAY " + (league.matchday() + 1) + "  v  " + team.name;
+                    cap = "best of three  ·  " + league.divisionName() + "  ·  take a stroke to start";
+                    col = TEXT;
+                } else if (cup()) {
+                    big = ROUND_NAMES[cupRound] + " v " + team.name;
+                    cap = "best of three  ·  take a stroke to start  ·  " + team.motto;
+                    col = TEXT;
+                } else {
+                    big = "GRAB THE ROPE";
+                    cap = "best of three  ·  take a stroke to start pulling";
+                    col = DIM;
+                }
                 break;
+            case REST: {
+                int leftRest = (int) Math.ceil(REST_SECONDS - restSeconds);
+                big = "BREATHER  " + Math.max(0, leftRest);
+                cap = (pullResult > 0 ? "that pull is yours" : "they took that one")
+                        + "  ·  " + (yourPulls + theirPulls + 1) + counted(yourPulls + theirPulls + 1)
+                        + " pull next  ·  tap to go now";
+                col = pullResult > 0 ? ACCENT : WARN;
+                break;
+            }
             case WON:
-                if (cup && cupChampion == YOU) {
+                if (cup() && cupChampion == YOU) {
                     big = "CHAMPIONS!";
-                    cap = "final won in " + clock(pullSeconds) + "  ·  tap for a new cup";
+                    cap = "final won " + yourPulls + "-" + theirPulls + " in " + clock(matchSeconds)
+                            + "  ·  tap for a new cup";
                     if (Math.random() < dt * 20) {
                         fx.spawn((float) Math.random() * w, dp(4f), (float) (Math.random() - 0.5) * dp(60f),
                                 dp(30f), 2.5f, dp(3.5f), CONFETTI[(int) (Math.random() * CONFETTI.length)], true);
                     }
-                } else if (cup) {
+                } else if (cup()) {
                     int left8 = (int) Math.ceil(8 - (sessionSeconds - endedAt));
                     big = "THROUGH TO THE " + ROUND_NAMES[cupRound];
-                    cap = "next: " + TEAMS[opponentIndex()].name + " in " + Math.max(0, left8) + "  ·  or tap";
+                    cap = "won " + yourPulls + "-" + theirPulls + "  ·  next: " + TEAMS[opponentIndex()].name
+                            + " in " + Math.max(0, left8) + "  ·  or tap";
+                } else if (leagueMode()) {
+                    big = "MATCH WON  " + yourPulls + " - " + theirPulls;
+                    cap = leagueCaption();
                 } else {
-                    big = "YOU WON";
-                    cap = "held them off for " + clock(pullSeconds) + "  ·  tap to go again";
+                    big = "YOU WON  " + yourPulls + " - " + theirPulls;
+                    cap = "held them off for " + clock(matchSeconds) + "  ·  tap to go again";
                 }
                 col = ACCENT;
                 break;
             case LOST:
-                if (cup) {
-                    big = "KNOCKED OUT";
+                if (cup()) {
+                    big = "KNOCKED OUT  " + yourPulls + " - " + theirPulls;
                     cap = "out in the " + ROUND_NAMES[cupRound].toLowerCase(java.util.Locale.US)
                             + " to " + team.name + "  ·  tap for a new cup";
+                } else if (leagueMode()) {
+                    big = "MATCH LOST  " + yourPulls + " - " + theirPulls;
+                    cap = leagueCaption();
                 } else {
-                    big = "PULLED OVER";
-                    cap = "lasted " + clock(pullSeconds) + "  ·  tap to go again";
+                    big = "PULLED OVER  " + yourPulls + " - " + theirPulls;
+                    cap = "lasted " + clock(matchSeconds) + "  ·  tap to go again";
                 }
                 col = BAD;
                 break;
             default:
                 big = clock(pullSeconds);
-                if (watts < them && anchor > 0.8f) {
+                if (roundActive) {
+                    cap = "ANCHOR ROUND - DO NOT LET THE LINE GO";
+                    col = WARN;
+                } else if (comebackBoost > 0) {
+                    cap = "COMEBACK - EVERYTHING YOU HAVE, NOW";
+                    col = WARN;
+                } else if (yours < them && anchor > 0.8f) {
                     cap = "ANCHORED - THEY CAN BARELY MOVE YOU";
                     col = BLUE;
                 } else {
-                    cap = watts > them ? "WINNING - KEEP IT UP" : "LOSING GROUND - PULL";
-                    col = watts > them ? ACCENT : WARN;
+                    cap = yours > them ? "WINNING - KEEP IT UP" : "LOSING GROUND - PULL";
+                    col = yours > them ? ACCENT : WARN;
                 }
-                if (cup) {
+                cap = (yourPulls + theirPulls + 1) + counted(yourPulls + theirPulls + 1) + " PULL  ·  " + cap;
+                if (cup()) {
                     cap = ROUND_NAMES[cupRound] + "  ·  " + cap;
                 }
         }
@@ -631,16 +1058,47 @@ final class TugOfWarGame extends GameView {
         }
 
         float fy = h - dp(14f);
-        float col3 = w / 3f;
-        stat(c, col3 * 0.5f, fy, status == null ? "0" : String.valueOf(status.strokeRate), "SPM");
-        stat(c, col3 * 1.5f, fy, String.format(java.util.Locale.US, "%+d", Math.round(watts - them)),
+        float col4 = w / 4f;
+        stat(c, col4 * 0.5f, fy, status == null ? "0" : String.valueOf(status.strokeRate), "SPM");
+        stat(c, col4 * 1.5f, fy, String.format(java.util.Locale.US, "%+d", Math.round(yours - them)),
                 "MARGIN W");
-        if (cup) {
-            stat(c, col3 * 2.5f, fy, String.valueOf(Math.round(bests.get(CUP_KEY, 0))), "CUPS WON");
+        stat(c, col4 * 2.5f, fy, String.valueOf(Math.round(league.rating())),
+                "STRENGTH  ·  " + league.rank());
+        if (leagueMode()) {
+            stat(c, col4 * 3.5f, fy, (league.yourPlace() + 1) + counted(league.yourPlace() + 1),
+                    league.divisionName());
+        } else if (cup()) {
+            stat(c, col4 * 3.5f, fy, String.valueOf(Math.round(bests.get(CUP_KEY, 0))), "CUPS WON");
         } else {
-            stat(c, col3 * 2.5f, fy, bests.has("tug." + level) ? clock(bests.get("tug." + level, 0)) : "--",
+            stat(c, col4 * 3.5f, fy, bests.has("tug." + level) ? clock(bests.get("tug." + level, 0)) : "--",
                     "BEST HOLD");
         }
+        drawStrengthBar(c, w, fy - dp(44f));
+    }
+
+    /** "1st", "2nd", "3rd" - the suffix only, so it can be pasted onto a number. */
+    private static String counted(int n) {
+        switch (n) {
+            case 1:
+                return "st";
+            case 2:
+                return "nd";
+            case 3:
+                return "rd";
+            default:
+                return "th";
+        }
+    }
+
+    /** What the league has to say after a match: the season verdict, or the next fixture. */
+    private String leagueCaption() {
+        String msg = league.seasonMessage();
+        if (msg != null) {
+            return msg + "  ·  tap to start season " + league.season();
+        }
+        int leftS = (int) Math.ceil(8 - (sessionSeconds - endedAt));
+        return "you sit " + (league.yourPlace() + 1) + counted(league.yourPlace() + 1) + "  ·  next: "
+                + TEAMS[opponentIndex()].name + " in " + Math.max(0, leftS) + "  ·  or tap";
     }
 
     private static final int[] CONFETTI = {0xFF35D0BA, 0xFFF0B132, 0xFF6F8CFF, 0xFFF0655D, 0xFFFFFFFF};
@@ -710,6 +1168,10 @@ final class TugOfWarGame extends GameView {
             if (phase == Phase.WON || phase == Phase.LOST) {
                 endedAt = sessionSeconds;
                 fx.burst(phase == Phase.WON ? mid - dp(60f) : mid + dp(60f), ground, 50, dp(220f), 1.2f, dp(4f), 0xFF6E4A2B, true);
+            } else if (phase == Phase.REST) {
+                // Whoever lost that pull goes down in the mud.
+                fx.burst(pullResult > 0 ? mid - dp(60f) : mid + dp(60f), ground, 36, dp(190f), 1.1f,
+                        dp(4f), 0xFF6E4A2B, true);
             }
             lastPhase = phase;
         }
@@ -735,15 +1197,40 @@ final class TugOfWarGame extends GameView {
         c.drawPath(rope, paint);
         paint.setStyle(Paint.Style.FILL);
 
+        // Who is on the floor: the match loser stays down, but between pulls the side that lost that
+        // one picks itself up again before the next.
+        float yourFall = phase == Phase.LOST ? (float) Math.min(1, sinceEnd * 2) : 0f;
+        float theirFall = phase == Phase.WON ? (float) Math.min(1, sinceEnd * 2) : 0f;
+        if (phase == Phase.REST) {
+            float f = restSeconds < 2 ? (float) Math.min(1, restSeconds * 2)
+                    : (float) Math.max(0, 1 - (restSeconds - 2) * 0.8);
+            if (pullResult > 0) {
+                theirFall = f;
+            } else if (pullResult < 0) {
+                yourFall = f;
+            }
+        }
         for (int k = 0; k < 3; k++) {
             float yx = yourHands + dp(27f) + k * dp(78f);
             float tx = theirHands - dp(27f) - k * dp(78f);
-            float fall = phase == Phase.LOST ? (float) Math.min(1, sinceEnd * 2) : 0f;
             // The last of your three is the anchor: it braces when the rate is steady.
             float brace = k == 2 ? anchor : anchor * 0.4f;
-            drawPuller(c, yx, ground, 1, yourLean * (1 - fall) - fall * 0.9f, ACCENT, k, fall, HAT_HAIR, brace, k == 2);
-            fall = phase == Phase.WON ? (float) Math.min(1, sinceEnd * 2) : 0f;
-            drawPuller(c, tx, ground, -1, theirLean * (1 - fall) - fall * 0.9f, team.shirt, k + 3, fall, team.hat, 0f, false);
+            drawPuller(c, yx, ground, 1, yourLean * (1 - yourFall) - yourFall * 0.9f, ACCENT, k, yourFall,
+                    HAT_HAIR, brace, k == 2);
+            drawPuller(c, tx, ground, -1, theirLean * (1 - theirFall) - theirFall * 0.9f, team.shirt, k + 3,
+                    theirFall, team.hat, 0f, false);
+        }
+        if (taunt != null && tauntLife > 0f) {
+            drawTaunt(c, theirHands - dp(120f), ground - dp(150f), team);
+        }
+        if (roundBurstPending) {
+            roundBurstPending = false;
+            fx.burst(mx, ground - dp(12f), roundFlashGood ? 40 : 26, dp(200f), 1.0f, dp(4f),
+                    roundFlashGood ? 0xFF6F8CFF : 0xFF4A2F18, true);
+        }
+        if (comebackBurstPending) {
+            comebackBurstPending = false;
+            fx.burst(yourHands + dp(80f), ground - dp(40f), 44, dp(240f), 1.4f, dp(3.5f), 0xFFF0B132, true);
         }
         // The anchor digging in: one puff of dirt when it first locks.
         if (anchor >= 1f && !anchorBurstDone) {
@@ -790,6 +1277,44 @@ final class TugOfWarGame extends GameView {
             }
         }
         fx.step(dt, dp(260f));
+    }
+
+    /**
+     * The rival's speech bubble. It pops in, sits over their crew and fades, and it is the one
+     * thing on screen that is aimed at the rower rather than at the rope.
+     */
+    private void drawTaunt(Canvas c, float xIn, float y, Team team) {
+        float x = xIn + (tauntSeed % 3 - 1) * dp(20f);
+        float f = Math.min(1f, tauntLife / 0.35f);
+        float pop = Math.min(1f, (3.8f - tauntLife) / 0.18f);
+        dimPaint.setTextSize(dp(15f));
+        dimPaint.setFakeBoldText(true);
+        float tw = dimPaint.measureText(taunt);
+        dimPaint.setFakeBoldText(false);
+        float bw = tw + dp(28f);
+        float bh = dp(34f);
+        float scale = 0.7f + 0.3f * pop;
+        int a = (int) (235 * f);
+        c.save();
+        c.scale(scale, scale, x, y + bh);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((a << 24) | 0x101826);
+        tmp.set(x - bw / 2f, y, x + bw / 2f, y + bh);
+        c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+        rope.rewind();
+        rope.moveTo(x - dp(9f), y + bh - dp(2f));
+        rope.lineTo(x + dp(9f), y + bh - dp(2f));
+        rope.lineTo(x - dp(3f), y + bh + dp(13f));
+        rope.close();
+        c.drawPath(rope, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor((a << 24) | (team.shirt & 0x00FFFFFF));
+        c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        bold(c, taunt, x, y + dp(23f), 15f, ((int) (255 * f) << 24) | (TEXT & 0x00FFFFFF),
+                Paint.Align.CENTER);
+        c.restore();
     }
 
     private void addSplat(float x, float y, float r) {
@@ -922,20 +1447,211 @@ final class TugOfWarGame extends GameView {
         label(c, sub, bx, y + 24 * s, 8.5f, FAINT, Paint.Align.LEFT);
     }
 
+    /* ---------- best of three, anchor rounds, comebacks, the table ---------- */
+
+    /** The match score above the rope: their pulls to the left, yours to the right. */
+    private void drawScore(Canvas c, float w, float y, Team team) {
+        float cx = w / 2f;
+        label(c, "BEST OF THREE", cx, y - dp(16f), 8.5f, FAINT, Paint.Align.CENTER);
+        for (int i = 0; i < PULLS_TO_WIN; i++) {
+            drawPip(c, cx + dp(42f) + i * dp(24f), y, yourPulls > i, ACCENT);
+            drawPip(c, cx - dp(42f) - i * dp(24f), y, theirPulls > i, team.shirt);
+        }
+        bold(c, yourPulls + " - " + theirPulls, cx, y + dp(7f), 20f, TEXT, Paint.Align.CENTER);
+    }
+
+    private void drawPip(Canvas c, float x, float y, boolean won, int colour) {
+        paint.setColor(won ? colour : 0xFF2A3648);
+        paint.setStyle(won ? Paint.Style.FILL : Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        c.drawCircle(x, y, dp(8f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /**
+     * The anchor round: a countdown, how much slack is left before the line breaks, and the hold
+     * and break lines drawn on the rope itself so the target is where the marker is.
+     */
+    private void drawAnchorRound(Canvas c, float w, float y, float mid, float travel, float ropeY) {
+        float cx = w / 2f;
+        if (roundActive) {
+            double leftS = Math.max(0, roundEndsAt - pullSeconds);
+            float gone = (float) (1.0 - leftS / ROUND_SECONDS);
+            float margin = (float) Math.max(0, Math.min(1,
+                    (position - (roundLine - ROUND_SLACK)) / ROUND_SLACK));
+            int col = margin < 0.33f ? BAD : margin < 0.66f ? WARN : BLUE;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xCC0E1420);
+            tmp.set(cx - dp(215f), y - dp(28f), cx + dp(215f), y + dp(40f));
+            c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+            // Countdown ring on the left of the panel.
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(4f));
+            paint.setColor(0xFF2A3648);
+            tmp.set(cx - dp(202f), y - dp(20f), cx - dp(162f), y + dp(20f));
+            c.drawArc(tmp, -90f, 360f, false, paint);
+            paint.setColor(col);
+            c.drawArc(tmp, -90f, 360f * Math.max(0f, 1f - gone), false, paint);
+            paint.setStyle(Paint.Style.FILL);
+            bold(c, String.valueOf((int) Math.ceil(leftS)), cx - dp(182f), y + dp(7f), 18f, col,
+                    Paint.Align.CENTER);
+            bold(c, "ANCHOR ROUND " + roundsThisMatch + " - HOLD THE LINE", cx + dp(24f), y - dp(6f),
+                    16f, col, Paint.Align.CENTER);
+            float bx = cx - dp(126f);
+            float bw = dp(300f);
+            paint.setColor(0x55000000);
+            c.drawRect(bx, y + dp(6f), bx + bw, y + dp(16f), paint);
+            paint.setColor(col);
+            c.drawRect(bx, y + dp(6f), bx + bw * margin, y + dp(16f), paint);
+            label(c, margin < 0.33f ? "THE LINE IS GOING"
+                            : anchor < 0.5f ? "GET ANCHORED - HOLD A STEADY RATE"
+                            : "slack left before the line breaks",
+                    bx, y + dp(30f), 8.5f, col, Paint.Align.LEFT);
+            // The two lines on the rope: where you were pegged, and where it breaks.
+            float hx = mid + travel * (float) roundLine;
+            float kx = mid + travel * (float) (roundLine - ROUND_SLACK);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2f));
+            paint.setColor(BLUE);
+            c.drawLine(hx, ropeY - dp(46f), hx, ropeY + dp(26f), paint);
+            paint.setColor(BAD);
+            c.drawLine(kx, ropeY - dp(38f), kx, ropeY + dp(22f), paint);
+            paint.setStyle(Paint.Style.FILL);
+            label(c, "HOLD", hx, ropeY - dp(50f), 8f, BLUE, Paint.Align.CENTER);
+            label(c, "BREAK", kx, ropeY - dp(42f), 8f, BAD, Paint.Align.CENTER);
+        } else if (roundFlash > 0f) {
+            int a = (int) (255 * Math.min(1f, roundFlash));
+            bold(c, roundFlashGood ? "LINE HELD - THEY'RE BLOWING" : "THE LINE WENT", cx, y, 26f,
+                    (a << 24) | ((roundFlashGood ? ACCENT : BAD) & 0x00FFFFFF), Paint.Align.CENTER);
+        } else if (phase == Phase.PULLING) {
+            double until = nextRoundAt - pullSeconds;
+            if (until > 0 && until < 8) {
+                bold(c, "ANCHOR ROUND IN " + (int) Math.ceil(until), cx, y, 16f, WARN, Paint.Align.CENTER);
+            }
+        }
+    }
+
+    /** The comeback meter, which only exists while you are far enough behind to need one. */
+    private void drawComebackMeter(Canvas c, float w, float y, Team team) {
+        float cx = w / 2f;
+        if (comebackBoost > 0f) {
+            float f = Math.min(1f, comebackBoost / 8f);
+            Fx.glow(c, cx, y, dp(130f), ((int) (110 * f) << 24) | (WARN & 0x00FFFFFF));
+            bold(c, "COMEBACK!", cx, y + dp(8f), 32f, WARN, Paint.Align.CENTER);
+            return;
+        }
+        if (comebackFlash > 0f) {
+            int a = (int) (255 * Math.min(1f, comebackFlash));
+            bold(c, "THAT SHUT THEM UP", cx, y, 20f, (a << 24) | (ACCENT & 0x00FFFFFF), Paint.Align.CENTER);
+            return;
+        }
+        if (phase != Phase.PULLING || comeback <= 0.01f) {
+            return;
+        }
+        float bw = dp(300f);
+        float bx = cx - bw / 2f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x66000000);
+        c.drawRect(bx, y, bx + bw, y + dp(14f), paint);
+        paint.setColor(WARN);
+        c.drawRect(bx, y, bx + bw * comeback, y + dp(14f), paint);
+        label(c, tauntedThisPull ? "COMEBACK - WIPE THAT GRIN OFF THEM"
+                        : "COMEBACK - OUT-PULL THEM FROM BACK HERE",
+                cx, y - dp(6f), 9.5f, WARN, Paint.Align.CENTER);
+        label(c, "fills while your watts beat theirs  ·  pays 8 s at +35%", cx, y + dp(26f), 8.5f,
+                FAINT, Paint.Align.CENTER);
+    }
+
+    /** Rank progress along the bottom: what the strength rating has bought and what is next. */
+    private void drawStrengthBar(Canvas c, float w, float y) {
+        float bw = dp(260f);
+        float bx = w / 2f - bw / 2f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x55000000);
+        c.drawRect(bx, y, bx + bw, y + dp(7f), paint);
+        paint.setColor(BLUE);
+        c.drawRect(bx, y, bx + bw * league.rankProgress(), y + dp(7f), paint);
+        String next = league.nextRank();
+        label(c, next == null ? "TITAN  ·  nothing above this"
+                        : league.rank() + "  ·  " + Math.round(league.ratingToNext()) + " to " + next
+                        + "  ·  " + league.anchorsHeld() + " lines held",
+                w / 2f, y - dp(5f), 8.5f, DIM, Paint.Align.CENTER);
+    }
+
+    /** The division table: four sides, points, and the up and down places marked. */
+    private void drawLeagueTable(Canvas c, float x, float y, float bw, float bh) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xD90E1420);
+        tmp.set(x, y, x + bw, y + bh);
+        c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+        float pad = dp(12f);
+        float head = y + pad + dp(14f);
+        bold(c, "SEASON " + league.season() + "  ·  " + league.divisionName(), x + pad, head, 14f, WARN,
+                Paint.Align.LEFT);
+        String msg = league.seasonMessage();
+        label(c, msg != null ? msg : "three points a win  ·  top goes up, bottom goes down",
+                x + bw - pad, head, 9f, msg != null ? ACCENT : FAINT, Paint.Align.RIGHT);
+        float top = y + pad + dp(34f);
+        float rowH = (bh - (top - y) - pad) / 4f;
+        float colP = x + bw - pad - dp(20f);
+        float colD = colP - dp(52f);
+        float colPl = colD - dp(52f);
+        label(c, "P", colPl, top - dp(6f), 8f, FAINT, Paint.Align.CENTER);
+        label(c, "+/-", colD, top - dp(6f), 8f, FAINT, Paint.Align.CENTER);
+        label(c, "PTS", colP, top - dp(6f), 8f, FAINT, Paint.Align.CENTER);
+        int[] order = league.standings();
+        int todayTeam = league.opponentTeam();
+        for (int i = 0; i < 4; i++) {
+            int row = order[i];
+            float ry = top + (i + 0.5f) * rowH;
+            boolean you = row == 0;
+            int colour = you ? ACCENT : TEAMS[league.rowTeam(row)].shirt;
+            paint.setStyle(Paint.Style.FILL);
+            if (you) {
+                paint.setColor(0x2235D0BA);
+                tmp.set(x + pad * 0.5f, ry - rowH * 0.42f, x + bw - pad * 0.5f, ry + rowH * 0.42f);
+                c.drawRoundRect(tmp, dp(5f), dp(5f), paint);
+            }
+            if (league.promotionPlace(row) || league.relegationPlace(row)) {
+                paint.setColor(league.promotionPlace(row) ? ACCENT : BAD);
+                c.drawRect(x + pad * 0.5f, ry - rowH * 0.42f, x + pad * 0.5f + dp(4f),
+                        ry + rowH * 0.42f, paint);
+            }
+            label(c, String.valueOf(i + 1), x + pad + dp(14f), ry + dp(4f), 10f, FAINT, Paint.Align.CENTER);
+            paint.setColor(colour);
+            c.drawCircle(x + pad + dp(32f), ry, dp(4f), paint);
+            String name = league.rowName(row);
+            if (!you && league.rowTeam(row) == todayTeam) {
+                name = name + "  ·  TODAY";
+            }
+            if (you) {
+                bold(c, name, x + pad + dp(44f), ry + dp(4f), 12f, colour, Paint.Align.LEFT);
+            } else {
+                label(c, name, x + pad + dp(44f), ry + dp(4f), 12f, colour, Paint.Align.LEFT);
+            }
+            label(c, String.valueOf(league.played(row)), colPl, ry + dp(4f), 11f, DIM, Paint.Align.CENTER);
+            label(c, String.format(java.util.Locale.US, "%+d", league.diff(row)), colD, ry + dp(4f), 11f,
+                    DIM, Paint.Align.CENTER);
+            bold(c, String.valueOf(league.points(row)), colP, ry + dp(4f), 13f, TEXT, Paint.Align.CENTER);
+        }
+    }
+
     private void drawModeButton(Canvas c, float w) {
         float bw = dp(190f);
-        float bh = dp(40f);
+        float bh = dp(46f);
         modeButton.set(w - bw - dp(12f), dp(12f), w - dp(12f), dp(12f) + bh);
+        int col = cup() ? WARN : leagueMode() ? BLUE : ACCENT;
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xCC0E1420);
         c.drawRoundRect(modeButton, dp(8f), dp(8f), paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.5f));
-        paint.setColor(cup ? WARN : ACCENT);
+        paint.setColor(col);
         c.drawRoundRect(modeButton, dp(8f), dp(8f), paint);
         paint.setStyle(Paint.Style.FILL);
-        bold(c, cup ? "SINGLE MATCH" : "TOURNAMENT", modeButton.centerX(), modeButton.centerY() + dp(5f), 13f,
-                cup ? WARN : ACCENT, Paint.Align.CENTER);
+        bold(c, MODE_NAMES[mode], modeButton.centerX(), modeButton.centerY(), 13f, col, Paint.Align.CENTER);
+        label(c, MODE_NEXT[mode], modeButton.centerX(), modeButton.centerY() + dp(14f), 8.5f, FAINT,
+                Paint.Align.CENTER);
     }
 
     /** Eight teams, three rounds: quarter-finals, semis, final, champion. */

@@ -47,17 +47,17 @@ final class GhostRaceGame extends PaceBoatGame {
     private static final String[] RIVAL_TAGS = {"SHADOWS  ·  ON YOUR STERN", "FLYERS  ·  OUT HARD",
             "CLOSERS  ·  SAVING IT"};
     private static final int[] RIVAL_COLORS = {0xFFB48CFF, 0xFFF0655D, 0xFFF5C518};
-    /** Lines per rival, indexed by the SAY_* events in PaceBoatGame. */
+    /** Lines per rival, indexed by the SAY_* events in PaceBoatGame (the last one is SAY_MOVE). */
     private static final String[][] RIVAL_LINES = {
             {"WE'LL BE RIGHT HERE.", "TOLD YOU. RIGHT HERE.", "NOT FOR LONG.", "YOU CAN'T SHAKE A SHADOW.",
                     "STILL ON YOUR STERN.", "HEY - THAT WAS OUR WATER!", "WE MATCH WHATEVER YOU'VE GOT.",
-                    "CLOSE. NOT CLOSE ENOUGH.", "GOOD ROW. WE'LL BE BACK."},
+                    "CLOSE. NOT CLOSE ENOUGH.", "GOOD ROW. WE'LL BE BACK.", "TEN HARD - NOW!"},
             {"CATCH US IF YOU CAN!", "SEE YA!", "WE'RE... JUST... PACING.", "WHO MOVED THE FINISH?!",
                     "LOOK AT THAT SPLIT!", "OI! OUR LANE!", "IS THIS A RACE OR A PICNIC?",
-                    "FIRST OFF THE LINE, FIRST OVER IT.", "WENT OUT TOO HARD... AGAIN."},
+                    "FIRST OFF THE LINE, FIRST OVER IT.", "WENT OUT TOO HARD... AGAIN.", "WE'RE GOING NOW!"},
             {"WAKE US AT 250.", "RIGHT ON SCHEDULE.", "ENJOY IT WHILE IT LASTS.", "HERE WE COME!",
                     "PATIENCE.", "TAKE IT. WE DON'T NEED IT.", "TICK. TOCK.",
-                    "ALWAYS SAVE SOMETHING.", "YOU LEFT US NOTHING. RESPECT."},
+                    "ALWAYS SAVE SOMETHING.", "YOU LEFT US NOTHING. RESPECT.", "THAT'S THE ONE. WIND IT UP."},
     };
     /** Rival stroke rates against your typical: the flyers rate high, the closers low until the kick. */
     private static final float[] RIVAL_RATE = {0f, 3f, -1f};
@@ -74,6 +74,8 @@ final class GhostRaceGame extends PaceBoatGame {
     private final String[] tag = new String[MAX_CREWS];
     private final int[] color = new int[MAX_CREWS];
     private final int[] rival = new int[MAX_CREWS];
+    /** When each recording crosses the line once its handicap is allowed for. */
+    private final double[] ghostAdjusted = new double[MAX_CREWS];
 
     private final StringBuilder recording = new StringBuilder();
     private int recordedSeconds = -1;
@@ -256,6 +258,56 @@ final class GhostRaceGame extends PaceBoatGame {
             rivalMeters[i] = 0;
             rivalSpeed[i] = profile.typicalSpeed();
         }
+        solveGhostFinishes();
+    }
+
+    /**
+     * With a head start of H a recording only has to row {@code raceMeters - H} of its own recorded
+     * metres, so it crosses earlier. Re-solved whenever the head start changes - including when the
+     * chip turns it off mid-race - or the HUD and the result would quote a time no boat rowed.
+     */
+    @Override
+    protected void onHandicapChanged() {
+        solveGhostFinishes();
+    }
+
+    private void solveGhostFinishes() {
+        for (int i = 0; i < crews; i++) {
+            ghostAdjusted[i] = kind[i] == KIND_GHOST && ghost[i] != null
+                    ? ghostTimeAt(ghost[i], ghostFinish[i], raceMeters - handicap()) : 0;
+        }
+    }
+
+    /** When a recording had rowed {@code metres} of its own, interpolated between its samples. */
+    private double ghostTimeAt(float[] g, double recordedFinish, double metres) {
+        if (metres <= 0) {
+            return 0;
+        }
+        for (int i = 1; i < g.length; i++) {
+            if (g[i] >= metres) {
+                float span = g[i] - g[i - 1];
+                return (i - 1) + (span > 0.01f ? (metres - g[i - 1]) / span : 0);
+            }
+        }
+        return recordedFinish;
+    }
+
+    /* ---------- the handicap, the series and the crew are kept per opponent ---------- */
+
+    @Override
+    protected String handicapKey() {
+        return "race.hcp." + opponent.label + "." + raceMeters;
+    }
+
+    @Override
+    protected String seriesKey() {
+        return "race.series." + opponent.label;
+    }
+
+    /** Only the living rivals can be recruited - a recording cannot change boats. */
+    @Override
+    protected boolean crewRecruitable(int i) {
+        return kind[i] == KIND_RIVAL;
     }
 
     /* ---------- the crews ---------- */
@@ -338,7 +390,7 @@ final class GhostRaceGame extends PaceBoatGame {
 
     @Override
     protected double crewFinishTime(int i) {
-        return kind[i] == KIND_GHOST ? ghostFinish[i] : super.crewFinishTime(i);
+        return kind[i] == KIND_GHOST ? ghostAdjusted[i] : super.crewFinishTime(i);
     }
 
     @Override
@@ -356,7 +408,8 @@ final class GhostRaceGame extends PaceBoatGame {
         }
         int lead = leadingCrew();
         if (kind[lead] == KIND_GHOST) {
-            return PersonalBests.formatTime((float) ghostFinish[lead]);
+            // What the recording will cross in today, which is earlier when it has a head start.
+            return PersonalBests.formatTime((float) (ghostAdjusted[lead] > 0 ? ghostAdjusted[lead] : ghostFinish[lead]));
         }
         return pace(crewSpeed(lead));
     }

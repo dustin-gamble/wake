@@ -9,7 +9,9 @@ import android.view.View;
 
 /**
  * Drawn over every SHUFFLE game: the 3-2-1 card naming the next game before a switch, the banner
- * announcing the one just dealt, and the "+points" that float up from each scored stroke.
+ * announcing the one just dealt, and the "+points" that float up from each scored stroke. It also
+ * carries the round furniture - the wildcard badge this game was dealt, the boss and its health bar
+ * at the end of a round, and the flash for a combo that survived a switch.
  *
  * <p>Never takes a touch - it is not clickable, so taps fall through to the game underneath.
  * Draws nothing and schedules no frames when there is nothing to show.
@@ -53,6 +55,34 @@ final class ShuffleOverlayView extends View {
     private String announceSub = "";
     private float announceAge = 99f;
     private long lastFrameMs;
+
+    /* The wildcard this game was dealt with: a badge that stays for the whole game. */
+    static final int WILD_NONE = 0;
+    static final int WILD_DOUBLE = 1;
+    static final int WILD_RATE_CAP = 2;
+    static final int WILD_NO_REST = 3;
+    private int wildKind = WILD_NONE;
+    private String wildName = "";
+    private String wildDetail = "";
+    private float wildAge = 99f;
+
+    /* The boss round: the last game of a round, worth double, with a health bar to empty. */
+    private boolean boss;
+    private String bossTitle = "";
+    private int bossHp;
+    private int bossMaxHp = 1;
+    private float bossShown = 1f;
+    private float bossHitAge = 99f;
+    private float bossDownAge = 99f;
+    private String bossHpText = "";
+    private int bossHpKey = Integer.MIN_VALUE;
+    private String bossDownText = "";
+    private String bossHeading = "";
+
+    /* The combo carried across a switch. */
+    private float carryAge = 99f;
+    private String carryText = "";
+    private String carryMultText = "";
 
     ShuffleOverlayView(Context context, Source source) {
         super(context);
@@ -100,6 +130,51 @@ final class ShuffleOverlayView extends View {
         postInvalidateOnAnimation();
     }
 
+    /** The wildcard dealt with this game, or {@link #WILD_NONE} for a clean one. */
+    void setWildcard(int kind, String name, String detail) {
+        wildKind = kind;
+        wildName = name == null ? "" : name;
+        wildDetail = detail == null ? "" : detail;
+        wildAge = 0f;
+        wake();
+    }
+
+    /** Starts (or clears) the boss round. */
+    void setBoss(boolean on, String title, int maxHp) {
+        boss = on;
+        bossTitle = title == null ? "" : title;
+        bossMaxHp = Math.max(1, maxHp);
+        bossHp = bossMaxHp;
+        bossShown = 1f;
+        bossHitAge = 99f;
+        bossDownAge = 99f;
+        bossHpKey = Integer.MIN_VALUE;
+        bossHeading = "BOSS ROUND  \u00b7  " + bossTitle;
+        wake();
+    }
+
+    /** The boss takes the points just scored. */
+    void bossDamage(int hp) {
+        bossHp = Math.max(0, hp);
+        bossHitAge = 0f;
+        wake();
+    }
+
+    void bossDown(int bonus) {
+        bossHp = 0;
+        bossDownAge = 0f;
+        bossDownText = "BOSS DOWN   +" + bonus;
+        wake();
+    }
+
+    /** A combo that survived a switch, and what it paid. */
+    void carry(int bonus, int multiplier) {
+        carryAge = 0f;
+        carryText = "COMBO CARRIED   +" + bonus;
+        carryMultText = "x" + multiplier + " STILL RUNNING";
+        wake();
+    }
+
     private float dp(float v) {
         return v * getResources().getDisplayMetrics().density;
     }
@@ -117,6 +192,25 @@ final class ShuffleOverlayView extends View {
         float dt = lastFrameMs > 0 && now - lastFrameMs < 250 ? Math.min(0.1f, (now - lastFrameMs) / 1000f) : 0f;
         lastFrameMs = now;
         boolean again = false;
+        wildAge += dt;
+        bossHitAge += dt;
+        bossDownAge += dt;
+        carryAge += dt;
+
+        // The wildcard badge and the boss sit at the top of the game area, clear of the vitals
+        // strip above it. Both are drawn under the countdown card, which takes the middle.
+        if (wildKind != WILD_NONE) {
+            drawWildcard(c, w);
+            again = true;
+        }
+        if (boss || bossDownAge < 3f) {
+            drawBoss(c, w, dt);
+            again = true;
+        }
+        if (carryAge < 2.2f) {
+            drawCarry(c, w, h);
+            again = true;
+        }
 
         // Score pops rise from just under the vitals strip and fade.
         for (int i = 0; i < POPS; i++) {
@@ -215,5 +309,141 @@ final class ShuffleOverlayView extends View {
         } else {
             lastFrameMs = 0;
         }
+    }
+
+    private int wildColour() {
+        switch (wildKind) {
+            case WILD_DOUBLE:
+                return warn;
+            case WILD_RATE_CAP:
+                return Color.parseColor("#6F8CFF");
+            case WILD_NO_REST:
+                return Color.parseColor("#F0655D");
+            default:
+                return purple;
+        }
+    }
+
+    /** The wildcard badge, top left: what this game is being played under. */
+    private void drawWildcard(Canvas c, float w) {
+        int colour = wildColour();
+        // It arrives with a flick and then breathes, so it does not read as a static label.
+        float in = Math.min(1f, wildAge / 0.35f);
+        float pop = 1f + 0.25f * Math.max(0f, 1f - wildAge * 3f);
+        float breathe = 0.6f + 0.4f * (float) Math.sin(wildAge * 3.0);
+        float bw = dp(250f) * pop;
+        float bh = dp(50f);
+        float left = dp(14f) - (1f - in) * dp(40f);
+        rect.set(left, dp(10f), left + bw, dp(10f) + bh);
+        card.setAlpha((int) (230 * in));
+        c.drawRoundRect(rect, dp(10f), dp(10f), card);
+        ring.setStrokeWidth(dp(2f));
+        ring.setColor(colour);
+        ring.setAlpha((int) (255 * in * (0.45f + 0.55f * breathe)));
+        c.drawRoundRect(rect, dp(10f), dp(10f), ring);
+        small.setTextAlign(Paint.Align.LEFT);
+        small.setColor(dim);
+        small.setAlpha((int) (255 * in));
+        small.setTextSize(dp(8.5f));
+        c.drawText("WILDCARD", rect.left + dp(12f), rect.top + dp(14f), small);
+        small.setColor(colour);
+        small.setTextSize(dp(13f));
+        c.drawText(wildName, rect.left + dp(12f), rect.top + dp(29f), small);
+        small.setColor(dim);
+        small.setTextSize(dp(9f));
+        c.drawText(wildDetail, rect.left + dp(12f), rect.top + dp(41f), small);
+        small.setTextAlign(Paint.Align.CENTER);
+    }
+
+    /**
+     * The boss: a health bar across the top that only empties when points land, and a face that
+     * flinches on every hit and tumbles away when it is beaten.
+     */
+    private void drawBoss(Canvas c, float w, float dt) {
+        float wantShare = bossMaxHp > 0 ? bossHp / (float) bossMaxHp : 0f;
+        bossShown += (wantShare - bossShown) * Math.min(1f, dt * 5f);
+        boolean down = bossDownAge < 3f;
+        // Clamped: on a narrow layout w - 300dp goes negative, which inverts the bar's rect and
+        // draws nothing at all.
+        float bw = Math.max(dp(140f), Math.min(w - dp(300f), dp(460f)));
+        float cx = w / 2f;
+        float top = dp(14f);
+        // The whole boss shakes for a moment after a hit.
+        float shake = bossHitAge < 0.3f ? (1f - bossHitAge / 0.3f) * dp(5f) : 0f;
+        float jitter = shake * (float) Math.sin(bossHitAge * 90.0);
+
+        // Head, bobbing; it falls off the top when beaten.
+        float headR = dp(22f);
+        float bob = (float) Math.sin(System.currentTimeMillis() / 420.0) * dp(3f);
+        float fall = down ? bossDownAge * bossDownAge * dp(220f) : 0f;
+        float hx = cx + jitter;
+        float hy = top + headR + bob - fall;
+        int flesh = bossHitAge < 0.18f ? 0xFFFFFFFF : 0xFFF0655D;
+        card.setAlpha(255);
+        popPaint.setColor(flesh);
+        popPaint.setAlpha(down ? (int) (255 * Math.max(0f, 1f - bossDownAge / 2.5f)) : 255);
+        c.save();
+        if (down) {
+            c.rotate(bossDownAge * 240f, hx, hy);
+        }
+        c.drawCircle(hx, hy, headR, popPaint);
+        popPaint.setColor(0xFF120A0A);
+        c.drawCircle(hx - headR * 0.35f, hy - headR * 0.15f, headR * 0.13f, popPaint);
+        c.drawCircle(hx + headR * 0.35f, hy - headR * 0.15f, headR * 0.13f, popPaint);
+        // The scowl straightens out as its health goes, then turns over when it is down.
+        float mouth = down ? -headR * 0.3f : headR * (0.30f - 0.22f * (1f - bossShown));
+        ring.setColor(0xFF120A0A);
+        ring.setAlpha(255);
+        ring.setStrokeWidth(dp(3f));
+        rect.set(hx - headR * 0.45f, hy + headR * 0.15f - mouth, hx + headR * 0.45f, hy + headR * 0.15f + mouth);
+        c.drawArc(rect, down ? 180f : 0f, 180f, false, ring);
+        c.restore();
+
+        // Health bar.
+        float barTop = top + headR * 2f + dp(8f);
+        rect.set(cx - bw / 2f + jitter, barTop, cx + bw / 2f + jitter, barTop + dp(16f));
+        card.setAlpha(230);
+        c.drawRoundRect(rect, dp(6f), dp(6f), card);
+        float inner = (bw - dp(6f)) * Math.max(0f, Math.min(1f, bossShown));
+        popPaint.setColor(bossShown > 0.5f ? 0xFFF0655D : bossShown > 0.2f ? warn : good);
+        popPaint.setAlpha(255);
+        c.drawRect(rect.left + dp(3f), barTop + dp(3f), rect.left + dp(3f) + inner, barTop + dp(13f), popPaint);
+
+        int hpKey = bossHp;
+        if (hpKey != bossHpKey) {
+            bossHpKey = hpKey;
+            bossHpText = bossHp + " / " + bossMaxHp;
+        }
+        small.setColor(warn);
+        small.setAlpha(255);
+        small.setTextSize(dp(11f));
+        // bossHeading is built once in setBoss: this runs every frame for the whole boss round.
+        c.drawText(bossHeading, cx, barTop - dp(4f), small);
+        small.setColor(text);
+        small.setTextSize(dp(10f));
+        c.drawText(bossHpText, cx, barTop + dp(28f), small);
+
+        if (down) {
+            float t = Math.min(1f, bossDownAge / 0.4f);
+            big.setColor(good);
+            big.setAlpha((int) (255 * Math.max(0f, 1f - bossDownAge / 3f)));
+            big.setTextSize(dp(34f) * (0.7f + 0.3f * t));
+            c.drawText(bossDownText, cx, barTop + dp(76f), big);
+        }
+    }
+
+    /** The combo that survived a switch, floating up from the middle. */
+    private void drawCarry(Canvas c, float w, float h) {
+        float t = Math.min(1f, carryAge / 2.2f);
+        float y = h * 0.44f - t * dp(60f);
+        int alpha = (int) (255 * (1f - t * t));
+        big.setColor(warn);
+        big.setAlpha(alpha);
+        big.setTextSize(dp(30f) * (1f + 0.2f * Math.max(0f, 1f - carryAge * 4f)));
+        c.drawText(carryText, w / 2f, y, big);
+        small.setColor(text);
+        small.setAlpha(alpha);
+        small.setTextSize(dp(12f));
+        c.drawText(carryMultText, w / 2f, y + dp(22f), small);
     }
 }

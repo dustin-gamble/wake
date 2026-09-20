@@ -61,8 +61,24 @@ class CoastFlightGame extends GameView {
     /** Records: the best stars summed over every postcard stop, and the most ridge lift in a session. */
     static final String POSTCARDS_KEY = "coast.postcards";
     static final String LIFT_KEY = "coast.lift";
+    /** Fastest time flown on each leg of the route, "index:seconds,...". Not a record itself. */
+    static final String LEGTIMES_KEY = "flight.legs";
+    /** The passport book: "slug:stars:yyyymmdd,...", one entry per landmark reached. Not a record. */
+    static final String PASSPORT_KEY = "flight.passport";
+    /** Whether migration mode is armed, remembered between flights. Not a record. */
+    private static final String MIGRATE_KEY = "flight.migrate";
+    /** Records: legs finished in one flight, metres held in the leader's draft, fronts pushed
+     * through, landmarks stamped in the passport, and the stars on those stamps. */
+    static final String LEGS_KEY = "coast.legs";
+    static final String MIGRATE_RECORD_KEY = "coast.migrate";
+    static final String FRONTS_KEY = "coast.fronts";
+    static final String STAMPS_KEY = "coast.stamps";
+    static final String PHOTOS_KEY = "coast.photos";
     /** A ghost is at most an hour of per-second samples; anything larger is refused, not trimmed. */
     private static final int MAX_GHOST_CHARS = 120000;
+    /** 46 landmarks; a stamp is ~30 characters. Anything larger is not this page's data. */
+    private static final int MAX_PASSPORT_CHARS = 4000;
+    private static final int MAX_LEGTIMES_CHARS = 2000;
     /** ~12Hz. The page eases between samples, so pushing every frame would only burn CPU. */
     private static final long PUSH_INTERVAL_MS = 80;
     private static final int MAX_CONSOLE_REPORTS = 12;
@@ -256,9 +272,13 @@ class CoastFlightGame extends GameView {
         // `t` already carries the 15-second pause rule. Holding a value flat is the one mistake
         // this project keeps making.
         // `p` is the rower's typical power: level flight is set from it, not from a fixed 60 W.
+        // `q` is their typical boat speed and `h` their high power, so the migration leader's pace
+        // and the weather front's "pushed through" threshold are this rower's numbers, not guesses.
         String js = String.format(Locale.US,
-                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d,p:%.0f,d:%.2f});",
-                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes, profile.typicalWatts(), drive);
+                "window.wakeFeed&&window.wakeFeed({w:%d,r:%d,s:%.3f,t:%.1f,m:%.0f,k:%d,p:%.0f,d:%.2f,"
+                        + "q:%.2f,h:%.0f});",
+                watts, rate, boat.value(), activeSeconds, sessionMeters, strokes, profile.typicalWatts(),
+                drive, profile.typicalSpeed(), profile.highWatts());
         web.evaluateJavascript(js, null);
     }
 
@@ -376,6 +396,127 @@ class CoastFlightGame extends GameView {
                 flight.bests.recordHighest(POSTCARDS_KEY, total);
                 return true;
             }
+        }
+
+        /* ---- legs, the passport, migration and weather fronts (3.23.0) ---- */
+
+        /** Fastest time on each leg so far, "index:seconds,...", or empty. */
+        @JavascriptInterface
+        public String legTimes() {
+            String s = flight.bests.getString(LEGTIMES_KEY);
+            return s == null ? "" : s;
+        }
+
+        /**
+         * The page's whole leg-time table, rewritten. The page only ever lowers a time, so the
+         * comparison lives there; this checks the shape and refuses anything else.
+         */
+        @JavascriptInterface
+        public void saveLegTimes(String table) {
+            if (isShaped(table, MAX_LEGTIMES_CHARS)) {
+                flight.bests.putString(LEGTIMES_KEY, table);
+            }
+        }
+
+        /** Legs of the route finished in this one flight. */
+        @JavascriptInterface
+        public boolean recordLegs(int legs) {
+            if (legs < 1 || legs > 500) {
+                return false;
+            }
+            return flight.bests.recordHighest(LEGS_KEY, legs);
+        }
+
+        /** The passport book, "slug:stars:yyyymmdd,...", or empty. */
+        @JavascriptInterface
+        public String passport() {
+            String s = flight.bests.getString(PASSPORT_KEY);
+            return s == null ? "" : s;
+        }
+
+        /**
+         * A stamp was earned, so the page hands back the whole book. Stored as given, and the two
+         * records it implies - how many landmarks carry a stamp, and the stars on them - are taken
+         * from it here so they cannot drift from the book itself.
+         *
+         * @return true when this is the most landmarks ever stamped
+         */
+        @JavascriptInterface
+        public boolean savePassport(String book) {
+            if (!isShaped(book, MAX_PASSPORT_CHARS)) {
+                return false;
+            }
+            int stamps = 0;
+            int stars = 0;
+            for (String part : book.split(",")) {
+                String[] bits = part.split(":");
+                if (bits.length < 2 || bits[0].isEmpty()) {
+                    continue;
+                }
+                stamps++;
+                try {
+                    int s = Integer.parseInt(bits[1]);
+                    if (s > 0 && s <= 3) {
+                        stars += s;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // a damaged entry still counts as a stamp; its stars simply do not
+                }
+            }
+            synchronized (flight.bests) {
+                flight.bests.putString(PASSPORT_KEY, book);
+                flight.bests.recordHighest(PHOTOS_KEY, stars);
+                return flight.bests.recordHighest(STAMPS_KEY, stamps);
+            }
+        }
+
+        /** Metres held in the migration leader's draft this flight. */
+        @JavascriptInterface
+        public boolean recordMigration(double metres) {
+            if (metres < 100 || metres > 1.0e8) {
+                return false;
+            }
+            return flight.bests.recordHighest(MIGRATE_RECORD_KEY, (float) Math.round(metres));
+        }
+
+        /** Weather fronts pushed through this flight. */
+        @JavascriptInterface
+        public boolean recordFronts(int fronts) {
+            if (fronts < 1 || fronts > 500) {
+                return false;
+            }
+            return flight.bests.recordHighest(FRONTS_KEY, fronts);
+        }
+
+        /** "1" when migration mode was left armed. */
+        @JavascriptInterface
+        public String migrateMode() {
+            String m = flight.bests.getString(MIGRATE_KEY);
+            return m == null ? "" : m;
+        }
+
+        @JavascriptInterface
+        public void setMigrateMode(String on) {
+            flight.bests.putString(MIGRATE_KEY, "1".equals(on) ? "1" : "");
+        }
+
+        /**
+         * Lowercase letters, digits, colons and commas only, within a length. Both tables the page
+         * writes are of that shape, and nothing else from a page should reach SharedPreferences.
+         */
+        private boolean isShaped(String value, int maxChars) {
+            if (value == null || value.isEmpty() || value.length() > maxChars) {
+                return false;
+            }
+            for (int i = 0; i < value.length(); i++) {
+                char ch = value.charAt(i);
+                boolean ok = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+                        || ch == ':' || ch == ',';
+                if (!ok) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /** Ridge lift caught this session, in metres; kept when it is the most ever. */

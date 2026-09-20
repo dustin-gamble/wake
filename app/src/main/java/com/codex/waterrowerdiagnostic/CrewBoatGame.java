@@ -13,12 +13,27 @@ import android.view.MotionEvent;
  * which rowers call swing. Uneven strokes break it: the crew catches at different moments, blades
  * clash and splash, the rowers visibly tire, and the boat slows.
  *
- * <p>Two seats. At <b>STROKE</b> the crew follows your rhythm, so changing rate deliberately is
- * fine and only the stroke-to-stroke wobble costs. At <b>BOW</b> you follow the crew: the stroke
- * seat sets the rate, changes it through the piece, and you have to go with it - harder.
+ * <p>Three seats. At <b>STROKE</b> the crew follows your rhythm, so changing rate deliberately is
+ * fine and only the stroke-to-stroke wobble costs. In the <b>ENGINE ROOM</b> (seat 4) you follow
+ * the crew, the timing is forgiven a little, but the boat only moves if you keep pressing harder
+ * than your own recent strokes. At <b>BOW</b> you follow the crew on the tightest tolerance there
+ * is: the stroke seat sets the rate, changes it through the piece, and you have to go with it.
  *
  * <p>The cox talks to you: calls a POWER TEN (ten strokes that must beat your own recent effort),
- * reacts to your real rate going up or down, and answers the other crew's moves.
+ * reacts to your real rate going up or down, and answers the other crew's moves. So do the eight
+ * <b>named crewmates</b>, who speak from their own seat about what you are doing to the boat.
+ *
+ * <p>Four things carry between sessions, all in {@code crew.state} / {@code crew.seatrace}:
+ * <ul>
+ *   <li><b>Crew morale</b> - earned in a race and spent by a bad one. It is worth up to 6% of boat
+ *       speed either way, changes how quickly the crew tires, and sets what the crewmates say.</li>
+ *   <li><b>The season calendar</b> - six training days and then a REGATTA over 1500 m against a
+ *       stronger crew. Every day you row is ticked off and is worth 1% in the regatta.</li>
+ *   <li><b>Seat races</b> - the finishing margin from each seat, normalised per 1000 m, so the
+ *       coach (and you) can see which seat you are actually worth more in.</li>
+ *   <li><b>Perfect twenties</b> - twenty consecutive strokes in time buys fifteen seconds of a
+ *       flying boat, and the longest streak is a record.</li>
+ * </ul>
  *
  * <p>Timing comes from the pulse meter's stroke detection, measured at the drive, not a second late
  * off the monitor's counter. Stroke effort for the ten comes from the same stroke record (its
@@ -29,9 +44,20 @@ final class CrewBoatGame extends GameView {
 
     private enum Phase { READY, RACING, DONE }
 
-    private enum Seat { STROKE, BOW }
+    private enum Seat { STROKE, ENGINE, BOW }
+
+    /** {@code values()} clones its array on every call, and the boathouse redraws at 60 fps. */
+    private static final Seat[] SEAT_ORDER = Seat.values();
+    /** The calendar's cell captions, so drawing it allocates no strings. */
+    private static final String[] DAY_LABELS = {"1", "2", "3", "4", "5", "6", "CUP"};
 
     private static final int RACE_METERS = 1000;
+    private static final int REGATTA_METERS = 1500;
+    /** Training days in a season; the regatta is rowed on the day after the last of them. */
+    private static final int SEASON_DAYS = 6;
+    /** Consecutive strokes in time that buy a flying boat. */
+    private static final int PERFECT = 20;
+    private static final double SWING_BONUS_SECONDS = 15;
     private static final int SEATS = 8;
     /** An eight is ~17.5 m; a "seat" of margin is an eighth of that, which is how coxes count it. */
     private static final double EIGHT_METRES = 17.5;
@@ -41,8 +67,8 @@ final class CrewBoatGame extends GameView {
     private static final int PLAYER_CREW = 0xFF3A5BD9;
     private static final int RIVAL_CREW = 0xFFD9453A;
     private static final int[] SHIRTS = {0xFFF0655D, 0xFFF0B132, 0xFF6F8CFF, 0xFFFFFFFF, 0xFF35D0BA};
-    /** Distances (rival's metres) at which the other crew makes a move; the last one runs to the line. */
-    private static final int[] RIVAL_MOVES = {280, 620, 860};
+    /** Points of the course at which the other crew makes a move; the last one runs to the line. */
+    private static final float[] RIVAL_MOVES = {0.28f, 0.62f, 0.86f};
 
     private final PersonalBests bests;
     private final RiverRenderer river;
@@ -69,7 +95,9 @@ final class CrewBoatGame extends GameView {
     /** Named `course`, not `scenery`: that name is already taken here by the scrolled metres. */
     private final RiverScenery course;
     private final RectF strokeBtn = new RectF();
+    private final RectF engineBtn = new RectF();
     private final RectF bowBtn = new RectF();
+    private final RectF panel = new RectF();
     private boolean buttonsShown;
     private android.graphics.LinearGradient skyShader;
     private float skyShaderTop = -1f;
@@ -86,7 +114,8 @@ final class CrewBoatGame extends GameView {
     private float syncSum;
     private int syncStrokes;
     private int swing;
-    private double crewInterval;
+    /** Seeded so a frame drawn before {@link #onStart()} cannot divide by zero. */
+    private double crewInterval = 60.0 / 25.0;
     private double lastStrokeAt = -1;
     private double yourInterval;
     private PulseMeter.Stroke lastSeen;
@@ -113,7 +142,7 @@ final class CrewBoatGame extends GameView {
 
     // Bow seat: the stroke seat (not you) sets the rhythm.
     private float crewPhase;
-    private double crewTargetRate;
+    private double crewTargetRate = 25;
     private double nextRateChangeAt;
     private double offsetEma;
 
@@ -144,6 +173,83 @@ final class CrewBoatGame extends GameView {
     private float fatigue;
     private boolean tiredCalled;
 
+    /* ---------- what carries between sessions ---------- */
+
+    /** 0..1. Live during a race and written back on finish and on leaving the screen. */
+    private float morale = 0.5f;
+    private long seasonStart;
+    /** Bit d set = you rowed this crew on day d of the season. Bits 0..5 are the training days. */
+    private int seasonDays;
+    private int seasonNo = 1;
+    private int regattaWins;
+    private int dayIndex;
+    private int trainingDays;
+    private boolean regattaDay;
+    private boolean lastWasRegatta;
+    private int raceMeters = RACE_METERS;
+    private boolean dayMarked;
+
+    // Seat races: finishing margin in metres per 1000 m, per seat.
+    private final float[] seatLastMargin = new float[3];
+    private final float[] seatBestMargin = new float[3];
+    private final int[] seatRaces = new int[3];
+
+    // The perfect twenty.
+    private int perfectTwenties;
+    private int bestSwing;
+    private double swingBonusUntil = -1;
+    private float twentyFlash;
+
+    // Engine room: the boat only moves if you press harder than you have been.
+    private double effortFast;
+    private double effortSlow;
+    private float engineDrive;
+
+    // Named crewmates.
+    private static final String[] MATE_NAMES =
+            {"KAI", "MAYA", "RUBEN", "TESS", "OLLY", "NINA", "BRECK", "JUNO"};
+    private static final String[] MATE_ROLE =
+            {"stroke", "7 · spark", "6 · engine", "5 · engine", "4 · engine", "3 · engine", "2 · bow pair", "bow · steers"};
+    private static final String[] MATE_GOOD =
+            {"THAT'S THE RHYTHM!", "I CAN FEEL HER RUNNING!", "YES - KEEP IT THERE!", "GLUED TO YOU!"};
+    private static final String[] MATE_BAD =
+            {"I'M CATCHING EARLY ON YOU!", "FIND ME - I'M RIGHT HERE!", "WE'RE ALL OVER THE PLACE!", "EASY ON THE SLIDE!"};
+    private static final String[] MATE_TIRED =
+            {"LEGS ARE GOING...", "GIVE ME SOMETHING!", "I'M HANGING ON!", "I'M COOKED BACK HERE!"};
+    private static final String[] MATE_TEN =
+            {"TEN WITH YOU!", "SENDING IT!", "EVERY ONE OF THEM!"};
+    private static final String[] MATE_TWENTY =
+            {"TWENTY PERFECT - WE'RE GONE!", "BEST WE'VE EVER ROWED!", "DON'T STOP THAT!"};
+    private static final String[] MATE_LEAD = {"WE'VE GOT THEIR BOW!", "I CAN SEE THEIR COX!"};
+    private static final String[] MATE_BEHIND = {"THEY'RE WALKING - ANSWER IT!", "DON'T LET THEM GO!"};
+    private static final String[] MATE_UP = {"BEEN WAITING FOR THIS ONE!", "LET'S HAVE THEM TODAY!"};
+    private static final String[] MATE_FLAT = {"...LET'S JUST GET THROUGH IT.", "TRY NOT TO CRAB IT TODAY."};
+    private static final String[] MATE_WIN = {"WELL ROWED, CREW!", "THAT'S OURS!"};
+    private static final String[] MATE_LOSE = {"WE'LL GET THEM NEXT TIME.", "THAT ONE HURTS."};
+    private int mateSeat = -1;
+    private String mateText = "";
+    private double mateUntil;
+    private double mateCooldown;
+    /**
+     * The HUD's changing captions, rebuilt only when the number in them changes. The tablet
+     * redraws at 60 fps: a concatenation here is ~250 short-lived strings a second for nothing.
+     */
+    private String syncLabel = "";
+    private int syncLabelKey = Integer.MIN_VALUE;
+    private String swingLabel = "";
+    private int swingLabelKey = Integer.MIN_VALUE;
+    private String rateLabel = "";
+    private int rateLabelKey = Integer.MIN_VALUE;
+    private String seasonLabel = "";
+    private int seasonLabelKey = Integer.MIN_VALUE;
+    private String twentyLabel = "";
+    private int twentyLabelKey = Integer.MIN_VALUE;
+
+    /** Where the eight was last drawn, so a crewmate's bubble points at their own seat. */
+    private float eightCx;
+    private float eightLen;
+    private float eightYNow;
+
     CrewBoatGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
@@ -158,13 +264,152 @@ final class CrewBoatGame extends GameView {
             seatWeak[i] = r.nextFloat();
         }
         String saved = bests.getString("crew.seat");
-        if ("BOW".equals(saved)) {
-            seat = Seat.BOW;
+        if (saved != null) {
+            for (Seat s : SEAT_ORDER) {
+                if (s.name().equals(saved)) {
+                    seat = s;
+                }
+            }
         }
+        loadState();
+        loadSeatRaces();
+    }
+
+    /* =====================================================================
+     * What carries between sessions
+     * ===================================================================== */
+
+    /** Local day number, the same arithmetic the regatta and the daily row use. */
+    private static long today() {
+        long now = System.currentTimeMillis();
+        return (now + java.util.TimeZone.getDefault().getOffset(now)) / 86400000L;
+    }
+
+    /**
+     * Morale and the season calendar. Kept as a string on purpose: the Records screen lists every
+     * float it finds, and a day number or a morale fraction is state, not an achievement.
+     */
+    private void loadState() {
+        String s = bests.getString("crew.state");
+        boolean ok = false;
+        if (s != null) {
+            String[] p = s.split("\\|");
+            if (p.length >= 6 && "1".equals(p[0])) {
+                try {
+                    morale = clamp01(Float.parseFloat(p[1]));
+                    seasonStart = Long.parseLong(p[2]);
+                    seasonDays = Integer.parseInt(p[3]);
+                    seasonNo = Math.max(1, Integer.parseInt(p[4]));
+                    regattaWins = Math.max(0, Integer.parseInt(p[5]));
+                    ok = seasonStart > 0;
+                } catch (NumberFormatException e) {
+                    ok = false;
+                }
+            }
+        }
+        if (!ok) {
+            morale = 0.5f;
+            seasonStart = today();
+            seasonDays = 0;
+        }
+    }
+
+    private void saveState() {
+        bests.putString("crew.state", String.format(java.util.Locale.US, "1|%.3f|%d|%d|%d|%d",
+                morale, seasonStart, seasonDays, seasonNo, regattaWins));
+    }
+
+    /** Per-seat finishing margins, normalised per 1000 m so the regatta compares with a training row. */
+    private void loadSeatRaces() {
+        String s = bests.getString("crew.seatrace");
+        if (s == null) {
+            return;
+        }
+        String[] rows = s.split(";");
+        for (String row : rows) {
+            String[] p = row.split(",");
+            if (p.length != 4) {
+                continue;
+            }
+            int i = seatIndex(p[0]);
+            if (i < 0) {
+                continue;
+            }
+            try {
+                seatLastMargin[i] = Float.parseFloat(p[1]);
+                seatBestMargin[i] = Float.parseFloat(p[2]);
+                seatRaces[i] = Math.max(0, Integer.parseInt(p[3]));
+            } catch (NumberFormatException e) {
+                seatRaces[i] = 0;
+            }
+        }
+    }
+
+    private void saveSeatRaces() {
+        StringBuilder sb = new StringBuilder();
+        for (Seat s : SEAT_ORDER) {
+            int i = s.ordinal();
+            if (sb.length() > 0) {
+                sb.append(';');
+            }
+            sb.append(s.name()).append(',').append(String.format(java.util.Locale.US, "%.2f,%.2f,%d",
+                    seatLastMargin[i], seatBestMargin[i], seatRaces[i]));
+        }
+        bests.putString("crew.seatrace", sb.toString());
+    }
+
+    private static int seatIndex(String name) {
+        for (Seat s : SEAT_ORDER) {
+            if (s.name().equals(name)) {
+                return s.ordinal();
+            }
+        }
+        return -1;
+    }
+
+    private static float clamp01(float v) {
+        // A NaN that reached morale would be written back to prefs, reloaded as NaN, and every
+        // later race would have a NaN boat speed that never reaches the finish.
+        if (Float.isNaN(v)) {
+            return 0.5f;
+        }
+        return v < 0f ? 0f : v > 1f ? 1f : v;
+    }
+
+    private void addMorale(float delta) {
+        morale = clamp01(morale + delta);
+    }
+
+    private static String moraleWord(float m) {
+        return m < 0.2f ? "MUTINOUS" : m < 0.4f ? "FLAT" : m < 0.6f ? "STEADY"
+                : m < 0.8f ? "UP FOR IT" : "FIRED UP";
+    }
+
+    /** True in the seats where the stroke seat, not you, owns the rhythm. */
+    private boolean followsCrew() {
+        return seat != Seat.STROKE;
+    }
+
+    /** Which of the eight you are sitting in: stern-most is 0. */
+    private int youSeatIndex() {
+        return seat == Seat.STROKE ? 0 : seat == Seat.ENGINE ? 4 : SEATS - 1;
     }
 
     @Override
     protected void onStart() {
+        rollSeason();
+        perfectTwenties = 0;
+        bestSwing = 0;
+        swingBonusUntil = -1;
+        twentyFlash = 0;
+        effortFast = 0;
+        effortSlow = 0;
+        engineDrive = 0;
+        dayMarked = false;
+        lastWasRegatta = false;
+        mateUntil = 0;
+        mateCooldown = 0;
+        mateSeat = -1;
         phase = Phase.READY;
         yourMeters = 0;
         rivalMeters = 0;
@@ -209,6 +454,43 @@ final class CrewBoatGame extends GameView {
         tiredCalled = false;
     }
 
+    /**
+     * Where the season stands today. Six training days, then the regatta, which stays due until it
+     * is rowed. Two weeks past due and the crew has drifted apart: a new season, and morale returns
+     * halfway to level.
+     */
+    private void rollSeason() {
+        long t = today();
+        if (seasonStart <= 0 || t < seasonStart) {
+            seasonStart = t;
+            seasonDays = 0;
+        }
+        long since = t - seasonStart;
+        if (since > SEASON_DAYS + 13) {
+            seasonNo++;
+            seasonStart = t;
+            seasonDays = 0;
+            since = 0;
+            morale += (0.5f - morale) * 0.5f;
+            saveState();
+        }
+        dayIndex = (int) Math.min(SEASON_DAYS, since);
+        regattaDay = since >= SEASON_DAYS;
+        raceMeters = regattaDay ? REGATTA_METERS : RACE_METERS;
+        trainingDays = Integer.bitCount(seasonDays & 0x3F);
+    }
+
+    /** One tick on the calendar for today, the moment the row is worth calling training. */
+    private void markTrainedToday() {
+        if (dayMarked) {
+            return;
+        }
+        dayMarked = true;
+        seasonDays |= 1 << Math.min(SEASON_DAYS, dayIndex);
+        trainingDays = Integer.bitCount(seasonDays & 0x3F);
+        saveState();
+    }
+
     @Override
     protected void onStatusChanged(S4Protocol.Status s) {
         windowPeakWatts = Math.max(windowPeakWatts, s.watts);
@@ -248,10 +530,14 @@ final class CrewBoatGame extends GameView {
             phase = Phase.RACING;
             raceStart = sessionSeconds;
             nextRateChangeAt = sessionSeconds + 30;
-            say(seat == Seat.STROKE ? "ATTENTION... GO! THEY'RE ON YOU, STROKE!" : "ATTENTION... GO! FOLLOW STROKE, BOW!", 2.4, 1);
+            String off = regattaDay ? "THIS IS THE ONE - ATTENTION... GO!"
+                    : seat == Seat.STROKE ? "ATTENTION... GO! THEY'RE ON YOU, STROKE!"
+                    : "ATTENTION... GO! FOLLOW STROKE, " + seatWord() + "!";
+            say(off, 2.4, 1);
             rivalCall("GO! GO! GO!", 1.8);
+            mateSay(morale >= 0.55f ? MATE_UP : MATE_FLAT, 2.6);
         }
-        if (seat == Seat.BOW && resumed) {
+        if (followsCrew() && resumed) {
             // After a stop the crew waits for you and comes forward together.
             crewPhase = 0f;
         }
@@ -273,24 +559,41 @@ final class CrewBoatGame extends GameView {
                     double off = p > 0.5f ? p - 1f : p;
                     offsetEma += (off - offsetEma) * 0.2;
                     double intervalDev = Math.abs(interval - crewInterval) / crewInterval;
+                    // The engine room sits in the middle of the boat where a fraction of a second is
+                    // forgiven; the bow seat is where it is not.
                     dev = 0.6 * intervalDev + 0.4 * Math.abs(off - offsetEma);
-                    tol = 0.10;
+                    tol = seat == Seat.ENGINE ? 0.14 : 0.10;
                     // The crew gives a little: a bow seat can nudge a boat, not steer it.
                     crewPhase -= (float) (off - offsetEma) * 0.15f;
                 }
                 float target = (float) Math.max(0, Math.min(1, 1 - dev / tol));
                 sync += (target - sync) * 0.35f;
+                int wasSwing = swing;
                 swing = sync > 0.85f ? swing + 1 : 0;
+                if (swing > bestSwing) {
+                    bestSwing = swing;
+                }
+                if (swing > 0 && swing % PERFECT == 0) {
+                    awardTwenty();
+                } else if (wasSwing >= PERFECT && swing == 0) {
+                    mateSay(MATE_BAD, 2.2);
+                }
                 syncSum += sync;
                 syncStrokes++;
                 if (sync < 0.5f) {
                     fx.burst(getWidth() * 0.5f, getHeight() * 0.62f, 26, dp(160f), 0.6f, dp(3f), 0xDDBFE3FF, true);
+                    if (Math.random() < 0.35) {
+                        mateSay(MATE_BAD, 2.2);
+                    }
+                } else if (sync > 0.9f && Math.random() < 0.10) {
+                    mateSay(MATE_GOOD, 2.0);
                 }
                 updateFatigue();
                 reactToRate(60.0 / interval);
             }
         }
         lastStrokeAt = now;
+        trackEngine(effortKind, effort);
         if (phase == Phase.RACING) {
             powerTen(effortKind, effort);
             if (++strokesSinceCall >= 4) {
@@ -303,21 +606,82 @@ final class CrewBoatGame extends GameView {
         fx.burst(getWidth() * 0.5f, getHeight() * 0.70f, sync > 0.8f ? 10 : 22, dp(120f), 0.5f, dp(2.5f), 0xCCBFE3FF, true);
     }
 
+    /**
+     * The engine room's contribution: how hard this stroke was against your own recent strokes.
+     * Relative on purpose - it reads the same whether effort is measured watts or paddle rate cubed,
+     * and it cannot be gamed by a rower who is simply strong.
+     */
+    private void trackEngine(int kind, double effort) {
+        if (!(effort > 0)) {
+            return;
+        }
+        if (kind != baselineKind || effortSlow <= 0) {
+            effortSlow = effort;
+            effortFast = effort;
+            return;
+        }
+        effortFast += (effort - effortFast) * 0.4;
+        effortSlow += (effort - effortSlow) * 0.06;
+        double ratio = effortFast / Math.max(1e-6, effortSlow);
+        engineDrive = (float) Math.max(-1, Math.min(1, (ratio - 1) * 6));
+    }
+
+    /** Twenty strokes in a row in time: the boat lifts, the crew lifts, and it is a record. */
+    private void awardTwenty() {
+        perfectTwenties++;
+        swingBonusUntil = sessionSeconds + SWING_BONUS_SECONDS;
+        twentyFlash = 1f;
+        addMorale(0.06f);
+        say(perfectTwenties == 1 ? "PERFECT TWENTY! SHE'S FLYING - HOLD IT!"
+                : "TWENTY AGAIN! THAT'S " + perfectTwenties + " - STAY ON IT!", 3.0, 3);
+        mateSay(MATE_TWENTY, 2.6);
+        rivalCall("THEY'VE GOT SWING - GO WITH THEM!", 2.0);
+        fx.burst(getWidth() * 0.5f, getHeight() * 0.55f, 46, dp(300f), 1.0f, dp(4f), 0xFFF0B132, true);
+        fx.burst(getWidth() * 0.5f, getHeight() * 0.62f, 26, dp(220f), 0.9f, dp(3f), 0xFF35D0BA, true);
+    }
+
+    /** One of the eight speaks, from their own seat. Never you, and never over the last one. */
+    private void mateSay(String[] pool, double seconds) {
+        if (sessionSeconds < mateCooldown || pool.length == 0) {
+            return;
+        }
+        int you = youSeatIndex();
+        int i = (int) (Math.random() * SEATS);
+        if (i == you) {
+            i = (i + 1 + (int) (Math.random() * (SEATS - 1))) % SEATS;
+        }
+        mateSeat = i;
+        // Composed once here, never in the frame loop.
+        mateText = MATE_NAMES[i] + ": " + pool[(int) (Math.random() * pool.length)];
+        mateUntil = sessionSeconds + seconds;
+        mateCooldown = sessionSeconds + seconds + 1.6;
+    }
+
+    private String seatWord() {
+        return seat == Seat.STROKE ? "STROKE" : seat == Seat.ENGINE ? "FOUR SEAT" : "BOW";
+    }
+
     /** Timing falling apart wears the crew down; rowing in time brings them back. */
     private void updateFatigue() {
         if (sync < 0.6f) {
-            fatigue += (0.6f - sync) * 0.18f;
+            // A crew that believes in you keeps going for longer on the same ragged strokes.
+            fatigue += (0.6f - sync) * 0.18f * (1.25f - 0.5f * morale);
         } else if (sync > 0.8f) {
-            fatigue -= 0.035f;
+            fatigue -= 0.035f * (0.8f + 0.4f * morale);
         }
         fatigue = Math.max(0f, Math.min(1f, fatigue));
+        if (fatigue > 0.7f) {
+            addMorale(-0.004f);
+        }
         if (!tiredCalled && fatigue > 0.5f) {
             tiredCalled = true;
             say("THEY'RE TIRING - SETTLE IT, FIND THE RHYTHM!", 2.6, 2);
             rivalCall("THEY'RE FALLING APART - GO!", 2.0);
+            mateSay(MATE_TIRED, 2.6);
         } else if (tiredCalled && fatigue < 0.2f) {
             tiredCalled = false;
             say("THAT'S IT - THEY'RE BACK WITH YOU!", 2.4, 2);
+            mateSay(MATE_GOOD, 2.2);
         }
     }
 
@@ -331,14 +695,14 @@ final class CrewBoatGame extends GameView {
         boolean cooled = sessionSeconds - lastRateCallAt > 6;
         int now = (int) Math.round(rateFast);
         if (timedStrokes >= 4 && cooled) {
-            if (seat == Seat.BOW) {
+            if (followsCrew()) {
                 int crew = (int) Math.round(60.0 / crewInterval);
                 double diff = rateFast - 60.0 / crewInterval;
                 if (diff >= 1.5) {
-                    say(String.format(java.util.Locale.US, "BOW, YOU'RE RUSHING - %d, NOT %d!", now, crew), 2.6, 2);
+                    say(String.format(java.util.Locale.US, "%s, YOU'RE RUSHING - %d, NOT %d!", seatWord(), now, crew), 2.6, 2);
                     lastRateCallAt = sessionSeconds;
                 } else if (diff <= -1.5) {
-                    say(String.format(java.util.Locale.US, "BOW, YOU'RE LATE - UP TO %d!", crew), 2.6, 2);
+                    say(String.format(java.util.Locale.US, "%s, YOU'RE LATE - UP TO %d!", seatWord(), crew), 2.6, 2);
                     lastRateCallAt = sessionSeconds;
                 }
             } else {
@@ -384,6 +748,9 @@ final class CrewBoatGame extends GameView {
                 pushBoost = 0.12f;
                 tenFlash = 1f;
                 fx.burst(getWidth() * 0.5f, getHeight() * 0.66f, 18, dp(200f), 0.6f, dp(3f), 0xFFF0B132, true);
+                if (tenStrokes == 4 || tenStrokes == 8) {
+                    mateSay(MATE_TEN, 2.0);
+                }
             }
             if (tenStrokes >= 10) {
                 tenActive = false;
@@ -396,6 +763,11 @@ final class CrewBoatGame extends GameView {
                 say(text, 3.0, 3);
                 if (tenHits >= 7) {
                     rivalCall("HOLD THEM! HOLD!", 2.0);
+                    addMorale(0.05f);
+                    mateSay(MATE_GOOD, 2.2);
+                } else if (tenHits <= 3) {
+                    addMorale(-0.04f);
+                    mateSay(MATE_TIRED, 2.2);
                 }
             }
             return;
@@ -403,7 +775,7 @@ final class CrewBoatGame extends GameView {
         effortBaseline = baselineN == 0 ? effort : effortBaseline + (effort - effortBaseline) * 0.2;
         baselineN++;
         strokesSinceTen++;
-        if (baselineN >= 6 && strokesSinceTen >= 30 && yourMeters < RACE_METERS - 60) {
+        if (baselineN >= 6 && strokesSinceTen >= 30 && yourMeters < raceMeters - 60) {
             startTen("POWER TEN - ON THIS ONE!");
         }
     }
@@ -445,6 +817,13 @@ final class CrewBoatGame extends GameView {
                 }
                 return true;
             }
+            if (buttonsShown && engineBtn.contains(e.getX(), e.getY())) {
+                chooseSeat(Seat.ENGINE);
+                if (phase == Phase.DONE) {
+                    start();
+                }
+                return true;
+            }
             if (buttonsShown && bowBtn.contains(e.getX(), e.getY())) {
                 chooseSeat(Seat.BOW);
                 if (phase == Phase.DONE) {
@@ -479,8 +858,12 @@ final class CrewBoatGame extends GameView {
         }
         pushBoost = Math.max(0f, pushBoost - dt * 0.06f);
         tenFlash = Math.max(0f, tenFlash - dt * 2f);
+        twentyFlash = Math.max(0f, twentyFlash - dt * 0.6f);
+        if (!rowing) {
+            engineDrive -= engineDrive * Math.min(1f, dt * 0.6f);
+        }
 
-        if (seat == Seat.BOW) {
+        if (followsCrew()) {
             // The stroke seat sets the rhythm; the crew only moves while you are rowing with them.
             if (phase == Phase.RACING && rowing) {
                 crewPhase += (float) (dt / crewInterval);
@@ -503,31 +886,33 @@ final class CrewBoatGame extends GameView {
         }
 
         // Sync is worth 15% either way, swing adds a little more, and a tired crew gives some back.
-        float factor = 0.85f + 0.3f * sync + (swing >= 6 ? 0.05f : 0f) - 0.10f * fatigue + pushBoost;
+        // Morale is worth 6% either way; a perfect twenty is worth 8% for fifteen seconds; in the
+        // engine room what you add on top of your own recent strokes is worth up to 7%; and on
+        // regatta day every training day ticked off this season is worth another 1%.
+        float swingBonus = sessionSeconds < swingBonusUntil ? 0.08f : 0f;
+        float moraleBonus = 0.12f * (morale - 0.5f);
+        float engineBonus = seat == Seat.ENGINE ? 0.07f * engineDrive : 0f;
+        float trainingBonus = regattaDay ? 0.01f * trainingDays : 0f;
+        float factor = 0.85f + 0.3f * sync + (swing >= 6 ? 0.05f : 0f) - 0.10f * fatigue + pushBoost
+                + swingBonus + moraleBonus + engineBonus + trainingBonus;
         if (phase == Phase.RACING) {
             yourMeters += speed * factor * dt;
             stepRival(dt);
+            if (!dayMarked && yourMeters > 400) {
+                markTrainedToday();
+            }
             boolean lead = yourMeters > rivalMeters;
             if (lead != youLead && Math.abs(yourMeters - rivalMeters) > 1) {
                 youLead = lead;
                 say(lead ? "WE'VE GOT THEIR BOW - KEEP GOING!" : "THEY'RE THROUGH US - RESPOND!", 2.4, 2);
                 rivalCall(lead ? "DON'T LET THEM GO!" : "WE'RE THROUGH! AGAIN!", 1.8);
+                mateSay(lead ? MATE_LEAD : MATE_BEHIND, 2.2);
+                addMorale(lead ? 0.02f : -0.02f);
             }
-            if (yourMeters >= RACE_METERS) {
-                phase = Phase.DONE;
-                tenActive = false;
-                finishTime = sessionSeconds - raceStart;
-                won = yourMeters - rivalMeters >= 0;
-                String key = seat == Seat.STROKE ? "crew.time." + RACE_METERS : "crew.time.bow." + RACE_METERS;
-                newBest = bests.recordLowest(key, (float) finishTime);
-                if (syncStrokes > 10) {
-                    bests.recordHighest("crew.sync", 100f * syncSum / syncStrokes);
-                }
-                say(won ? "WE WON IT! EASY ALL!" : "EASY ALL... NEXT TIME.", 4, 4);
-                rivalCall(won ? "WELL ROWED." : "YES! WE'VE GOT IT!", 3);
-                if (won) {
-                    fx.burst(w * 0.5f, h * 0.5f, 60, dp(320f), 1.2f, dp(4f), 0xFFF0B132, true);
-                }
+            if (yourMeters >= raceMeters) {
+                finishRace();
+                fx.burst(w * 0.5f, h * 0.5f, won ? 60 : 24, dp(320f), 1.2f, dp(4f),
+                        won ? 0xFFF0B132 : 0x99BFE3FF, true);
             }
         }
         // Sweat off a tired crew.
@@ -601,6 +986,10 @@ final class CrewBoatGame extends GameView {
         if (tenActive) {
             Fx.glow(c, w * 0.5f, eightY, w * 0.3f, tenFlash > 0.3f ? 0x44F0B132 : 0x22F0B132);
         }
+        if (sessionSeconds < swingBonusUntil) {
+            // The perfect twenty's reward, under the boat where it cannot be missed.
+            Fx.glow(c, w * 0.5f, eightY, w * 0.34f, 0x33F0B132);
+        }
         float basePhase;
         float youPhase;
         int youSeat;
@@ -613,11 +1002,17 @@ final class CrewBoatGame extends GameView {
         } else {
             basePhase = crewPhase;
             youPhase = (float) Math.min(0.98, sinceStroke / Math.max(0.8, yourInterval));
-            youSeat = SEATS - 1;
+            youSeat = youSeatIndex();
         }
+        eightCx = w * 0.5f;
+        eightLen = w * 0.62f;
+        eightYNow = eightY;
         drawEight(c, w * 0.5f, w * 0.62f, eightY, 1f, PLAYER_CREW, 0xFF2F6E93, youSeat, sync, seatLag,
                 basePhase, youPhase, fatigue, bladeWasIn, true);
         fx.draw(c);
+        if (sessionSeconds < mateUntil && mateSeat >= 0) {
+            drawMateBubble(c, w);
+        }
         if (swing >= 6) {
             Fx.vignette(c, w, h, 0.25f, 0x1A6A5A);
             if (((int) (sessionSeconds * 3)) % 2 == 0) {
@@ -632,7 +1027,7 @@ final class CrewBoatGame extends GameView {
         if (sessionSeconds < coxUntil) {
             drawCoxCall(c, coxCall, w * 0.5f + w * 0.62f * 0.46f, eightY - dp(24f), w, 0xF2FFFFFF, 0xFF3A2A06, 16f);
         }
-        double toGo = RACE_METERS - yourMeters;
+        double toGo = raceMeters - yourMeters;
         if (phase == Phase.RACING && toGo < 150) {
             float fx0 = w * 0.5f + (float) toGo * ppm;
             if (fx0 < w + dp(40f)) {
@@ -650,23 +1045,107 @@ final class CrewBoatGame extends GameView {
 
     private static final int[] RATE_STEPS = {-2, -1, 1, 2};
 
+    /**
+     * The line: records, the seat race, the crew's morale and the season's calendar all settle here.
+     * Margins are stored per 1000 m so a 1500 m regatta is comparable with a training piece.
+     */
+    private void finishRace() {
+        phase = Phase.DONE;
+        tenActive = false;
+        finishTime = sessionSeconds - raceStart;
+        double margin = yourMeters - rivalMeters;
+        won = margin >= 0;
+        lastWasRegatta = regattaDay;
+        markTrainedToday();
+
+        String key = seat == Seat.STROKE ? "crew.time." + raceMeters
+                : "crew.time." + seat.name().toLowerCase(java.util.Locale.US) + "." + raceMeters;
+        newBest = bests.recordLowest(key, (float) finishTime);
+        if (syncStrokes > 10) {
+            bests.recordHighest("crew.sync", 100f * syncSum / syncStrokes);
+        }
+        if (bestSwing > 0) {
+            bests.recordHighest("crew.swing", bestSwing);
+        }
+
+        float per1000 = (float) (margin * 1000.0 / raceMeters);
+        int si = seat.ordinal();
+        if (seatRaces[si] == 0 || per1000 > seatBestMargin[si]) {
+            seatBestMargin[si] = per1000;
+        }
+        seatLastMargin[si] = per1000;
+        seatRaces[si]++;
+        saveSeatRaces();
+        bests.recordHighest("crew.margin." + seat.name(), per1000);
+
+        addMorale(won ? (lastWasRegatta ? 0.25f : 0.10f) : (lastWasRegatta ? -0.12f : -0.07f));
+        if (syncStrokes > 10) {
+            addMorale((syncSum / syncStrokes - 0.6f) * 0.15f);
+        }
+        if (lastWasRegatta) {
+            if (won) {
+                regattaWins++;
+                bests.recordHighest("crew.regatta.wins", regattaWins);
+                bests.recordLowest("crew.regatta.time", (float) finishTime);
+            }
+            // Whatever happened, the season turns over and today counts as day one of the next.
+            seasonNo++;
+            seasonStart = today();
+            seasonDays = 1;
+            dayIndex = 0;
+            trainingDays = 1;
+            regattaDay = false;
+            raceMeters = RACE_METERS;
+        }
+        saveState();
+
+        if (lastWasRegatta) {
+            say(won ? "WE'VE WON THE REGATTA! EASY ALL!" : "EASY ALL... THAT WAS OUR REGATTA.", 4, 4);
+        } else {
+            say(won ? "WE WON IT! EASY ALL!" : "EASY ALL... NEXT TIME.", 4, 4);
+        }
+        rivalCall(won ? "WELL ROWED." : "YES! WE'VE GOT IT!", 3);
+        mateCooldown = 0;
+        mateSay(won ? MATE_WIN : MATE_LOSE, 4);
+    }
+
+    @Override
+    protected void onStop() {
+        // Morale carries even out of a race that was never finished - the crew remembers the row.
+        if (phase == Phase.RACING) {
+            if (yourMeters > 400) {
+                markTrainedToday();
+            }
+            // A twenty rowed in a piece that was abandoned still happened; without this the record
+            // only ever lands on a race carried all the way to the line.
+            if (bestSwing > 0) {
+                bests.recordHighest("crew.swing", bestSwing);
+            }
+        }
+        saveState();
+        saveSeatRaces();
+    }
+
     /** The other eight: a steady crew at your typical pace that makes three moves and sprints home. */
     private void stepRival(float dt) {
-        if (rivalMoveIndex < RIVAL_MOVES.length && rivalMeters >= RIVAL_MOVES[rivalMoveIndex]) {
+        if (rivalMoveIndex < RIVAL_MOVES.length && rivalMeters >= RIVAL_MOVES[rivalMoveIndex] * raceMeters) {
             boolean sprint = rivalMoveIndex == RIVAL_MOVES.length - 1;
-            rivalMoveEnd = sprint ? RACE_METERS + 1 : rivalMeters + 70;
+            rivalMoveEnd = sprint ? raceMeters + 1 : rivalMeters + 70;
             rivalMoveIndex++;
             rivalCall(sprint ? "SPRINT! TAKE IT HOME!" : "MOVE NOW! TEN IN TWO!", 2.2);
-            if (!tenActive && baselineN >= 4 && yourMeters < RACE_METERS - 60) {
+            mateSay(MATE_BEHIND, 2.0);
+            if (!tenActive && baselineN >= 4 && yourMeters < raceMeters - 60) {
                 startTen(sprint ? "THEY'RE SPRINTING - POWER TEN, NOW!" : "THEY'RE MOVING - POWER TEN, NOW!");
             }
         }
         boolean moving = rivalMeters < rivalMoveEnd;
         rivalSurge += ((moving ? 1f : 0f) - rivalSurge) * Math.min(1f, dt * 0.8f);
         // A crew that is well clear eases a little and one well behind digs in, so it stays a race.
+        // The regatta field is a class better than the crew you train against.
         double gap = yourMeters - rivalMeters;
         double press = Math.max(-0.03, Math.min(0.03, gap / 400.0));
-        rivalMeters += profile.typicalSpeed() * 1.02 * (1 + 0.06 * rivalSurge + press) * dt;
+        double pace = regattaDay ? 1.06 : 1.02;
+        rivalMeters += profile.typicalSpeed() * pace * (1 + 0.06 * rivalSurge + press) * dt;
     }
 
     private void drawHud(Canvas c, float w, float h, double gap) {
@@ -675,31 +1154,66 @@ final class CrewBoatGame extends GameView {
         // 3.19.5: the HUD sits on the light sky, so it gets dark pills (seen unreadable on the emulator).
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0x990A1420);
-        c.drawRoundRect(cx - dp(170f), dp(6f), cx + dp(170f), dp(86f), dp(14f), dp(14f), paint);
-        c.drawRoundRect(dp(8f), dp(12f), dp(300f), dp(64f), dp(10f), dp(10f), paint);
+        c.drawRoundRect(cx - dp(170f), dp(6f), cx + dp(170f), dp(116f), dp(14f), dp(14f), paint);
+        c.drawRoundRect(dp(8f), dp(12f), dp(330f), dp(122f), dp(10f), dp(10f), paint);
         c.drawRoundRect(w - dp(320f), dp(12f), w - dp(8f), dp(64f), dp(10f), dp(10f), paint);
-        bold(c, Math.round(sync * 100) + "%", cx, dp(44f), 38f, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD, Paint.Align.CENTER);
-        label(c, swing >= 6 ? "SWING  ·  " + swing + " STROKES IN TIME" : "CREW SYNC", cx, dp(62f), 10f,
+        int syncPct = Math.round(sync * 100);
+        if (syncPct != syncLabelKey) {
+            syncLabelKey = syncPct;
+            syncLabel = syncPct + "%";
+        }
+        bold(c, syncLabel, cx, dp(44f), 38f, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD, Paint.Align.CENTER);
+        label(c, swing >= 6 ? swingCaption() : "CREW SYNC", cx, dp(62f), 10f,
                 swing >= 6 ? ACCENT : FAINT, Paint.Align.CENTER);
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(cx - dp(160f), dp(72f), cx + dp(160f), dp(80f), dp(4f), dp(4f), paint);
         paint.setColor(sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD);
         c.drawRoundRect(cx - dp(160f), dp(72f), cx - dp(160f) + dp(320f) * sync, dp(80f), dp(4f), dp(4f), paint);
+        drawTwentyTrack(c, cx);
 
-        // Left: seat, rate, and the crew's legs.
-        int crewRate = (int) Math.round(60 / crewInterval);
-        String rateText = seat == Seat.STROKE
-                ? "STROKE SEAT  ·  CREW FOLLOWS YOU  ·  RATE " + crewRate
-                : "BOW SEAT  ·  FOLLOW STROKE AT " + crewRate + (rateFast > 0 ? "  ·  YOU " + Math.round(rateFast) : "");
-        label(c, rateText, dp(16f), dp(30f), 10f, DIM, Paint.Align.LEFT);
+        // Left: seat, rate, the crew's legs, their morale and where the season stands.
+        int crewRate = (int) Math.round(Math.max(1e-3, 60 / crewInterval));
+        int yourRate = rateFast > 0 ? (int) Math.round(rateFast) : -1;
+        int rateKey = (seat.ordinal() * 200 + Math.min(199, Math.max(0, crewRate))) * 200
+                + Math.min(199, yourRate + 1);
+        if (rateKey != rateLabelKey) {
+            rateLabelKey = rateKey;
+            rateLabel = seat == Seat.STROKE
+                    ? "STROKE SEAT  ·  CREW FOLLOWS YOU  ·  RATE " + crewRate
+                    : seatWord() + "  ·  FOLLOW STROKE AT " + crewRate
+                            + (yourRate > 0 ? "  ·  YOU " + yourRate : "");
+        }
+        label(c, rateLabel, dp(16f), dp(30f), 10f, DIM, Paint.Align.LEFT);
         label(c, fatigue > 0.5f ? "CREW TIRING" : "CREW LEGS", dp(16f), dp(52f), 10f, fatigue > 0.5f ? BAD : DIM, Paint.Align.LEFT);
-        float barL = dp(110f);
-        float barR = dp(288f);
+        float barL = dp(120f);
+        float barR = dp(318f);
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(barL, dp(44f), barR, dp(52f), dp(4f), dp(4f), paint);
         float legs = 1f - fatigue;
         paint.setColor(legs > 0.6f ? ACCENT : legs > 0.35f ? WARN : BAD);
         c.drawRoundRect(barL, dp(44f), barL + (barR - barL) * legs, dp(52f), dp(4f), dp(4f), paint);
+        // Morale: kept between sessions, moved by this one.
+        label(c, "MORALE", dp(16f), dp(76f), 10f, DIM, Paint.Align.LEFT);
+        paint.setColor(0x33FFFFFF);
+        c.drawRoundRect(barL, dp(68f), barR, dp(76f), dp(4f), dp(4f), paint);
+        paint.setColor(moraleColor());
+        c.drawRoundRect(barL, dp(68f), barL + (barR - barL) * morale, dp(76f), dp(4f), dp(4f), paint);
+        label(c, moraleWord(morale), barR, dp(64f), 10f, moraleColor(), Paint.Align.RIGHT);
+        // The season.
+        if (regattaDay) {
+            float beat = 0.5f + 0.5f * (float) Math.abs(Math.sin(sessionSeconds * 2.4));
+            paint.setColor(0xFFF0B132);
+            paint.setAlpha((int) (140 + 110 * beat));
+            c.drawRoundRect(dp(14f), dp(86f), dp(324f), dp(114f), dp(8f), dp(8f), paint);
+            paint.setAlpha(255);
+            bold(c, seasonCaption(), dp(20f), dp(105f), 11f, 0xFF10203A, Paint.Align.LEFT);
+        } else {
+            label(c, seasonCaption(), dp(16f), dp(98f), 10f, DIM, Paint.Align.LEFT);
+            drawCalendarRow(c, dp(16f), dp(106f), dp(26f), dp(8f), false);
+            if (regattaWins > 0) {
+                bold(c, regattaWins + (regattaWins == 1 ? " CUP" : " CUPS"), dp(318f), dp(114f), 10f, WARN, Paint.Align.RIGHT);
+            }
+        }
 
         // Right: the whole course, both boats, and the margin in seats or lengths.
         float cl = w - dp(308f);
@@ -709,8 +1223,8 @@ final class CrewBoatGame extends GameView {
         c.drawRect(cl, cy - dp(1f), cr, cy + dp(1f), paint);
         paint.setColor(0xFFF2F2F2);
         c.drawRect(cr - dp(2f), cy - dp(10f), cr + dp(2f), cy + dp(10f), paint);
-        float yx = cl + (cr - cl) * (float) Math.min(1, yourMeters / RACE_METERS);
-        float rx = cl + (cr - cl) * (float) Math.min(1, rivalMeters / RACE_METERS);
+        float yx = cl + (cr - cl) * (float) Math.min(1, yourMeters / raceMeters);
+        float rx = cl + (cr - cl) * (float) Math.min(1, rivalMeters / raceMeters);
         paint.setColor(RIVAL_CREW);
         c.drawRoundRect(rx - dp(12f), cy - dp(9f), rx + dp(12f), cy - dp(3f), dp(3f), dp(3f), paint);
         paint.setColor(PLAYER_CREW);
@@ -736,7 +1250,7 @@ final class CrewBoatGame extends GameView {
 
         buttonsShown = phase != Phase.RACING;
         if (buttonsShown) {
-            drawSeatButtons(c, cx, h);
+            drawCrewRoom(c, cx, w, h);
         }
 
         String status;
@@ -744,19 +1258,112 @@ final class CrewBoatGame extends GameView {
             status = seat == Seat.STROKE ? "TAKE A STROKE - THE CREW FOLLOWS YOUR RHYTHM"
                     : "TAKE A STROKE - THEN MATCH THE STROKE SEAT'S RHYTHM";
         } else if (phase == Phase.DONE) {
-            status = (won ? "YOUR CREW WON  ·  " : "BEATEN  ·  ") + clock(finishTime)
+            status = (lastWasRegatta ? (won ? "REGATTA WON  ·  " : "REGATTA LOST  ·  ")
+                    : won ? "YOUR CREW WON  ·  " : "BEATEN  ·  ") + clock(finishTime)
                     + (newBest ? "  ·  NEW BEST" : "") + (bestTen > 0 ? "  ·  BEST TEN " + bestTen + "/10" : "")
+                    + (perfectTwenties > 0 ? "  ·  " + perfectTwenties + "x PERFECT 20" : "")
                     + "  ·  tap to race again";
         } else {
             status = String.format(java.util.Locale.US, "%s%.0f m  ·  %d of %d m  ·  %s", gap >= 0 ? "+" : "−",
-                    Math.abs(gap), Math.round(yourMeters), RACE_METERS, clock(sessionSeconds - raceStart));
+                    Math.abs(gap), Math.round(yourMeters), raceMeters, clock(sessionSeconds - raceStart));
         }
         bold(c, status, cx, h - dp(14f), 12f, phase == Phase.DONE && won ? ACCENT : TEXT, Paint.Align.CENTER);
     }
 
+    /** "SWING · n STROKES IN TIME", rebuilt only when n changes. */
+    private String swingCaption() {
+        if (swing != swingLabelKey) {
+            swingLabelKey = swing;
+            swingLabel = "SWING  ·  " + swing + " STROKES IN TIME";
+        }
+        return swingLabel;
+    }
+
+    /** Where the season stands, rebuilt only when the day, the season or the tick count changes. */
+    private String seasonCaption() {
+        int key = (regattaDay ? 1 : 0) + 2 * (trainingDays + 8 * (dayIndex + 8 * seasonNo));
+        if (key != seasonLabelKey) {
+            seasonLabelKey = key;
+            int toGo = SEASON_DAYS - dayIndex;
+            seasonLabel = regattaDay
+                    ? "REGATTA DAY  ·  " + REGATTA_METERS + " m  ·  CREW FITNESS +" + trainingDays + "%"
+                    : "SEASON " + seasonNo + "  ·  DAY " + (dayIndex + 1) + " OF " + SEASON_DAYS
+                            + "  ·  REGATTA IN " + toGo + (toGo == 1 ? " DAY" : " DAYS");
+        }
+        return seasonLabel;
+    }
+
+    private int moraleColor() {
+        return morale > 0.66f ? ACCENT : morale > 0.33f ? WARN : BAD;
+    }
+
+    /**
+     * Twenty ticks, one per stroke in time. Filling the last one buys fifteen seconds of a flying
+     * boat, so there is always something at stake within the next few strokes.
+     */
+    private void drawTwentyTrack(Canvas c, float cx) {
+        int done = swing == 0 ? 0 : (swing % PERFECT == 0 ? PERFECT : swing % PERFECT);
+        float tick = dp(15f);
+        float x0 = cx - tick * PERFECT / 2f;
+        boolean flying = sessionSeconds < swingBonusUntil;
+        for (int i = 0; i < PERFECT; i++) {
+            float x = x0 + i * tick;
+            paint.setColor(i < done ? (twentyFlash > 0.5f ? 0xFFFFFFFF : 0xFFF0B132) : 0x2BFFFFFF);
+            c.drawRoundRect(x + dp(1.5f), dp(88f), x + tick - dp(1.5f), dp(96f), dp(2f), dp(2f), paint);
+        }
+        int secsLeft = flying ? (int) Math.ceil(swingBonusUntil - sessionSeconds) : 0;
+        int key = flying ? 1000 + secsLeft : perfectTwenties > 0 ? -1 - perfectTwenties : done;
+        if (key != twentyLabelKey) {
+            twentyLabelKey = key;
+            twentyLabel = flying ? "FLYING  ·  +8%  ·  " + secsLeft + "s"
+                    : perfectTwenties > 0 ? "PERFECT TWENTY  ·  " + perfectTwenties + " THIS RACE"
+                            : "PERFECT TWENTY  ·  " + (PERFECT - done) + " TO GO";
+        }
+        if (flying) {
+            bold(c, twentyLabel, cx, dp(110f), 11f, WARN, Paint.Align.CENTER);
+        } else {
+            label(c, twentyLabel, cx, dp(110f), 10f, FAINT, Paint.Align.CENTER);
+        }
+    }
+
+    /** The season strip: six training days and the regatta, ticked as they are rowed. */
+    private void drawCalendarRow(Canvas c, float x, float y, float cell, float h, boolean labels) {
+        paint.setStyle(Paint.Style.FILL);
+        for (int d = 0; d <= SEASON_DAYS; d++) {
+            float left = x + d * cell;
+            boolean done = (seasonDays & (1 << d)) != 0;
+            boolean isRegatta = d == SEASON_DAYS;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(isRegatta ? (regattaDay ? 0xFFF0B132 : 0x55F0B132) : done ? 0xFF35D0BA : 0x33FFFFFF);
+            c.drawRoundRect(left + dp(2f), y, left + cell - dp(2f), y + h, dp(3f), dp(3f), paint);
+            if (d == dayIndex) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2f));
+                paint.setColor(0xFFFFFFFF);
+                c.drawRoundRect(left + dp(1f), y - dp(1f), left + cell - dp(1f), y + h + dp(1f), dp(4f), dp(4f), paint);
+                paint.setStyle(Paint.Style.FILL);
+            }
+            if (labels) {
+                label(c, DAY_LABELS[Math.min(d, SEASON_DAYS)], left + cell / 2f, y + h + dp(14f), 9f,
+                        done || isRegatta ? TEXT : FAINT, Paint.Align.CENTER);
+                if (done && !isRegatta) {
+                    // A tick, drawn as two strokes.
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(2.5f));
+                    paint.setColor(0xFF0A1420);
+                    float ux = left + cell / 2f;
+                    float uy = y + h / 2f;
+                    c.drawLine(ux - dp(6f), uy, ux - dp(1f), uy + dp(5f), paint);
+                    c.drawLine(ux - dp(1f), uy + dp(5f), ux + dp(7f), uy - dp(6f), paint);
+                    paint.setStyle(Paint.Style.FILL);
+                }
+            }
+        }
+    }
+
     /** Ten pips, one per stroke of the ten: gold if it beat your average, red if it did not. */
     private void drawTenPanel(Canvas c, float cx) {
-        float top = dp(94f);
+        float top = dp(126f);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(tenFlash > 0 ? 0xCC3A2A06 : 0xB30A1420);
         c.drawRoundRect(cx - dp(170f), top, cx + dp(170f), top + dp(58f), dp(12f), dp(12f), paint);
@@ -782,15 +1389,145 @@ final class CrewBoatGame extends GameView {
         }
     }
 
-    private void drawSeatButtons(Canvas c, float cx, float h) {
-        float top = h * 0.30f - dp(84f);
-        float bw = dp(250f);
-        float bh = dp(58f);
-        strokeBtn.set(cx - bw - dp(10f), top, cx - dp(10f), top + bh);
-        bowBtn.set(cx + dp(10f), top, cx + bw + dp(10f), top + bh);
-        label(c, "CHOOSE YOUR SEAT", cx, top - dp(8f), 11f, TEXT, Paint.Align.CENTER);
-        drawSeatButton(c, strokeBtn, "STROKE", "crew follows you", seat == Seat.STROKE);
-        drawSeatButton(c, bowBtn, "BOW  ·  HARDER", "you follow the crew", seat == Seat.BOW);
+    /**
+     * The boathouse, shown before and after a race: the seat you are taking, where the season has
+     * got to, how the seat races have gone, and who is in the boat with you.
+     */
+    private void drawCrewRoom(Canvas c, float cx, float w, float h) {
+        float pw = Math.min(w - dp(40f), dp(960f));
+        float ph = dp(292f);
+        float top = Math.max(dp(136f), h * 0.19f);
+        panel.set(cx - pw / 2f, top, cx + pw / 2f, top + ph);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xE6081120);
+        c.drawRoundRect(panel, dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(regattaDay ? 0xFFF0B132 : 0x5535D0BA);
+        c.drawRoundRect(panel, dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.FILL);
+
+        bold(c, regattaDay
+                        ? "REGATTA DAY  ·  " + REGATTA_METERS + " m  ·  SEASON " + seasonNo
+                        : "SEASON " + seasonNo + "  ·  TRAINING DAY " + (dayIndex + 1) + "  ·  " + raceMeters + " m",
+                cx, panel.top + dp(26f), 15f, regattaDay ? WARN : TEXT, Paint.Align.CENTER);
+
+        float bw = Math.min(dp(284f), (pw - dp(70f)) / 3f);
+        float bh = dp(56f);
+        float by = panel.top + dp(40f);
+        float gap = dp(12f);
+        float x0 = cx - (bw * 3f + gap * 2f) / 2f;
+        strokeBtn.set(x0, by, x0 + bw, by + bh);
+        engineBtn.set(x0 + bw + gap, by, x0 + bw * 2f + gap, by + bh);
+        bowBtn.set(x0 + (bw + gap) * 2f, by, x0 + bw * 3f + gap * 2f, by + bh);
+        drawSeatButton(c, strokeBtn, "STROKE", "crew follows your rhythm", seat == Seat.STROKE);
+        drawSeatButton(c, engineBtn, "ENGINE ROOM", "press harder, timing forgiven", seat == Seat.ENGINE);
+        drawSeatButton(c, bowBtn, "BOW  ·  HARDEST", "you follow the crew", seat == Seat.BOW);
+
+        float colY = by + bh + dp(26f);
+        float colW = (pw - dp(64f)) / 3f;
+        float c1 = panel.left + dp(22f);
+        float c2 = c1 + colW + dp(10f);
+        float c3 = c2 + colW + dp(10f);
+        drawSeasonColumn(c, c1, colY, colW);
+        drawSeatRaceColumn(c, c2, colY, colW);
+        drawRosterColumn(c, c3, colY, colW);
+    }
+
+    private void drawSeasonColumn(Canvas c, float x, float y, float colW) {
+        label(c, "THE SEASON", x, y, 10f, ACCENT, Paint.Align.LEFT);
+        float cell = Math.min(dp(40f), colW / (SEASON_DAYS + 1));
+        drawCalendarRow(c, x, y + dp(14f), cell, dp(26f), true);
+        label(c, trainingDays + " of " + SEASON_DAYS + " days trained", x, y + dp(74f), 11f, TEXT, Paint.Align.LEFT);
+        label(c, regattaDay ? "worth +" + trainingDays + "% to the boat today"
+                : "each day is worth +1% in the regatta", x, y + dp(92f), 10f, DIM, Paint.Align.LEFT);
+        label(c, "CUPS WON  ·  " + regattaWins, x, y + dp(116f), 11f, regattaWins > 0 ? WARN : FAINT, Paint.Align.LEFT);
+        label(c, "MORALE  ·  " + moraleWord(morale), x, y + dp(136f), 11f, moraleColor(), Paint.Align.LEFT);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x33FFFFFF);
+        c.drawRoundRect(x, y + dp(144f), x + colW - dp(20f), y + dp(152f), dp(4f), dp(4f), paint);
+        paint.setColor(moraleColor());
+        c.drawRoundRect(x, y + dp(144f), x + (colW - dp(20f)) * morale, y + dp(152f), dp(4f), dp(4f), paint);
+    }
+
+    /** Seat races: the finishing margin from each seat, per 1000 m, and which seat you are worth more in. */
+    private void drawSeatRaceColumn(Canvas c, float x, float y, float colW) {
+        label(c, "SEAT RACES  ·  SEATS PER 1000 m", x, y, 10f, ACCENT, Paint.Align.LEFT);
+        int best = -1;
+        int raced = 0;
+        for (int i = 0; i < 3; i++) {
+            if (seatRaces[i] > 0) {
+                raced++;
+                if (best < 0 || seatBestMargin[i] > seatBestMargin[best]) {
+                    best = i;
+                }
+            }
+        }
+        Seat[] all = SEAT_ORDER;
+        for (int i = 0; i < 3; i++) {
+            float ry = y + dp(22f) + i * dp(30f);
+            boolean here = seat == all[i];
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(here ? 0x3335D0BA : 0x14FFFFFF);
+            c.drawRoundRect(x, ry - dp(13f), x + colW - dp(20f), ry + dp(11f), dp(6f), dp(6f), paint);
+            label(c, all[i].name(), x + dp(8f), ry + dp(4f), 11f, here ? TEXT : DIM, Paint.Align.LEFT);
+            if (seatRaces[i] == 0) {
+                label(c, "not raced", x + colW - dp(28f), ry + dp(4f), 10f, FAINT, Paint.Align.RIGHT);
+            } else {
+                label(c, String.format(java.util.Locale.US, "last %+.1f  ·  best %+.1f  ·  %d",
+                                seatLastMargin[i] / (float) SEAT_METRES, seatBestMargin[i] / (float) SEAT_METRES, seatRaces[i]),
+                        x + colW - dp(28f), ry + dp(4f), 10f,
+                        i == best ? WARN : seatLastMargin[i] >= 0 ? ACCENT : BAD, Paint.Align.RIGHT);
+            }
+        }
+        label(c, "seats up on the rival crew at the line", x, y + dp(126f), 10f, FAINT, Paint.Align.LEFT);
+        if (raced >= 2 && best >= 0) {
+            int second = -1;
+            for (int i = 0; i < 3; i++) {
+                if (i != best && seatRaces[i] > 0 && (second < 0 || seatBestMargin[i] > seatBestMargin[second])) {
+                    second = i;
+                }
+            }
+            float diff = (seatBestMargin[best] - seatBestMargin[second]) / (float) SEAT_METRES;
+            bold(c, String.format(java.util.Locale.US, "COACH: %+.1f seats better at %s", diff, all[best].name()),
+                    x, y + dp(148f), 11f, WARN, Paint.Align.LEFT);
+        } else {
+            label(c, "race a second seat to compare them", x, y + dp(148f), 10f, DIM, Paint.Align.LEFT);
+        }
+    }
+
+    /** The eight by name, with the seat you are taking marked and the crew's mood on their faces. */
+    private void drawRosterColumn(Canvas c, float x, float y, float colW) {
+        label(c, "YOUR CREW", x, y, 10f, ACCENT, Paint.Align.LEFT);
+        int you = youSeatIndex();
+        float half = (colW - dp(20f)) / 2f;
+        for (int i = 0; i < SEATS; i++) {
+            float rx = x + (i >= 4 ? half + dp(8f) : 0f);
+            float ry = y + dp(22f) + (i % 4) * dp(30f);
+            boolean isYou = i == you;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(isYou ? 0x3335D0BA : 0x14FFFFFF);
+            c.drawRoundRect(rx, ry - dp(13f), rx + half, ry + dp(11f), dp(6f), dp(6f), paint);
+            // A face, coloured by morale and by how easily this rower fades.
+            float mood = clamp01(morale * (0.6f + 0.4f * (1f - seatWeak[i])));
+            paint.setColor(mix(0xFFE0604A, 0xFFF1C27D, mood));
+            c.drawCircle(rx + dp(14f), ry - dp(1f), dp(7f), paint);
+            paint.setColor(0xFF0A1420);
+            c.drawCircle(rx + dp(11.5f), ry - dp(3f), dp(1.2f), paint);
+            c.drawCircle(rx + dp(16.5f), ry - dp(3f), dp(1.2f), paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.4f));
+            // The mouth turns with morale: a flat crew is a flat line.
+            float curve = (mood - 0.5f) * dp(5f);
+            path.reset();
+            path.moveTo(rx + dp(10.5f), ry + dp(2f));
+            path.quadTo(rx + dp(14f), ry + dp(2f) + curve, rx + dp(17.5f), ry + dp(2f));
+            c.drawPath(path, paint);
+            paint.setStyle(Paint.Style.FILL);
+            bold(c, isYou ? "YOU" : MATE_NAMES[i], rx + dp(26f), ry + dp(3f), 11f, isYou ? ACCENT : TEXT, Paint.Align.LEFT);
+            label(c, MATE_ROLE[i], rx + half - dp(6f), ry + dp(3f), 9f, FAINT, Paint.Align.RIGHT);
+        }
+        label(c, "they'll tell you how it's going", x, y + dp(148f), 10f, FAINT, Paint.Align.LEFT);
     }
 
     private void drawSeatButton(Canvas c, RectF r, String title, String sub, boolean on) {
@@ -802,8 +1539,8 @@ final class CrewBoatGame extends GameView {
         paint.setColor(on ? 0xFFFFFFFF : 0x88FFFFFF);
         c.drawRoundRect(r, dp(14f), dp(14f), paint);
         paint.setStyle(Paint.Style.FILL);
-        bold(c, title, r.centerX(), r.top + dp(26f), 17f, on ? 0xFF0A1420 : TEXT, Paint.Align.CENTER);
-        label(c, sub, r.centerX(), r.top + dp(46f), 11f, on ? 0xFF0A1420 : DIM, Paint.Align.CENTER);
+        bold(c, title, r.centerX(), r.top + dp(25f), 15f, on ? 0xFF0A1420 : TEXT, Paint.Align.CENTER);
+        label(c, sub, r.centerX(), r.top + dp(44f), 10f, on ? 0xFF0A1420 : DIM, Paint.Align.CENTER);
     }
 
     /** Sky, a far bank of trees and a crowd along it with flags, scrolling with the boat. */
@@ -844,7 +1581,9 @@ final class CrewBoatGame extends GameView {
         // The crowd along the bank: heads bobbing, flags waving - louder in a close race or a ten.
         float fanGap = dp(18f);
         float foff = (float) ((scenery * ppm * 0.9) % fanGap);
-        boolean roar = sync > 0.8f || tenActive || (phase == Phase.RACING && Math.abs(yourMeters - rivalMeters) < SEAT_METRES * 2);
+        // Regatta day brings a crowd that is up on its feet before the start.
+        boolean roar = sync > 0.8f || tenActive || regattaDay || sessionSeconds < swingBonusUntil
+                || (phase == Phase.RACING && Math.abs(yourMeters - rivalMeters) < SEAT_METRES * 2);
         int[] shirts = SHIRTS;
         for (float x = -foff; x < w + fanGap; x += fanGap) {
             int k = (int) Math.floor((x + scenery * ppm * 0.9) / fanGap);
@@ -928,6 +1667,19 @@ final class CrewBoatGame extends GameView {
         bold(c, text, bx + dp(12f) + tw / 2f, by + bh * 0.5f + dp(size * 0.36f), size, ink, Paint.Align.CENTER);
     }
 
+    /**
+     * A crewmate speaking, from their own seat in the boat. Pale blue against the cox's white, so
+     * it reads as the crew talking rather than another call.
+     */
+    private void drawMateBubble(Canvas c, float w) {
+        float spacing = eightLen * 0.8f / SEATS;
+        float x = eightCx + eightLen * 0.36f - mateSeat * spacing;
+        float y = eightYNow - dp(50f);
+        // A little bob so a speaking rower is easy to find among eight of them.
+        float bob = (float) Math.sin(sessionSeconds * 9) * dp(2f);
+        drawCoxCall(c, mateText, x, y + bob, w, 0xF2D7ECFF, 0xFF0B2438, 12f);
+    }
+
     /** Puddles drift astern with the boat's own speed, widening and fading over about 3 s. */
     private void drawPuddles(Canvas c, float dt, float ppm, float moving) {
         for (int i = 0; i < PUDDLES; i++) {
@@ -987,9 +1739,13 @@ final class CrewBoatGame extends GameView {
             if (i == youSeat && youPhase >= 0f) {
                 phaseT = youPhase;
             } else {
-                // Out of time, or exhausted, the crew spreads out: some early, some late.
-                float lag = ((1f - crewSync) * 0.28f + t * 0.22f) * lags[i];
-                phaseT = basePhase + lag;
+                // Out of time, or exhausted, the crew spreads out: some early, some late. A crew
+                // whose morale is up sits visibly tighter on the same sync figure.
+                float spread = (1f - crewSync) * 0.28f + t * 0.22f;
+                if (player) {
+                    spread *= 1.2f - 0.4f * morale;
+                }
+                phaseT = basePhase + spread * lags[i];
             }
             phaseT = phaseT - (float) Math.floor(phaseT);
             float drive = phaseT < 0.35f ? phaseT / 0.35f : 1f - (phaseT - 0.35f) / 0.65f;

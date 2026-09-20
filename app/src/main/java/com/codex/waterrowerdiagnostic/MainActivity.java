@@ -128,6 +128,45 @@ public class MainActivity extends Activity
     private PersonalBests personalBests;
     private final java.util.List<TextView> pbLabels = new java.util.ArrayList<>();
 
+    /* ---------- who is rowing ---------- */
+
+    /**
+     * The profile list. Built before {@link #personalBests}, because the records store is whatever
+     * file the active profile owns - the first profile keeps the original un-namespaced one, so the
+     * rower who has been using this tablet loses nothing.
+     */
+    private RowerProfiles profiles;
+    /** The active profile's row history. Rebound on a switch, never shared between rowers. */
+    private SessionLog sessionLog;
+    /**
+     * The profile whose files are bound right now, so a rename does not read as a switch - and so
+     * a row finished during a switch is filed under the rower who actually did it. {@code
+     * setActive} has already changed the active profile by the time the listener runs.
+     */
+    private String boundProfileId;
+    /** {@link RowerProfiles} caps the list here; {@code create()} returns the active one when full. */
+    private static final int MAX_PROFILES = 12;
+    private TextView profileChip;
+    /** Built once and reused; the history screen is a single hand-drawn view. */
+    private HistoryView historyView;
+
+    /* ---------- session recording ---------- */
+
+    /** One row per screen: started when a game or the gauges open, committed on the way home. */
+    private SessionLog.Recorder recorder;
+    /** The title of the screen the recorder is collecting, set by {@link #gameScreen}. */
+    private String lastGameTitle = "ROW";
+    /** Session-to-date values when the recorder started, so each row counts from zero. */
+    private double recorderMetresBase = -1;
+    private int recorderStrokesBase = -1;
+    private double recorderJoulesBase = -1;
+    /** The recorder's own rowing clock: it only advances while strokes are landing. */
+    private float recorderSeconds;
+    private long recorderTickMs;
+    /** Backups are occasional by design - the laptop is usually off and must never be waited on. */
+    private static final long BACKUP_MIN_GAP_MS = 5 * 60 * 1000L;
+    private long lastBackupMs;
+
     /**
      * Lifetime metres for the Journey. The monitor's own distance counter accumulates across
      * sessions and can be reset on the S4, so the app tracks its own base and re-bases on a reset.
@@ -211,6 +250,8 @@ public class MainActivity extends Activity
     private GaugeRatioDialView ratioDial;
     private GaugePowerStripView powerStrip;
     private GaugeSummaryView pieceSummary;
+    /** The coach layer: record watch, negative split, effort bank, warm-up offer, weekly ring. */
+    private GaugeCoachView gaugeCoach;
     private TextView paceCaption;
     /** Target split in seconds per 500 m, 0 for none. Tap the PACE tile to set it. */
     private float paceTargetSec;
@@ -292,10 +333,15 @@ public class MainActivity extends Activity
             new java.util.concurrent.atomic.AtomicInteger();
     private final S4Protocol s4Protocol = new S4Protocol(this::handleS4Packet);
     private DemoRower demoRower;
-    /** The rower's learned range, shared by every game. See RowerProfile. */
-    private final RowerProfile profile = new RowerProfile();
-    /** Levels, the weekly goal and the streak. */
-    private final Progress progress = new Progress();
+    /**
+     * The rower's learned range, shared by every game. See RowerProfile.
+     *
+     * <p>Not final: it belongs to the active profile, so switching rowers replaces it rather than
+     * blending one rower's envelope into another's games.
+     */
+    private RowerProfile profile = new RowerProfile();
+    /** Levels, the weekly goal and the streak. Per profile, like the envelope above. */
+    private Progress progress = new Progress();
     private HomeProgressView progressView;
     private TextView continueChip;
     private double lastProgressMetres = -1;
@@ -316,13 +362,24 @@ public class MainActivity extends Activity
     private ShuffleBag shuffleBag;
     private TextView shuffleNextChip;
     /* SHUFFLE decks, score, lock/veto and recap. */
-    private static final String[] SHUFFLE_DECKS = {"ALL", "RACES", "CHILL", "SPRINTS"};
+    private static final String[] SHUFFLE_DECKS = {"ALL", "RACES", "CHILL", "SPRINTS", "GAUNTLET"};
     /** Indices into SHUFFLE_TITLES for each deck; ALL is every game. */
     private static final int[][] SHUFFLE_DECK_GAMES = {
             null,
             {7, 8, 10, 11, 0},                  // races: RACE, CREW BOAT, HEAD RACE, TUG OF WAR, ZOMBIE RUN
             {2, 3, 12, 13, 14, 9, 4},           // chill: SKYLINE, WAVE RIDER, COLLECTOR, RIVER, COACH, GRID, CANYON
-            {6, 5, 1, 0, 11}};                  // sprints: MEGA PULL, ROCKET, ROW RUNNER, ZOMBIE RUN, TUG OF WAR
+            {6, 5, 1, 0, 11},                   // sprints: MEGA PULL, ROCKET, ROW RUNNER, ZOMBIE RUN, TUG OF WAR
+            {6, 5, 1, 0, 11, 10, 7}};           // gaunlet: the sprints plus the two races, locked at first
+    /** The deck a full round unlocks. Locked until then; the index into SHUFFLE_DECKS. */
+    private static final int SHUFFLE_LOCKED_DECK = 4;
+    /** A beaten boss is worth this per minute of the round, on top of the points scored. */
+    private static final int BOSS_BONUS_PER_MINUTE = 150;
+    /**
+     * Games in a round before the boss. Capped rather than "the whole deck": ALL is fifteen games,
+     * which at two minutes each puts the first boss half an hour away, and the boss is meant to be
+     * something this session reaches.
+     */
+    private static final int SHUFFLE_ROUND_GAMES = 5;
     /**
      * The record each shuffle game can break, watched so the recap can say "NEW RECORD" as that
      * game's best moment. Null where the key depends on a setting the shuffle does not pick.
@@ -344,6 +401,25 @@ public class MainActivity extends Activity
     private ShuffleOverlayView shuffleOverlay;
     private TextView shuffleScoreChip;
     private boolean shuffleRecapPending;
+    /* SHUFFLE rounds: the boss at the end of one, the wildcards, the carried combo and mystery. */
+    /** Games dealt so far in this round, not counting the boss. */
+    private int shuffleDealtThisRound;
+    /** How many games a full round is - the pool size when the round was dealt. */
+    private int shuffleRoundSize;
+    private int shuffleRoundNumber = 1;
+    private int shuffleRoundsDone;
+    private boolean shuffleBossRound;
+    private boolean shuffleBossBeaten;
+    private int shuffleBossesBeaten;
+    private int shuffleBossHp;
+    private int shuffleBossMaxHp;
+    /** One of ShuffleOverlayView.WILD_*, rolled per game. */
+    private int shuffleWildcard;
+    private int shuffleRateCap;
+    /** Strokes this game that broke the rate cap, so the recap can say what it cost. */
+    private long shuffleLastStrokeMs;
+    private boolean shuffleMystery;
+    private TextView shuffleDeckChip;
     /** Latest status on the UI thread, for once-a-second sampling. */
     private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
@@ -519,7 +595,12 @@ public class MainActivity extends Activity
     }
 
     private View buildUi() {
-        personalBests = new PersonalBests(this);
+        // Profiles first: the records file is the active profile's, and everything below reads it.
+        profiles = new RowerProfiles(this);
+        boundProfileId = profiles.activeId();
+        personalBests = profiles.activeRecords();
+        sessionLog = SessionLog.forActiveProfile(this, profiles);
+        profiles.addListener(this::onProfilesChanged);
         autoUpload = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(PREF_STREAM, false);
         journeyLifetime = personalBests.get("journey.total", 0f);
         loadCalibration();
@@ -590,6 +671,8 @@ public class MainActivity extends Activity
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         if (screen == homeScreen) {
             saveLastSession();
+            // Same path as last.session: the row just finished becomes a line in the history.
+            commitRecorder();
             refreshPersonalBests();
             refreshProgress();
             if (shuffleRecapPending) {
@@ -638,7 +721,8 @@ public class MainActivity extends Activity
                     }
                 }, 2000);
             }
-            // Screens that are not home cards: --es screen RECORDS | HELP | CALIBRATE | CANYON_DRIVE | SESSION_ART
+            // Screens that are not home cards:
+            // --es screen RECORDS | HISTORY | PROFILES | HELP | CALIBRATE | CANYON_DRIVE | SESSION_ART
             String screen = intent.getStringExtra("screen");
             if (screen != null) {
                 screenHost.postDelayed(() -> {
@@ -646,6 +730,12 @@ public class MainActivity extends Activity
                     switch (screen) {
                         case "RECORDS":
                             showRecords();
+                            break;
+                        case "HISTORY":
+                            showHistory();
+                            break;
+                        case "PROFILES":
+                            showProfilePicker();
                             break;
                         case "HELP":
                             showHelpPage(0);
@@ -673,10 +763,13 @@ public class MainActivity extends Activity
 
     private void showInstruments() {
         showScreen(instrumentsScreen);
+        startRecorder("GAUGES");
     }
 
     private void showGame(GameView game, View screen) {
         showScreen(screen);
+        // gameScreen() ran while this call's arguments were being evaluated, so the title is set.
+        startRecorder(lastGameTitle);
         currentGame = game;
         game.setDrag(coastDrag);
         game.setProfile(profile);
@@ -713,9 +806,17 @@ public class MainActivity extends Activity
         sub.setTextSize(10);
         sub.setTextColor(getColorCompat(R.color.text_faint));
         header.addView(sub, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        // Who is rowing: a dot in the rower's colour and their name, tap to switch or add.
+        profileChip = chip("");
+        profileChip.setOnClickListener(v -> showProfilePicker());
+        header.addView(profileChip);
+        refreshProfileChip();
         TextView records = chip("RECORDS");
         records.setOnClickListener(v -> showRecords());
         header.addView(records);
+        TextView history = chip("HISTORY");
+        history.setOnClickListener(v -> showHistory());
+        header.addView(history);
         TextView calibrate = chip("CALIBRATE");
         calibrate.setOnClickListener(v -> openCalibrate());
         header.addView(calibrate);
@@ -1169,13 +1270,23 @@ public class MainActivity extends Activity
         shuffleLocked = false;
         shuffleCurrent = -1;
         shuffleDeck = 0;
+        shuffleDealtThisRound = 0;
+        shuffleRoundNumber = 1;
+        shuffleRoundsDone = 0;
+        shuffleBossRound = false;
+        shuffleBossBeaten = false;
+        shuffleBossesBeaten = 0;
+        shuffleWildcard = ShuffleOverlayView.WILD_NONE;
+        shuffleLastStrokeMs = System.currentTimeMillis();
+        shuffleMystery = "1".equals(personalBests.getString("shuffle.mystery"));
         String savedDeck = personalBests.getString("shuffle.deck");
         for (int d = 0; d < SHUFFLE_DECKS.length; d++) {
-            if (SHUFFLE_DECKS[d].equals(savedDeck)) {
+            if (SHUFFLE_DECKS[d].equals(savedDeck) && (d != SHUFFLE_LOCKED_DECK || gauntletUnlocked())) {
                 shuffleDeck = d;
             }
         }
         shuffleBag = new ShuffleBag(shuffleDeckGames(shuffleDeck), new java.util.Random());
+        shuffleRoundSize = Math.min(SHUFFLE_ROUND_GAMES, shuffleBag.poolSize());
         if (shuffleOverlay == null) {
             shuffleOverlay = new ShuffleOverlayView(this, new ShuffleOverlayView.Source() {
                 @Override
@@ -1205,14 +1316,62 @@ public class MainActivity extends Activity
         return games;
     }
 
-    /** Next game from the bag, with the speed needle carried over from the last one. */
+    /**
+     * Next game from the bag, with the speed needle carried over from the last one.
+     *
+     * <p>Three things happen at a switch besides the deal. A combo still running is <b>carried</b>
+     * and pays a bonus, so a switch is something to row through rather than a place to stop. Every
+     * ordinary game is dealt a <b>wildcard</b>. And when the round's games are spent, the next deal
+     * is the <b>boss round</b>: the game that scored most this round, come back, at double points,
+     * with a health bar the size of a good round's scoring.
+     */
     private void dealShuffle(float carrySpeed) {
+        boolean wasBoss = shuffleBossRound;
+        boolean carried = !shuffleLegs.isEmpty() && shuffleMultiplier() > 1;
+        int carriedMult = shuffleMultiplier();
+        // Capped: the streak itself is unbounded, so an uncapped 5-a-stroke carry would pay a
+        // bigger jackpot at every switch than the games themselves score.
+        int carryBonus = carried ? Math.min(shuffleStreak, 24) * 5 : 0;
         closeShuffleLeg();
-        int pick = shuffleBag.next();
+        if (wasBoss) {
+            finishShuffleRound();
+        }
+
+        boolean boss = shuffleRoundSize > 0 && shuffleDealtThisRound >= shuffleRoundSize;
+        int pick;
+        if (boss) {
+            pick = bossShufflePick();
+            shuffleBossRound = true;
+            shuffleBossBeaten = false;
+            // Scaled to the rower, not to a guess. A stroke at their typical watts scores ten,
+            // doubled in the boss round, so a minute at their own rate is rate x 20 points before
+            // the combo. 1.8x that means the boss needs the combo running, or real power: at 25 spm
+            // over two minutes it is 1,800 HP against 1,000 points of flat typical rowing.
+            double rate = Math.max(16, profile.typicalRate());
+            int minutes = SHUFFLE_MINUTES[shuffleMinutesIndex];
+            shuffleBossMaxHp = (int) (Math.round(minutes * rate * 20 * 1.8 / 10.0) * 10);
+            shuffleBossHp = shuffleBossMaxHp;
+            shuffleWildcard = ShuffleOverlayView.WILD_NONE;
+        } else {
+            pick = shuffleBag.next();
+            shuffleDealtThisRound++;
+            shuffleBossRound = false;
+            rollShuffleWildcard();
+        }
         shuffleCurrent = pick;
         shuffleLocked = false;
+        shuffleLastStrokeMs = System.currentTimeMillis();
+        if (carried) {
+            shuffleScore += carryBonus;
+        }
         GameView game = shuffleGame(pick);
         shuffleLeg = new ShuffleRecapView.Leg(SHUFFLE_TITLES[pick]);
+        shuffleLeg.boss = boss;
+        shuffleLeg.wildcard = wildcardName(shuffleWildcard);
+        shuffleLeg.carried = carryBonus;
+        if (carried) {
+            shuffleLeg.points += carryBonus;
+        }
         shuffleLeg.recordKey = SHUFFLE_RECORD_KEYS[pick];
         if (shuffleLeg.recordKey != null) {
             shuffleLeg.recordBefore = personalBests.has(shuffleLeg.recordKey)
@@ -1227,15 +1386,26 @@ public class MainActivity extends Activity
         shuffleScoreChip = chip(shuffleScoreText());
         shuffleScoreChip.setTextColor(0xFFB48CFF);
         row.addView(shuffleScoreChip);
-        TextView deck = chip("DECK " + SHUFFLE_DECKS[shuffleDeck]);
+        TextView deck = chip(deckChipText());
+        shuffleDeckChip = deck;
         deck.setOnClickListener(v -> {
-            shuffleDeck = (shuffleDeck + 1) % SHUFFLE_DECKS.length;
-            applyShuffleDeck();
-            personalBests.putString("shuffle.deck", SHUFFLE_DECKS[shuffleDeck]);
-            deck.setText("DECK " + SHUFFLE_DECKS[shuffleDeck]);
+            cycleShuffleDeck();
+            deck.setText(deckChipText());
             shuffleTick();
         });
         row.addView(deck);
+        // Mystery: the next game is not named until the last three seconds of the countdown.
+        TextView mystery = chip(shuffleMystery ? "MYSTERY ON" : "MYSTERY OFF");
+        mystery.setTextColor(getColorCompat(shuffleMystery ? R.color.primary : R.color.text_primary));
+        mystery.setOnClickListener(v -> {
+            shuffleMystery = !shuffleMystery;
+            personalBests.putString("shuffle.mystery", shuffleMystery ? "1" : "0");
+            mystery.setText(shuffleMystery ? "MYSTERY ON" : "MYSTERY OFF");
+            mystery.setTextColor(getColorCompat(
+                    shuffleMystery ? R.color.primary : R.color.text_primary));
+            shuffleTick();
+        });
+        row.addView(mystery);
         TextView lock = chip("LOCK");
         lock.setOnClickListener(v -> {
             shuffleLocked = !shuffleLocked;
@@ -1266,8 +1436,121 @@ public class MainActivity extends Activity
         shuffleActive = true;
         settleShuffleRecords();
         game.seedSpeed(carrySpeed);
-        shuffleOverlay.announce(SHUFFLE_TITLES[pick], "DECK " + SHUFFLE_DECKS[shuffleDeck]
-                + "  ·  GAME " + shuffleLegs.size() + "  ·  " + shuffleScore + " PTS SO FAR");
+        shuffleOverlay.setBoss(boss, SHUFFLE_TITLES[pick], shuffleBossMaxHp);
+        shuffleOverlay.setWildcard(shuffleWildcard, wildcardName(shuffleWildcard),
+                wildcardDetail(shuffleWildcard));
+        shuffleOverlay.announce(boss ? "BOSS  ·  " + SHUFFLE_TITLES[pick] : SHUFFLE_TITLES[pick],
+                (boss ? "DOUBLE POINTS  ·  EMPTY THE BAR" : "DECK " + SHUFFLE_DECKS[shuffleDeck])
+                        + "  ·  ROUND " + shuffleRoundNumber + "  ·  " + shuffleScore + " PTS SO FAR");
+        if (carried) {
+            shuffleOverlay.carry(carryBonus, carriedMult);
+        }
+        if (shuffleScoreChip != null) {
+            shuffleScoreChip.setText(shuffleScoreText());
+        }
+    }
+
+    private String deckChipText() {
+        return "DECK " + SHUFFLE_DECKS[shuffleDeck];
+    }
+
+    private boolean gauntletUnlocked() {
+        return "GAUNTLET".equals(personalBests.getString("shuffle.unlocked"));
+    }
+
+    /** Cycles the deck, stepping over the locked one until a full round has been finished. */
+    private void cycleShuffleDeck() {
+        for (int i = 0; i < SHUFFLE_DECKS.length; i++) {
+            shuffleDeck = (shuffleDeck + 1) % SHUFFLE_DECKS.length;
+            if (shuffleDeck != SHUFFLE_LOCKED_DECK || gauntletUnlocked()) {
+                break;
+            }
+            toast("GAUNTLET is locked - finish a full round, boss and all, to unlock it");
+        }
+        applyShuffleDeck();
+        personalBests.putString("shuffle.deck", SHUFFLE_DECKS[shuffleDeck]);
+        // A new deck is a new round: its pool decides how many games the boss waits behind.
+        shuffleRoundSize = Math.min(SHUFFLE_ROUND_GAMES, shuffleBag.poolSize());
+        shuffleDealtThisRound = Math.min(shuffleDealtThisRound, shuffleRoundSize);
+    }
+
+    /**
+     * A round is done: the boss has been played out. That unlocks the harder deck the first time,
+     * and the next round starts from a fresh pool.
+     */
+    private void finishShuffleRound() {
+        shuffleBossRound = false;
+        shuffleRoundsDone++;
+        shuffleRoundNumber++;
+        shuffleDealtThisRound = 0;
+        shuffleRoundSize = Math.min(SHUFFLE_ROUND_GAMES, shuffleBag.poolSize());
+        shuffleOverlay.setBoss(false, "", 0);
+        if (!gauntletUnlocked()) {
+            personalBests.putString("shuffle.unlocked", "GAUNTLET");
+            toast("Full round finished - the GAUNTLET deck is unlocked");
+            if (shuffleDeckChip != null) {
+                shuffleDeckChip.setText(deckChipText());
+            }
+        }
+    }
+
+    /** The boss is the game that scored most in the round just played - it comes back. */
+    private int bossShufflePick() {
+        int best = -1;
+        int bestPoints = -1;
+        int from = Math.max(0, shuffleLegs.size() - Math.max(1, shuffleDealtThisRound));
+        for (int i = from; i < shuffleLegs.size(); i++) {
+            ShuffleRecapView.Leg leg = shuffleLegs.get(i);
+            if (leg.vetoed || leg.points <= bestPoints) {
+                continue;
+            }
+            for (int g = 0; g < SHUFFLE_TITLES.length; g++) {
+                if (SHUFFLE_TITLES[g].equals(leg.title)) {
+                    best = g;
+                    bestPoints = leg.points;
+                }
+            }
+        }
+        return best >= 0 ? best : shuffleBag.next();
+    }
+
+    /**
+     * One wildcard per ordinary game. Rate cap and no-rest are tuned to the rower's own cadence,
+     * not a constant: a cap at 27 spm is a joke for one rower and impossible for another.
+     */
+    private void rollShuffleWildcard() {
+        double roll = Math.random();
+        shuffleWildcard = roll < 0.45 ? ShuffleOverlayView.WILD_NONE
+                : roll < 0.65 ? ShuffleOverlayView.WILD_DOUBLE
+                : roll < 0.83 ? ShuffleOverlayView.WILD_RATE_CAP
+                : ShuffleOverlayView.WILD_NO_REST;
+        shuffleRateCap = (int) Math.round(Math.max(18, profile.typicalRate()) + 2);
+    }
+
+    private String wildcardName(int kind) {
+        switch (kind) {
+            case ShuffleOverlayView.WILD_DOUBLE:
+                return "DOUBLE POINTS";
+            case ShuffleOverlayView.WILD_RATE_CAP:
+                return "RATE CAP " + shuffleRateCap;
+            case ShuffleOverlayView.WILD_NO_REST:
+                return "NO REST";
+            default:
+                return "";
+        }
+    }
+
+    private String wildcardDetail(int kind) {
+        switch (kind) {
+            case ShuffleOverlayView.WILD_DOUBLE:
+                return "every stroke scores twice";
+            case ShuffleOverlayView.WILD_RATE_CAP:
+                return "over " + shuffleRateCap + " spm halves the stroke";
+            case ShuffleOverlayView.WILD_NO_REST:
+                return "8 s idle costs points";
+            default:
+                return "";
+        }
     }
 
     /** Re-deals from the chosen deck, keeping this shuffle's vetoes out of it. */
@@ -1331,7 +1614,19 @@ public class MainActivity extends Activity
         return SHUFFLE_MINUTES[shuffleMinutesIndex] * 60.0 - currentGame.activeSeconds();
     }
 
+    /**
+     * What is coming. The boss round is announced as a boss whatever else is set, because it is the
+     * one switch worth saving something for. In mystery mode the name is held back until the last
+     * three seconds of the countdown, so the deal is a reveal.
+     */
     private String shuffleUpcomingTitle() {
+        if (shuffleRoundSize > 0 && shuffleDealtThisRound >= shuffleRoundSize && !shuffleBossRound) {
+            return "THE BOSS";
+        }
+        double left = shuffleSecondsLeft();
+        if (shuffleMystery && (left < 0 || left > 3.0)) {
+            return "? ? ?";
+        }
         int next = shuffleBag != null ? shuffleBag.peek() : -1;
         return next >= 0 ? SHUFFLE_TITLES[next] : "A SURPRISE";
     }
@@ -1354,13 +1649,31 @@ public class MainActivity extends Activity
         double left = SHUFFLE_MINUTES[shuffleMinutesIndex] * 60.0 - currentGame.activeSeconds();
         if (shuffleLocked) {
             shuffleNextChip.setText("LOCKED  ·  " + PersonalBests.formatTime((float) currentGame.activeSeconds()));
+        } else if (left <= 6) {
+            shuffleNextChip.setText("NEXT: " + shuffleUpcomingTitle() + "  "
+                    + Math.max(0, (int) Math.ceil(left)));
         } else {
-            shuffleNextChip.setText(left <= 6
-                    ? "NEXT: " + shuffleUpcomingTitle() + "  " + Math.max(0, (int) Math.ceil(left))
-                    : "NEXT IN " + PersonalBests.formatTime((float) Math.max(0, left)));
+            // Where this game sits in the round, so the boss at the end of it is never a surprise.
+            String where = shuffleBossRound ? "  ·  BOSS"
+                    : "  ·  R" + shuffleRoundNumber + " " + shuffleDealtThisRound + "/" + shuffleRoundSize;
+            shuffleNextChip.setText("NEXT IN " + PersonalBests.formatTime((float) Math.max(0, left)) + where);
         }
         if (shuffleOverlay != null && !shuffleLocked && left <= 6) {
             shuffleOverlay.wake();
+        }
+        // NO REST: eight seconds without a stroke and the combo goes, then points start draining.
+        if (shuffleWildcard == ShuffleOverlayView.WILD_NO_REST && shuffleScore > 0) {
+            long idle = System.currentTimeMillis() - shuffleLastStrokeMs;
+            if (idle > 8000) {
+                shuffleStreak = 0;
+                shuffleScore = Math.max(0, shuffleScore - 5);
+                if (shuffleScoreChip != null) {
+                    shuffleScoreChip.setText(shuffleScoreText());
+                }
+                if (shuffleOverlay != null) {
+                    shuffleOverlay.wake();
+                }
+            }
         }
         double total = shuffleAccumSeconds + currentGame.activeSeconds();
         if (total >= 60) {
@@ -1394,11 +1707,17 @@ public class MainActivity extends Activity
             return;
         }
         shuffleLastStrokes = status.strokes;
+        shuffleLastStrokeMs = System.currentTimeMillis();
         float power = (float) (shuffleWattSum / shuffleWattSamples);
         shuffleWattSum = 0;
         shuffleWattSamples = 0;
         double typical = Math.max(40, profile.typicalWatts());
-        if (power >= typical * 0.95) {
+        // The rate cap wildcard: over the cap and the stroke is worth half, and the combo goes.
+        boolean overCap = shuffleWildcard == ShuffleOverlayView.WILD_RATE_CAP
+                && status.strokeRatePrecise > shuffleRateCap;
+        if (overCap) {
+            shuffleStreak = 0;
+        } else if (power >= typical * 0.95) {
             shuffleStreak++;
         } else if (power < typical * 0.85) {
             shuffleStreak = 0;
@@ -1406,9 +1725,18 @@ public class MainActivity extends Activity
         int mult = shuffleMultiplier();
         // Lumped reads (several strokes in one update) score as one: their power is one average.
         int base = (int) Math.max(0, Math.min(30, Math.round(10.0 * power / typical)));
-        int points = base * mult;
+        if (overCap) {
+            base /= 2;
+        }
+        // The boss round and the double wildcard both double; they never stack, because the boss
+        // round is not dealt a wildcard.
+        int wildFactor = shuffleBossRound || shuffleWildcard == ShuffleOverlayView.WILD_DOUBLE ? 2 : 1;
+        int points = base * mult * wildFactor;
         shuffleScore += points;
         shuffleLeg.points += points;
+        if (shuffleBossRound && points > 0) {
+            damageShuffleBoss(points);
+        }
         shuffleLeg.strokes += landed;
         if (power > shuffleLeg.bestWatts) {
             shuffleLeg.bestWatts = power;
@@ -1421,6 +1749,31 @@ public class MainActivity extends Activity
         if (shuffleOverlay != null && points > 0) {
             shuffleOverlay.pop(points, mult);
         }
+    }
+
+    /**
+     * The boss takes the points just scored. Beating it pays a bonus scaled to the round length,
+     * banks a record, and leaves the bar empty for the rest of the round.
+     */
+    private void damageShuffleBoss(int points) {
+        if (shuffleBossBeaten) {
+            return;
+        }
+        shuffleBossHp = Math.max(0, shuffleBossHp - points);
+        if (shuffleBossHp > 0) {
+            shuffleOverlay.bossDamage(shuffleBossHp);
+            return;
+        }
+        shuffleBossBeaten = true;
+        shuffleBossesBeaten++;
+        int bonus = BOSS_BONUS_PER_MINUTE * SHUFFLE_MINUTES[shuffleMinutesIndex];
+        shuffleScore += bonus;
+        if (shuffleLeg != null) {
+            shuffleLeg.points += bonus;
+            shuffleLeg.bossBeaten = true;
+        }
+        personalBests.recordHighest("shuffle.bosses", shuffleBossesBeaten);
+        shuffleOverlay.bossDown(bonus);
     }
 
     /** Finishes the leg being played: its rowing time. Its record is settled after the game stops. */
@@ -1467,9 +1820,15 @@ public class MainActivity extends Activity
         }
         boolean newBest = personalBests.recordHighest("shuffle.score", shuffleScore);
         ShuffleRecapView recap = new ShuffleRecapView(this);
+        String rounds = shuffleRoundsDone > 0
+                ? "  ·  " + shuffleRoundsDone + (shuffleRoundsDone == 1 ? " full round" : " full rounds")
+                : "";
+        String bosses = shuffleBossesBeaten > 0
+                ? "  ·  " + shuffleBossesBeaten + (shuffleBossesBeaten == 1 ? " boss down" : " bosses down")
+                : "";
         recap.setRecap(played, shuffleScore, newBest,
                 played.size() + " games  ·  " + PersonalBests.formatTime(seconds) + " rowing  ·  deck "
-                        + SHUFFLE_DECKS[shuffleDeck]);
+                        + SHUFFLE_DECKS[shuffleDeck] + rounds + bosses);
 
         FrameLayout frame = new FrameLayout(this);
         frame.setBackgroundColor(getColorCompat(R.color.background));
@@ -1521,6 +1880,440 @@ public class MainActivity extends Activity
         progressView.set(progress.totalXp(), progress.weekMinutes(today), progress.goalMinutes(), progress.streak(today));
         String last = personalBests.getString("last.game");
         continueChip.setText(last == null ? "CONTINUE" : "CONTINUE  " + last + "  \u25B6");
+    }
+
+    /* ---------- who is rowing: profiles, and the row history ---------- */
+
+    /** The header chip: a dot in the rower's colour, then their name. */
+    private void refreshProfileChip() {
+        if (profileChip == null || profiles == null) {
+            return;
+        }
+        RowerProfiles.Profile active = profiles.active();
+        profileChip.setText("\u25CF  " + active.name.toUpperCase(Locale.US));
+        profileChip.setTextColor(active.colour);
+    }
+
+    /**
+     * Told by {@link RowerProfiles} after any change.
+     *
+     * <p>A rename or a recolour only repaints the chip. A genuine switch is the heavy path: the
+     * rower who is leaving gets everything banked to the files still bound, and only then are the
+     * records, the history, the progress and the learned envelope rebound.
+     */
+    private void onProfilesChanged(RowerProfiles store, RowerProfiles.Profile active) {
+        if (active.id.equals(boundProfileId)) {
+            refreshProfileChip();
+            if (historyView != null) {
+                historyView.setProfile(active.name, active.colour);
+            }
+            return;
+        }
+        saveLastSession();
+        commitRecorder();
+        commitJourney();
+        commitProfile(RowerProfile.MIN_MINUTES);
+        saveMeasuredCalibration();
+        saveProgress();
+        bindProfile(active);
+    }
+
+    /** Points every per-rower store at {@code active} and repaints what shows them. */
+    private void bindProfile(RowerProfiles.Profile active) {
+        boundProfileId = active.id;
+        personalBests = profiles.recordsFor(active.id);
+        sessionLog = SessionLog.forProfile(this, profiles, active.id);
+        // These three are stored inside the records file, so they follow it. Replaced rather than
+        // decoded over the top: a profile with nothing saved must start empty, not inherit.
+        profile = new RowerProfile();
+        profile.decode(personalBests.getString("profile"));
+        progress = new Progress();
+        progress.decode(personalBests.getString("progress"));
+        loadCalibration();
+
+        journeyLifetime = personalBests.get("journey.total", 0f);
+        journeyBase = -1;
+        journeySession = 0;
+        lastProgressMetres = -1;
+        sessionFirstStrokeMs = 0;
+        sessionStartMetres = -1;
+        sessionWattSum = 0;
+        sessionWattSamples = 0;
+        sessionStrokes.clear();
+        lastArtStroke = null;
+        sessionArtShown = false;
+        recorder = null;
+        // It captured the old rower's records when it was built, and it is kept for the life of
+        // the app; drop it so the next visit builds one bound to this rower.
+        coastFlight = null;
+
+        // A game built for the last rower still holds their records object, so never leave one on
+        // screen across a switch. The picker is opened from home, so this is a guard, not a jolt.
+        if (homeScreen != null && screenHost != null && screenHost.getChildCount() > 0
+                && screenHost.getChildAt(0) != homeScreen) {
+            showHome();
+        }
+        refreshProfileChip();
+        refreshPersonalBests();
+        refreshProgress();
+        if (lastSessionCard != null) {
+            lastSessionCard.setText(lastSessionText());
+        }
+        if (historyView != null) {
+            historyView.setProfile(active.name, active.colour);
+            historyView.setLog(sessionLog);
+        }
+        log("Rowing as " + active.name);
+    }
+
+    /** Tap the name on the home header: switch rower, add one, rename or delete. */
+    private void showProfilePicker() {
+        final java.util.List<RowerProfiles.Profile> all = profiles.list();
+        final RowerProfiles.Profile active = profiles.active();
+        final java.util.ArrayList<String> labels = new java.util.ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            RowerProfiles.Profile p = all.get(i);
+            labels.add((p.id.equals(active.id) ? "\u25CF  " : "\u25CB  ") + p.name);
+        }
+        final int addIndex = profiles.count() < MAX_PROFILES ? labels.size() : -1;
+        if (addIndex >= 0) {
+            labels.add("+  Add rower");
+        }
+        final int renameIndex = labels.size();
+        labels.add("Rename " + active.name);
+        // Never the primary profile - its files are the original ones - and never the last rower.
+        final int deleteIndex = (!profiles.isPrimary(active.id) && profiles.count() > 1)
+                ? labels.size() : -1;
+        if (deleteIndex >= 0) {
+            labels.add("Delete " + active.name);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Who is rowing?")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    if (which < all.size()) {
+                        profiles.setActive(all.get(which).id);
+                    } else if (which == addIndex) {
+                        askProfileName("Add rower", "", name -> profiles.createAndActivate(name));
+                    } else if (which == renameIndex) {
+                        askProfileName("Rename rower", active.name,
+                                name -> profiles.rename(active.id, name));
+                    } else if (which == deleteIndex) {
+                        confirmDeleteProfile(active);
+                    }
+                })
+                .setNegativeButton("Close", (d, w) -> d.dismiss())
+                .show();
+    }
+
+    /** What to do with a typed name. */
+    private interface NameAction {
+        void run(String name);
+    }
+
+    private void askProfileName(String title, String initial, NameAction action) {
+        EditText input = new EditText(this);
+        input.setHint("Rower name");
+        input.setText(initial);
+        input.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(input)
+                .setNegativeButton("Cancel", (d, w) -> d.dismiss())
+                .setPositiveButton("Save", (d, w) -> {
+                    String typed = input.getText().toString().trim();
+                    if (typed.isEmpty()) {
+                        toast("A rower needs a name");
+                        return;
+                    }
+                    action.run(typed);
+                })
+                .show();
+    }
+
+    private void confirmDeleteProfile(RowerProfiles.Profile victim) {
+        new AlertDialog.Builder(this)
+                .setTitle("Delete " + victim.name + "?")
+                .setMessage("Their records and row history on this tablet go with them. "
+                        + "This cannot be undone.")
+                .setNegativeButton("Cancel", (d, w) -> d.dismiss())
+                .setPositiveButton("Delete", (d, w) -> {
+                    if (profiles.delete(victim.id)) {
+                        toast(victim.name + " deleted");
+                    } else {
+                        toast("That rower cannot be deleted");
+                    }
+                })
+                .show();
+    }
+
+    /**
+     * The rower whose files are bound, which is not always the active one: during a switch the
+     * active profile has already changed while the outgoing rower's stores are still in hand.
+     */
+    private RowerProfiles.Profile boundProfile() {
+        RowerProfiles.Profile p = profiles.get(boundProfileId);
+        return p != null ? p : profiles.active();
+    }
+
+    /** Totals, a heatmap, distance and split charts, and every row this profile has done. */
+    private void showHistory() {
+        if (historyView == null) {
+            historyView = new HistoryView(this);
+            historyView.setOnBackListener(this::showHome);
+        }
+        RowerProfiles.Profile active = profiles.active();
+        historyView.setProfile(active.name, active.colour);
+        historyView.setLog(sessionLog);
+        showScreen(historyView);
+    }
+
+    /* ---------- session recording ---------- */
+
+    /**
+     * Starts collecting a row for the screen being opened.
+     *
+     * <p>SHUFFLE is one session, not one per game: while it is switching the recorder is only
+     * renamed, so a twenty-minute shuffle lands in the history as a single twenty-minute row.
+     */
+    private void startRecorder(String title) {
+        if (shuffleSwitching && recorder != null) {
+            recorder.setGame(title);
+            return;
+        }
+        commitRecorder();
+        recorder = new SessionLog.Recorder(title);
+        recorderSeconds = 0f;
+        recorderTickMs = 0L;
+        recorderMetresBase = -1;
+        recorderStrokesBase = -1;
+        recorderJoulesBase = -1;
+    }
+
+    /**
+     * One update per status tick. Everything is handed over relative to where this recorder
+     * started, so a screen opened an hour into a session still logs only its own row.
+     *
+     * <p>The clock is counted here rather than read off a game, because SHUFFLE replaces the game
+     * under the recorder and a game's own clock restarts at each switch.
+     */
+    private void feedRecorder(S4Protocol.Status status) {
+        if (recorder == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        float dt = recorderTickMs == 0L ? 0f : (now - recorderTickMs) / 1000f;
+        recorderTickMs = now;
+        if (dt < 0f || dt > 5f) {
+            dt = 0f;
+        }
+        if (status.stillRowing) {
+            recorderSeconds += dt;
+        }
+        double metres = sessionMetres();
+        double joules = status.meter.workJoules;
+        if (recorderMetresBase < 0) {
+            recorderMetresBase = metres;
+            recorderStrokesBase = status.strokes;
+            recorderJoulesBase = joules;
+        }
+        // The monitor's counters can be reset under us; re-base rather than log a negative.
+        if (status.strokes < recorderStrokesBase) {
+            recorderStrokesBase = status.strokes;
+        }
+        if (joules < recorderJoulesBase) {
+            recorderJoulesBase = joules;
+        }
+        recorder.update(recorderSeconds, (float) Math.max(0, metres - recorderMetresBase),
+                status.watts, status.strokes - recorderStrokesBase,
+                Math.max(0, joules - recorderJoulesBase));
+    }
+
+    /**
+     * Stores the row, if there is one worth storing - the Recorder drops anything under 30 s or
+     * without a stroke. Then the laptop gets it, if the laptop is there.
+     */
+    private void commitRecorder() {
+        if (recorder == null || sessionLog == null) {
+            return;
+        }
+        SessionLog.Session session = recorder.commit(sessionLog);
+        recorder = null;
+        recorderMetresBase = -1;
+        if (session == null) {
+            return;
+        }
+        if (historyView != null) {
+            historyView.refresh();
+        }
+        postSession(session);
+        backupToLaptop(false);
+    }
+
+    /* ---------- backup to the laptop ---------- */
+
+    /** One finished row to the dashboard, appended to that profile's history file. */
+    private void postSession(SessionLog.Session session) {
+        final String base = serverUrl;
+        if (TextUtils.isEmpty(base) || profiles == null) {
+            return;
+        }
+        final String body;
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("profile", boundProfile().id);
+            payload.put("at", session.startedAt);
+            payload.put("game", session.game);
+            payload.put("meters", Math.round(session.metres));
+            payload.put("seconds", session.durationSeconds);
+            payload.put("splitSeconds", session.avgSplit);
+            payload.put("avgWatts", Math.round(session.avgWatts));
+            payload.put("strokes", session.strokes);
+            payload.put("spm", session.strokeRate());
+            payload.put("peakWatts", Math.round(session.peakWatts));
+            payload.put("joules", Math.round(session.joules));
+            payload.put("calories", Math.round(session.calories()));
+            body = payload.toString();
+        } catch (JSONException e) {
+            setUploadStatus("History post failed: " + e.getMessage());
+            return;
+        }
+        new Thread(() -> postJson(base + "/api/history", body), "wake-history").start();
+    }
+
+    /**
+     * The whole store - profiles, this rower's records, their progress and every logged row - to
+     * the laptop, so an app update or a new tablet does not lose a year of rowing.
+     *
+     * <p>Rate-limited and never on a frame or a stroke: called when a row is committed and on exit,
+     * plus the drawer's button. Failure is silent by design; the laptop is usually off.
+     */
+    private void backupToLaptop(boolean force) {
+        if (profiles == null || sessionLog == null) {
+            return;
+        }
+        final String base = serverUrl;
+        if (TextUtils.isEmpty(base)) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && now - lastBackupMs < BACKUP_MIN_GAP_MS) {
+            return;
+        }
+        lastBackupMs = now;
+        // Everything the blob reads is a preferences file or a synchronized store, so it is built
+        // on the posting thread: a full log is a few hundred KB and has no business on the UI one.
+        final PersonalBests records = personalBests;
+        final SessionLog log = sessionLog;
+        final Progress prog = progress;
+        // Read here, not on the thread: the three stores above are this rower's, and a switch in
+        // between must not file them under the next rower's name.
+        final RowerProfiles.Profile who = boundProfile();
+        new Thread(() -> {
+            String body = backupJson(who, records, log, prog);
+            if (body != null) {
+                postJson(base + "/api/backup", body);
+            }
+        }, "wake-backup").start();
+    }
+
+    /** The backup blob. Null if it could not be built. */
+    private String backupJson(RowerProfiles.Profile active, PersonalBests records, SessionLog log,
+                              Progress prog) {
+        try {
+            String primaryId = profiles.primaryId();
+            JSONObject root = new JSONObject();
+            root.put("profile", active.id);
+            root.put("profileName", active.name);
+            root.put("appVersion", BuildConfig.VERSION_NAME);
+            root.put("savedAt", System.currentTimeMillis());
+
+            JSONArray list = new JSONArray();
+            java.util.List<RowerProfiles.Profile> all = profiles.list();
+            for (int i = 0; i < all.size(); i++) {
+                RowerProfiles.Profile p = all.get(i);
+                JSONObject o = new JSONObject();
+                o.put("id", p.id);
+                o.put("name", p.name);
+                o.put("colour", p.colour);
+                o.put("createdAt", p.createdAt);
+                o.put("active", p.id.equals(active.id));
+                o.put("primary", p.id.equals(primaryId));
+                list.put(o);
+            }
+            root.put("profiles", list);
+
+            JSONObject stored = new JSONObject();
+            for (java.util.Map.Entry<String, ?> e : records.all().entrySet()) {
+                Object raw = e.getValue();
+                if (raw instanceof Float) {
+                    float f = (Float) raw;
+                    // JSONObject.put refuses NaN and infinity, and would fail the whole backup.
+                    if (Float.isNaN(f) || Float.isInfinite(f)) {
+                        continue;
+                    }
+                    stored.put(e.getKey(), (double) f);
+                } else if (raw != null) {
+                    stored.put(e.getKey(), String.valueOf(raw));
+                }
+            }
+            root.put("records", stored);
+            root.put("progress", prog.encode());
+
+            // The log's own export, unwrapped: the dashboard counts blob.sessions, and a restore
+            // reads this same shape straight back through SessionLog.importJson.
+            JSONObject exported = new JSONObject(log.exportJson());
+            JSONArray sessions = exported.optJSONArray("sessions");
+            root.put("sessions", sessions == null ? new JSONArray() : sessions);
+            root.put("logVersion", exported.optInt("version"));
+            return root.toString();
+        } catch (JSONException e) {
+            setUploadStatus("Backup failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Restore is destructive enough to ask first - it adds rows this tablet has never seen. */
+    private void confirmRestore() {
+        if (profiles == null) {
+            return;
+        }
+        final RowerProfiles.Profile active = profiles.active();
+        if (TextUtils.isEmpty(serverUrl)) {
+            toast("Restoring reads the laptop dashboard - start it first");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Restore " + active.name + "?")
+                .setMessage("Reads the newest backup for " + active.name + " from the laptop and "
+                        + "merges its rows into this tablet's history. Rows already here are kept, "
+                        + "and records are not touched.")
+                .setNegativeButton("Cancel", (d, w) -> d.dismiss())
+                .setPositiveButton("Restore", (d, w) -> restoreFromLaptop(active))
+                .show();
+    }
+
+    private void restoreFromLaptop(RowerProfiles.Profile who) {
+        final String base = serverUrl;
+        final String id = who.id;
+        final SessionLog log = sessionLog;
+        new Thread(() -> {
+            try {
+                String text = httpGet(base + "/api/backup?profile=" + id);
+                int added = log.importJson(text, false);
+                runOnUiThread(() -> {
+                    if (added < 0) {
+                        toast("That backup could not be read");
+                        return;
+                    }
+                    toast("Restored " + added + " row" + (added == 1 ? "" : "s") + " for " + who.name);
+                    if (historyView != null && log == sessionLog) {
+                        historyView.refresh();
+                    }
+                });
+            } catch (IOException e) {
+                runOnUiThread(() -> toast("Could not reach the laptop: " + e.getMessage()));
+            }
+        }, "wake-restore").start();
     }
 
     /** The finished session as a poster: one spoke per stroke. */
@@ -1915,6 +2708,9 @@ public class MainActivity extends Activity
                     : key.equals("rocket.altitude") || key.equals("rocket.test60") ? String.format(Locale.US, "%.1f km", v / 1000f)
                     : key.equals("city.tallest") ? Math.round(v) + " floors"
                     : key.equals("surf.ride") ? PersonalBests.formatTime(v)
+                    : key.equals("gauges.best500") ? PersonalBests.formatPace(v) + " /500"
+                    : key.equals("gauges.powerminute") ? Math.round(v) + " W"
+                    : key.equals("shuffle.bosses") ? Math.round(v) + " bosses"
                     : String.valueOf(Math.round(v));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -1992,6 +2788,9 @@ public class MainActivity extends Activity
         if (key.equals("rocket.test60")) return "Rocket - 60 s power test";
         if (key.equals("shuffle.minutes")) return "Shuffle - longest session (minutes)";
         if (key.equals("shuffle.score")) return "Shuffle - best score";
+        if (key.equals("shuffle.bosses")) return "Shuffle - boss rounds beaten";
+        if (key.equals("gauges.best500")) return "Gauges - best 500 m split held";
+        if (key.equals("gauges.powerminute")) return "Gauges - best power minute";
         if (key.equals("river.km")) return "River Explorer - km explored";
         if (key.equals("river.landmarks")) return "River Explorer - landmarks found";
         if (key.equals("river.along")) return "River Explorer - metres up the river";
@@ -2550,6 +3349,9 @@ public class MainActivity extends Activity
     /** @param vitals false for a screen that is itself a full instrument panel (ZONE ROW). */
     private View gameScreen(String title, GameView game, View controls, View overlay,
                             boolean vitals) {
+        // Every open* method builds the screen in the showGame(...) argument list, so this runs
+        // just before showGame and is what names the session row.
+        lastGameTitle = title;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(12), dp(10), dp(12), dp(8));
@@ -2766,14 +3568,95 @@ public class MainActivity extends Activity
         diagnosticsToggle.setOnClickListener(v -> setDiagnosticsOpen(true));
         root.addView(diagnosticsToggle, marginTop(dp(6)));
 
-        // The end-of-piece card sits over everything, hidden until a piece ends.
+        // The coach layer sits over the instruments, and the end-of-piece card over both.
         FrameLayout stack = new FrameLayout(this);
         stack.addView(root, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        gaugeCoach = new GaugeCoachView(this, gaugeCoachHost());
+        stack.addView(gaugeCoach, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        // The coach's dock is bottom-right; lift it clear of the Diagnostics button so the button
+        // stays visible, and so a full effort bank cannot swallow a tap meant for it.
+        final Button diagButton = diagnosticsToggle;
+        stack.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (gaugeCoach != null && diagButton.getHeight() > 0) {
+                gaugeCoach.setBottomInset(stack.getHeight() - diagButton.getTop() + dp(6));
+            }
+        });
         pieceSummary = new GaugeSummaryView(this);
         stack.addView(pieceSummary, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         return stack;
+    }
+
+    /**
+     * What the gauges' coach layer reads and writes. Thresholds come from the rower's own profile,
+     * never from a constant: "above typical watts" and "hold the top of your range" mean different
+     * numbers for different rowers, and the profile is what knows them.
+     */
+    private GaugeCoachView.Host gaugeCoachHost() {
+        return new GaugeCoachView.Host() {
+            @Override
+            public float bestSplitSeconds() {
+                return personalBests.get("gauges.best500", 0f);
+            }
+
+            @Override
+            public void saveBestSplit(float seconds) {
+                personalBests.recordLowest("gauges.best500", seconds);
+            }
+
+            @Override
+            public boolean savePowerMinute(float averageWatts) {
+                return personalBests.recordHighest("gauges.powerminute", averageWatts);
+            }
+
+            @Override
+            public double typicalWatts() {
+                return profile.typicalWatts();
+            }
+
+            @Override
+            public double pushWatts() {
+                // 85% of the way from the rower's low to high watts: hard, and reachable.
+                return profile.wattsAt(0.85);
+            }
+
+            @Override
+            public double typicalRate() {
+                return profile.typicalRate();
+            }
+
+            @Override
+            public void openPiece(int minutes) {
+                openZoneRowAt(minutes);
+            }
+        };
+    }
+
+    /** Zone Row at a given length, for the coach's warm-up offer. */
+    private void openZoneRowAt(int minutes) {
+        ZoneRowGame game = new ZoneRowGame(this, personalBests);
+        // The length chip cycles; walk it round at most one full turn onto the one asked for.
+        for (int i = 0; i < 6 && game.pieceMinutes() != minutes; i++) {
+            game.nextPieceLength();
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        TextView plan = chip(game.plan().name());
+        TextView length = chip(game.lengthLabel());
+        plan.setOnClickListener(v -> {
+            game.nextPlan();
+            plan.setText(game.plan().name());
+            length.setText(game.lengthLabel());
+        });
+        length.setOnClickListener(v -> {
+            game.nextPieceLength();
+            length.setText(game.lengthLabel());
+        });
+        row.addView(plan);
+        row.addView(length);
+        showGame(game, gameScreen("ZONE ROW", game, row, null, false));
     }
 
     /** Tap the PACE tile: off, then targets around the rower's typical split, fastest last. */
@@ -3219,6 +4102,23 @@ public class MainActivity extends Activity
         snapshotButton.setOnClickListener(v -> sendSnapshot("manual", true));
         uploadControls.addView(snapshotButton, weightParams());
         panel.addView(uploadControls, marginTop(dp(4)));
+
+        // Backup and restore. Both go to the laptop and both are allowed to fail quietly: it is
+        // usually off, and nothing here may stand between the rower and the next stroke.
+        LinearLayout backupControls = new LinearLayout(this);
+        backupControls.setOrientation(LinearLayout.HORIZONTAL);
+        Button backupNow = button("Back Up Now");
+        backupNow.setOnClickListener(v -> {
+            backupToLaptop(true);
+            toast(TextUtils.isEmpty(serverUrl)
+                    ? "No laptop found yet - the backup will go when one is"
+                    : "Backing up " + profiles.active().name + " to the laptop");
+        });
+        backupControls.addView(backupNow, weightParams());
+        Button restore = button("Restore from Laptop");
+        restore.setOnClickListener(v -> confirmRestore());
+        backupControls.addView(restore, weightParams());
+        panel.addView(backupControls, marginTop(dp(4)));
 
         handleView = new TextView(this);
         handleView.setText(handleState);
@@ -3976,6 +4876,10 @@ public class MainActivity extends Activity
             setDiagnosticsOpen(false);
             return;
         }
+        // The history screen closes an open session detail on the first press, and leaves on the next.
+        if (historyView != null && historyView.getParent() != null && historyView.onBackPressed()) {
+            return;
+        }
         if (screenHost.getChildCount() > 0 && screenHost.getChildAt(0) != homeScreen) {
             showHome();
             return;
@@ -3991,7 +4895,12 @@ public class MainActivity extends Activity
             heartSensor.stop();
         }
         saveLastSession();
+        // Same path as last.session: bank the row, then hand the whole store to the laptop if it
+        // happens to be on. Neither can block the exit - the post runs on its own thread.
+        commitRecorder();
         commitJourney();
+        saveProgress();
+        backupToLaptop(true);
         publishSimpleEvent("app-exit-requested", true);
         closeCurrentConnection();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -4329,6 +5238,8 @@ public class MainActivity extends Activity
                 driving = true;
             }
             trackJourney(status);
+            // After trackJourney: sessionMetres() is what it has just updated.
+            feedRecorder(status);
             if (gameStrip != null && currentGame != null) {
                 gameStrip.update(status, currentGame.boatSpeed());
             }
@@ -4356,6 +5267,13 @@ public class MainActivity extends Activity
             strokeShapeView.update(status.meter);
             onGaugeStroke(status);
             trackPiece(status);
+            if (gaugeCoach != null && gaugeCoach.isShown()) {
+                // Only while the gauges are the screen: showScreen detaches this stack, and a
+                // detached coach would go on banking a 500 m record and arming a warm-up offer
+                // out of a game the rower is actually playing.
+                // The eased tile figures, not the raw poll: the coach judges what is on screen.
+                gaugeCoach.onStatus(status, shownPace, shownWatts);
+            }
             shuffleScoreStatus(status);
             PulseMeter.Stroke artStroke = status.meter.lastStroke;
             if (artStroke != null && artStroke != lastArtStroke && sessionStrokes.size() < 4000) {
@@ -4399,6 +5317,11 @@ public class MainActivity extends Activity
                 if (tickCount % 30 == 0) {
                     logProgressSecond();
                     shuffleTick();
+                    if (gaugeCoach != null) {
+                        long day = RegattaGame.today();
+                        gaugeCoach.setWeek(progress.weekMinutes(day), progress.goalMinutes(),
+                                progress.streak(day));
+                    }
                 }
                 if (tickCount % 1800 == 0 && tickCount > 0) {
                     commitJourney();
