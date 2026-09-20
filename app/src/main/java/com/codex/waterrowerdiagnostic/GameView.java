@@ -139,6 +139,20 @@ abstract class GameView extends View {
         postInvalidateOnAnimation();
     }
 
+    /**
+     * Come back to a game that was only stepped away from - SHUFFLE's look at the gauges. Unlike
+     * {@link #start()} this keeps the clock, the distance, the stroke count and the scene, because
+     * the rower never left the piece; they looked at their numbers and came back. {@code onStart}
+     * is deliberately NOT called again: the games use it to build their world, and a second call
+     * would deal a new one. The stroke counter is re-baselined because it moved while away.
+     */
+    void resume() {
+        running = true;
+        lastFrameMs = 0;
+        lastStrokeCount = -1;
+        postInvalidateOnAnimation();
+    }
+
     void stop() {
         running = false;
         onStop();
@@ -280,10 +294,33 @@ abstract class GameView extends View {
         return v * getResources().getDisplayMetrics().density;
     }
 
+    /**
+     * Every game's text goes through {@link #label} and {@link #bold} - 879 of the 895 draws - so
+     * this one curve is how big the games read. The rower's verdict after a 25-minute piece on the
+     * tablet was that the text is too small, and the frames agree: the captions are 10dp on a
+     * 1920x1080 screen read from a rowing seat, an arm's length further away than a phone.
+     *
+     * <p>Small text scales hardest and large text barely moves. That is deliberate: the captions
+     * are what is illegible, while the big figures were already sized to fit their panels, so a
+     * flat multiplier would push those out of their boxes. 10dp becomes 13.5dp, 14dp becomes
+     * 18dp, 40dp gains 8%.
+     */
+    private static float textDp(float sizeDp) {
+        float scale;
+        if (sizeDp <= 10f) {
+            scale = 1.35f;
+        } else if (sizeDp >= 30f) {
+            scale = 1.08f;
+        } else {
+            scale = 1.35f + (1.08f - 1.35f) * ((sizeDp - 10f) / 20f);
+        }
+        return sizeDp * scale;
+    }
+
     protected void label(Canvas c, String text, float x, float y, float sizeDp, int color,
                          Paint.Align align) {
         dimPaint.setColor(color);
-        dimPaint.setTextSize(dp(sizeDp));
+        dimPaint.setTextSize(dp(textDp(sizeDp)));
         dimPaint.setTextAlign(align);
         dimPaint.setFakeBoldText(false);
         c.drawText(text, x, y, dimPaint);
@@ -292,7 +329,7 @@ abstract class GameView extends View {
     protected void bold(Canvas c, String text, float x, float y, float sizeDp, int color,
                         Paint.Align align) {
         textPaint.setColor(color);
-        textPaint.setTextSize(dp(sizeDp));
+        textPaint.setTextSize(dp(textDp(sizeDp)));
         textPaint.setTextAlign(align);
         c.drawText(text, x, y, textPaint);
     }

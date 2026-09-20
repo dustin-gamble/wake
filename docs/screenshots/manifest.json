@@ -1,17 +1,5 @@
 [
   {
-    "file": "zone-row-the-piece-as-one-instrument.png",
-    "caption": "Zone Row - the piece as one instrument"
-  },
-  {
-    "file": "river-explorer-a-river-that-forks-where-you-steer.png",
-    "caption": "River Explorer - a river that forks where you steer"
-  },
-  {
-    "file": "night-grid-your-watts-light-the-town.png",
-    "caption": "Night Grid - your watts light the town"
-  },
-  {
     "file": "canyon-fly-the-rings-at-the-speed-they-ask-for.png",
     "caption": "Canyon - fly the rings at the speed they ask for"
   },
@@ -20,19 +8,31 @@
     "caption": "Wave Rider - hold the pocket, not the throttle"
   },
   {
+    "file": "row-runner-rowing-sets-the-pace-the-runner-jumps-itself.png",
+    "caption": "Row Runner - rowing sets the pace, the runner jumps itself"
+  },
+  {
+    "file": "stroke-coach-the-shape-of-your-drive-scored.png",
+    "caption": "Stroke Coach - the shape of your drive, scored"
+  },
+  {
     "file": "skyline-every-strong-stroke-drops-another-floor.png",
     "caption": "Skyline - every strong stroke drops another floor"
   },
   {
-    "file": "row-runner-rowing-sets-the-pace-the-runner-jumps-itself.png",
-    "caption": "Row Runner - rowing sets the pace, the runner jumps itself"
+    "file": "night-grid-your-watts-light-the-town.png",
+    "caption": "Night Grid - your watts light the town"
+  },
+  {
+    "file": "river-explorer-a-river-that-forks-where-you-steer.png",
+    "caption": "River Explorer - a river that forks where you steer"
   },
   {
     "file": "zombie-run-the-horde-is-right-behind-you.png",
     "caption": "Zombie Run - the horde is right behind you"
   },
   {
-    "file": "stroke-coach-the-shape-of-your-drive-scored.png",
-    "caption": "Stroke Coach - the shape of your drive, scored"
+    "file": "zone-row-the-piece-as-one-instrument.png",
+    "caption": "Zone Row - the piece as one instrument"
   }
 ]

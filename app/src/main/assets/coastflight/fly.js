@@ -126,11 +126,31 @@ var MAX_AGL = 700;
 var START_AGL = 140;
 var CLIMB_SCALE = 22;        // m/s of climb per typical-watts above level flight
 var LEVEL_SHARE = 0.6;       // 60% of typical power holds your height (at 90% an easy row only skimmed the water)
-// Low flight feels fast: ~50 m/s (180 km/h) at a typical pace keeps the coast readable. It was
-// 250 km/h at 600 m, and 550 km/h before that, which blurred.
-var BASE_AIRSPEED = 15;      // m/s gliding with the boat stopped
-var AIRSPEED_PER_MPS = 9;    // m/s of airspeed per m/s of boat speed
+/* Airspeed, 3.24.0, after the rower flew it on the tablet: "maybe go faster over the ground".
+   That flight measured 218 km/h with the next waypoint 10.7 km off - three minutes of holding a
+   heading between places, which is what "faster" meant. The shape is unchanged (power drives boat
+   speed, boat speed drives airspeed); only the two constants move, 15/9 -> 24/22.
+
+   What it now gives, taking boat speed from watts by the cube law the flywheel obeys
+   (P = k w^3, so speed scales as watts^(1/3)), anchored on this machine's measured median of
+   129 W at 3.85 m/s:
+
+     119 W -> 3.75 m/s boat -> 24 + 82.5  = 106.5 m/s = 384 km/h
+     130 W -> 3.86 m/s boat -> 24 + 84.9  = 108.9 m/s = 392 km/h
+     p90 162 W -> 4.06 m/s  -> 113.3 m/s  = 408 km/h
+     max 205 W -> 4.19 m/s  -> 116.2 m/s  = 418 km/h
+     boat stopped, gliding  ->  24.0 m/s  =  86 km/h
+
+   So a solid pace sits in the 380-420 km/h the rower asked for, and the old 550 km/h that blurred
+   the coast is still out of reach: AIRSPEED_MAX caps the stacked bonuses (flock draft, wind aloft,
+   a leader's slipstream, a front's tailwind - up to +50% together) at 522 km/h. */
+var BASE_AIRSPEED = 24;      // m/s gliding with the boat stopped
+var AIRSPEED_PER_MPS = 22;   // m/s of airspeed per m/s of boat speed
+var AIRSPEED_MAX = 145;      // m/s ceiling, 522 km/h: below the 550 that blurred the coastline
 var WEAVE_METRES = 260;      // how far either side of the route the flight swings
+// The bank leads the corner by this many seconds of flight rather than by a fixed distance, so
+// it still anticipates the turn now that a second of flight is three times as far as it was.
+var TURN_LEAD_S = 8;
 
 var state = {
   watts: 0,
@@ -157,7 +177,12 @@ var state = {
   weavePhase: 0,
   weaveOffset: 0,
   bob: 0,
-  wingPhase: 0
+  wingPhase: 0,
+  // 3.24.0 camera motion: the stroke rhythm and the rough air. Both are plain phase accumulators
+  // advanced by dt, read by a couple of sines a frame, and allocate nothing.
+  strokePhase: 0,
+  airPhase: 0,
+  driveShown: 0
 };
 
 function loadTrip() {
@@ -193,6 +218,7 @@ window.wakeSave = function () {
 /* ---------------- geo helpers ---------------- */
 
 var R = 6371000;
+var TWO_PI = Math.PI * 2;
 function toRad(d) { return (d * Math.PI) / 180; }
 function toDeg(r) { return (r * 180) / Math.PI; }
 
@@ -278,8 +304,8 @@ function initGlobe() {
     // Cheap tablet GPU: no shadows, no anti-aliasing pass.
     requestRenderMode: false,
     shadows: false,
-    // Chrome 70 on tablet silicon. Half-resolution rendering is by far the largest single win
-    // and at 250 km/h over a coastline it is barely visible.
+    // Chrome 70 on tablet silicon: no multisampling, and no alpha channel to composite.
+    // The resolution scale below is the large dial, and 3.24.0 turns it up (see there).
     contextOptions: { webgl: { antialias: false, alpha: false } }
   };
 
@@ -328,10 +354,15 @@ function initGlobe() {
   }
 
   // ---- performance, all of it aimed at the tablet ----
-  // Sharper than the 0.6 / SSE 6 this started at ("higher resolutions"); adaptQuality() steps the
-  // scale down if the frame rate drops and back up when there is headroom.
-  viewer.resolutionScale = LEGACY ? 0.75 : 1.0;
-  viewer.scene.globe.maximumScreenSpaceError = LEGACY ? 4 : 2;
+  // 3.24.0, the rower's second ask: "better satellite resolution". This started at 0.6 / SSE 6,
+  // went to 0.75 / SSE 4, and is now 0.85 / SSE 3.5 - the imagery it was soft, and the softness
+  // was these two numbers, not the tiles. Everything else the old engine gives up stays given up
+  // (lighting off, fog off, no ground atmosphere, terrain without vertex normals, a ~30Hz camera):
+  // those are what buy the frame rate this spends. adaptQuality() steps the scale down if the
+  // frame rate drops and back up when there is headroom, and its floor is 0.7 - below that the
+  // imagery is soft again, so it is better to drop frames than to go back there.
+  viewer.resolutionScale = LEGACY ? 0.85 : 1.0;
+  viewer.scene.globe.maximumScreenSpaceError = LEGACY ? 3.5 : 2;
   viewer.scene.globe.tileCacheSize = LEGACY ? 150 : 200;
   viewer.scene.globe.preloadSiblings = true;   // tiles beside the view are ready when the flight weaves
   viewer.scene.globe.showGroundAtmosphere = !LEGACY;
@@ -486,6 +517,9 @@ function frame(now) {
       * (1 + FLOCK_DRAFT * flock.inSlot + ALOFT_BONUS * aloft()
         + MIG_DRAFT * mig.draft + frontTailBonus())
       * (1 - FOG_DRAG * state.fog) * (1 - fronts.drag);
+    // Those bonuses stack to +50%. Unclamped that would put a strong row back over the 550 km/h
+    // that blurred the coast and was reverted; the cap is the one place that cannot happen.
+    targetAir = Math.min(AIRSPEED_MAX, targetAir);
     state.airspeed += (targetAir - state.airspeed) * Math.min(1, 1.5 * dt);
     state.along += state.airspeed * dt;
     race.flown += state.airspeed * dt;
@@ -499,16 +533,51 @@ function frame(now) {
   var targetOffset = state.hovering ? 0 : Math.sin(state.weavePhase) * WEAVE_METRES;
   state.weaveOffset += (targetOffset - state.weaveOffset) * Math.min(1, dt * 1.2);
 
+  /* ---- 3.24.0 camera motion, the rower's "more movement" ----
+     Three separate things, all read off values that already exist and none of them allocating:
+       1. the eased drive (0..1), shared with the wings below so both sit on the same frame;
+       2. a stroke-rhythm phase advanced by the feed's rate, which sways the camera;
+       3. an air phase, which roughens the ride as the airspeed builds. */
+  var driveNow = state.hovering ? 1 : (fresh ? (state.drive || 0) : 0);
+  state.driveShown += (driveNow - state.driveShown) * Math.min(1, dt * 8);
+
+  state.strokePhase += dt * TWO_PI * (Math.min(40, state.spm) / 60);
+  if (state.strokePhase > TWO_PI) { state.strokePhase -= TWO_PI; }
+  // Deliberately tiny: a degree and a half of roll, under a degree of heading, three metres of
+  // rise. Enough to feel the row in the view; not enough to make a tablet at arm's length
+  // unpleasant. It fades out with the drive, so a rest is still a steady glide.
+  var swayAmp = (!state.hovering && fresh) ? (0.3 + 0.7 * state.driveShown) : 0;
+  var swayRoll = Math.sin(state.strokePhase) * 1.5 * swayAmp;
+  var swayHeading = Math.sin(state.strokePhase + 1.9) * 0.7 * swayAmp;
+  var swayPitch = Math.sin(state.strokePhase * 2 + 0.4) * 0.5 * swayAmp;
+  var swayBob = Math.sin(state.strokePhase - 0.6) * 3 * swayAmp;
+
+  // Rough air. Two sines at unrelated frequencies read as wind for the price of two trig calls;
+  // a real noise field would want a table, and a per-frame lookup is not worth it for this.
+  state.airPhase += dt;
+  if (state.airPhase > 100000) { state.airPhase -= 100000; }
+  var rough = clamp((state.airspeed - BASE_AIRSPEED) / 80, 0, 1);
+  var turbRoll = (Math.sin(state.airPhase * 2.3)
+    + 0.55 * Math.sin(state.airPhase * 5.9 + 1.3)) * 0.85 * rough;
+  var turbPitch = Math.sin(state.airPhase * 3.1 + 0.7) * 0.45 * rough;
+
   var onRoute = atDistance(state.along);
   var here = offsetPoint(onRoute, state.weaveOffset);
-  var ahead = atDistance(state.along + 900);
-  // Bank into the turn, and into each swing of the weave.
+  // Look ahead by a fixed TIME, not a fixed 900 m. 900 m used to arrive in eight seconds and at
+  // the 3.24.0 speeds arrives in under three, so a fixed distance would put the roll inside the
+  // corner instead of ahead of it. Scaling with airspeed keeps the same anticipation at any pace.
+  var leadM = clamp(state.airspeed * TURN_LEAD_S, 700, 2600);
+  var ahead = atDistance(state.along + leadM);
+  // Bank into the turn, and into each swing of the weave. Because the lead is a time, `turn` is
+  // now proportional to the route's turn RATE, so the roll is a continuous lean through a bend
+  // rather than a step at each waypoint.
   var turn = ahead.heading - onRoute.heading;
   if (turn > 180) { turn -= 360; }
   if (turn < -180) { turn += 360; }
   var weaveBank = state.hovering ? 0 : Math.cos(state.weavePhase) * 12;
   var targetBank = Math.max(-32, Math.min(32, turn * 1.6 + weaveBank));
-  state.bank += (targetBank - state.bank) * Math.min(1, 2.0 * dt);
+  // Eased at 1.7 rather than 2.0: gentler, so the lean arrives over about a second.
+  state.bank += (targetBank - state.bank) * Math.min(1, 1.7 * dt);
 
   // Terrain following, a little: the ground under you and a little ahead, smoothed so hills
   // lift you gently and let you down slowly.
@@ -523,14 +592,19 @@ function frame(now) {
     state.ground += (target - state.ground) * Math.min(1, dt * (target > state.ground ? 1.4 : 0.5));
   }
   var hoverBob = state.hovering ? Math.sin(now / 900) * 4 : 0;
-  var altitude = state.ground + state.agl + state.bob + hoverBob;
+  var altitude = state.ground + state.agl + state.bob + hoverBob + swayBob;
   state.altitude = state.agl;
 
   // ~30Hz camera on the old engine: each setView is a full scene traversal, and the flight is
   // smooth long before 60. Stamp the clock only when a frame actually goes through.
-  var camHeading = here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6);
-  var camPitch = -8 - Math.min(16, state.agl / 60);
-  var camRoll = state.bank;
+  var camHeading = here.heading + (state.hovering ? 0 : Math.cos(state.weavePhase) * 6)
+    + swayHeading;
+  // Nose down as the airspeed builds - the horizon rides up, more ground fills the frame, and
+  // that is most of what actually reads as speed. Six degrees at the ceiling, on top of the
+  // altitude term, and none of it while gliding at 86 km/h.
+  var camPitch = -8 - Math.min(16, state.agl / 60)
+    - clamp((state.airspeed - 55) / 14, 0, 6) + turbPitch + swayPitch;
+  var camRoll = state.bank + turbRoll + swayRoll;
   // A postcard stop turns the head toward the landmark for the picture, then back. A photo
   // challenge gives the same landmark a shorter glance.
   var look = postcardLook(now, here, altitude);
@@ -563,6 +637,7 @@ function frame(now) {
   updateMigration(dt);
   updatePhoto();
   drawWeather();
+  drawRush();
   updatePassportPage();
 
   adaptQuality(dt);
@@ -600,8 +675,11 @@ function adaptQuality(dt) {
   }
   var fps = 1 / quality.avg;
   var scale = viewer.resolutionScale;
-  var top = LEGACY ? 0.9 : 1.0;
-  var bottom = LEGACY ? 0.55 : 0.75;
+  // 3.24.0: the band moves up with the starting scale. The floor is 0.7 rather than 0.55 because
+  // "better satellite resolution" is the point of this pass - a soft picture at 24 fps is not the
+  // trade the rower asked for, and the old floor could quietly undo the whole change.
+  var top = LEGACY ? 0.95 : 1.0;
+  var bottom = LEGACY ? 0.7 : 0.75;
   if (fps < 20 && scale > bottom) {
     viewer.resolutionScale = Math.max(bottom, scale - 0.05);
     quality.lastChange = now;
@@ -763,9 +841,9 @@ function drawWings(dt, rowing) {
   // hovering, and wings held up in a glide once the rowing stops. Each stroke adds a big beat.
   // 3.19.5, the rower's ask: in flight the wings beat on the DRIVE and glide on the recovery.
   // `drive` comes from the pulse meter (the paddle accelerating), eased so a beat has a shape.
+  // 3.24.0: the easing of `drive` moved into frame(), because the camera sway rides on the same
+  // value and the two must not drift apart by a frame. This only reads it.
   var active = state.hovering ? 0.55 : rowing ? 1 : 0;
-  var driveNow = state.hovering ? 1 : (rowing ? (state.drive || 0) : 0);
-  state.driveShown = (state.driveShown || 0) + (driveNow - (state.driveShown || 0)) * Math.min(1, dt * 8);
   var flapping = state.hovering ? 1 : state.driveShown;
   var freq = state.hovering ? 0.6 + (Math.min(40, state.spm) / 60) * 1.2 : 2.2;
   state.wingPhase += dt * Math.PI * 2 * freq * (0.15 + 0.85 * flapping);
@@ -790,6 +868,36 @@ function drawWings(dt, rowing) {
     + ' L 724 ' + (560 + bankR) + ' L 708 ' + (558 + bankR) + ' L 738 ' + (576 + bankR)
     + ' L 722 ' + (574 + bankR) + ' L 764 ' + (590 + bankR)
     + ' C 850 ' + (600 + bankR) + ', 940 ' + (606 + bankR) + ', 1010 ' + (640 + bankR) + ' Z');
+}
+
+/* ---------------- the ground rush ---------------- */
+
+/**
+ * Streaks down the left and right edges of the frame: the near-field motion that sells ground
+ * speed when everything else in view is a mile away and barely moving.
+ *
+ * <p>The layers are CSS animations on composited transforms - the rain's pattern, for the rain's
+ * reason: an animated background-position would repaint the whole viewport over the WebGL globe
+ * every frame, which this tablet cannot spare. All this function does is set one opacity, at most
+ * once a frame and only when it has actually moved, and park the overlay with display:none below
+ * a glide so it costs nothing at all while hovering or resting.
+ */
+var rush = { shown: -1, on: null };
+
+function drawRush() {
+  // Nothing at a stopped-boat glide (24 m/s), a third of the way up at a solid pace (106 m/s),
+  // full only at the airspeed ceiling.
+  var want = state.hovering ? 0 : clamp((state.airspeed - 34) / 110, 0, 1) * 0.5;
+  if (Math.abs(want - rush.shown) < 0.02) {
+    return;
+  }
+  rush.shown = want;
+  el('rush').style.opacity = want.toFixed(3);
+  var on = want > 0.01;
+  if (on !== rush.on) {
+    rush.on = on;
+    el('rush').style.display = on ? 'block' : 'none';
+  }
 }
 
 function updateHud(fresh, climb) {
@@ -1019,7 +1127,7 @@ var CLIFFS = [
   { name: 'Torrey Pines', a: [32.960, -117.270], b: [32.840, -117.280] },
   { name: 'Point Loma', a: [32.760, -117.270], b: [32.670, -117.262] }
 ];
-var UPDRAFT_HALF = 700;         // each column is 1.4 km long, ~28 s at a typical pace
+var UPDRAFT_HALF = 700;         // each column is 1.4 km long: ~13 s at 3.24.0 speeds, was ~28 s
 var UPDRAFT_SPACING = 3500;
 var LIFT_FREE = 1.5;            // m/s of climb just for being there
 var LIFT_PULL = 5.5;            // more, at full, for pulling half your typical power above level
@@ -1216,7 +1324,10 @@ var POSTCARDS = [
   { id: 'bixby', name: 'Bixby Bridge, Big Sur', lat: 36.3716, lon: -121.9018, h: 80, lo: 200, hi: 420, shotAt: -1, stamp: 'Bixby Bridge' },
   { id: 'mcway', name: 'McWay Falls, Big Sur', lat: 36.1580, lon: -121.6721, h: 30, lo: 150, hi: 360, shotAt: -1, stamp: 'McWay Falls' }
 ];
-var POSTCARD_APPROACH = 3000;   // ~60 s of warning at a typical pace
+/* A warning DISTANCE whose job is a warning TIME: from the 700 m ceiling a rower sinking at the
+   full 14 m/s needs about 46 s to reach a low postcard window, so a short warning is no warning.
+   3000 m was 60 s at 180 km/h and would be 28 s at the 3.24.0 airspeeds; 6800 m restores it. */
+var POSTCARD_APPROACH = 6800;
 var LOOK_IN = 1300;
 var LOOK_HOLD = 1500;
 var LOOK_OUT = 1300;
@@ -2186,8 +2297,8 @@ function drawLeader() {
 /* ---- 9. weather fronts ---- */
 
 var FRONT_FIRST = 9000;
-var FRONT_SPACING = 14000;      // ~4.5 minutes apart at a typical pace
-var FRONT_HALF = 1000;          // 2 km across: about 40 s of pushing
+var FRONT_SPACING = 14000;      // ~2.1 minutes apart at 3.24.0 speeds, was ~4.5
+var FRONT_HALF = 1000;          // 2 km across: about 18 s of pushing at 3.24.0 speeds, was 40
 var FRONT_DRAG = 0.34;          // airspeed lost at the heart of one while easing off
 var FRONT_SINK = 2.8;           // m/s pressed down, same condition
 var FRONT_TAIL = 0.18;          // tailwind for punching through
@@ -2333,9 +2444,11 @@ function drawWeather() {
 
 /* ---- 10. photo challenges ---- */
 
-/* ~65 s of warning: from the 700 m ceiling a rower needs most of that to sink into a window,
-   and the gauge is no use if it arrives after the only chance to act on it. */
-var PHOTO_APPROACH = 3200;
+/* Warning distance, not warning time: at the 3.24.0 airspeeds 3200 m is about 30 s rather than
+   the 65 s it was, and from the 700 m ceiling a rower needs most of a minute to sink into a
+   window. The gauge is no use if it arrives after the only chance to act on it, so the approach
+   is stretched with the speed. */
+var PHOTO_APPROACH = 7000;
 var PHOTO_LEAD = 300;           // the shutter goes just before the landmark is abeam
 var PHOTO_FINAL = 900;          // hold the height over this last stretch for the third star
 var PHOTO_SHOW_MS = 7000;
@@ -2380,9 +2493,9 @@ function alongOfFast(lat, lon) {
 /**
  * Every named place on the coast is a challenge, not just the leg destinations.
  *
- * <p>The legs are 36 km apart, which at 180 km/h is twelve minutes - far too long to wait for
- * something to do. The towns in between bring it to one every six minutes or so, which is about
- * the spacing of the weather fronts.
+ * <p>The legs are 36 km apart, which at the 3.24.0 airspeeds (~390 km/h at a typical pace) is
+ * about five and a half minutes - it was twelve at 180 km/h. The towns in between halve that
+ * again, which is about the spacing of the weather fronts.
  */
 function buildPhotoTargets() {
   var taken = [];

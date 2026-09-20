@@ -180,6 +180,42 @@
       #banner.front .b { color: #cfe0ff; border-color: rgba(159,183,214,0.7);
         background: rgba(26,36,52,0.85); }
 
+      /* --- 3.24: the ground rush ---
+         Streaks down the left and right edges: at 400 km/h a mile up, nothing in the middle of
+         the frame moves fast enough to read as speed, and the near field is where it lives.
+         Built to exactly the rain's rules above, for exactly the rain's reason - each layer
+         slides on a composited transform, never an animated background-position, and each is
+         oversized by more than the one tile width it travels so the loop has no seam. fly.js
+         sets #rush's opacity from airspeed and parks it with display:none below a glide, so a
+         hover or a rest costs no compositing at all. */
+      #rush { top: 0; right: 0; bottom: 0; left: 0; opacity: 0; display: none; }
+      .rushE { position: absolute; top: 0; bottom: 0; width: 24%; overflow: hidden; }
+      #rushL { left: 0; }
+      #rushR { right: 0; }
+      .rushS { position: absolute; top: -40px; right: -240px; bottom: -40px; left: -240px; }
+      /* Near-horizontal streaks, tilted away from centre, sliding outwards: the direction the
+         ground actually smears past at the edge of a forward-looking camera. */
+      #rushLS {
+        background: repeating-linear-gradient(8deg, rgba(255,255,255,0) 0, rgba(255,255,255,0) 15px,
+          rgba(255,255,255,0.14) 16px, rgba(255,255,255,0) 19px);
+        background-size: 180px 150px;
+        -webkit-animation: rushLA 0.42s linear infinite; animation: rushLA 0.42s linear infinite; }
+      #rushRS {
+        background: repeating-linear-gradient(172deg, rgba(255,255,255,0) 0, rgba(255,255,255,0) 15px,
+          rgba(255,255,255,0.14) 16px, rgba(255,255,255,0) 19px);
+        background-size: 180px 150px;
+        -webkit-animation: rushRA 0.42s linear infinite; animation: rushRA 0.42s linear infinite; }
+      @-webkit-keyframes rushLA {
+        from { -webkit-transform: translate3d(0, 0, 0); }
+        to { -webkit-transform: translate3d(-180px, 0, 0); } }
+      @keyframes rushLA {
+        from { transform: translate3d(0, 0, 0); } to { transform: translate3d(-180px, 0, 0); } }
+      @-webkit-keyframes rushRA {
+        from { -webkit-transform: translate3d(0, 0, 0); }
+        to { -webkit-transform: translate3d(180px, 0, 0); } }
+      @keyframes rushRA {
+        from { transform: translate3d(0, 0, 0); } to { transform: translate3d(180px, 0, 0); } }
+
       /* --- the photo that comes out of the challenge --- */
       #flash { top: 0; right: 0; bottom: 0; left: 0; background: #fff; opacity: 0; }
       #flash.go { -webkit-animation: shutter 0.5s ease-out; animation: shutter 0.5s ease-out; }
@@ -283,6 +319,11 @@
     <div id="fog" class="overlay"></div>
     <div id="squall" class="overlay"></div>
     <div id="rain" class="overlay"><div id="rainA" class="rainL"></div><div id="rainB" class="rainL"></div></div>
+    <!-- Under the wings on purpose: the bird is the near field, the rush is the ground behind it. -->
+    <div id="rush" class="overlay">
+      <div id="rushL" class="rushE"><div id="rushLS" class="rushS"></div></div>
+      <div id="rushR" class="rushE"><div id="rushRS" class="rushS"></div></div>
+    </div>
     <svg id="wings" class="overlay" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMax slice">
       <path id="wingL" d="" fill="rgba(30,22,17,0.92)"/>
       <path id="wingR" d="" fill="rgba(30,22,17,0.92)"/>

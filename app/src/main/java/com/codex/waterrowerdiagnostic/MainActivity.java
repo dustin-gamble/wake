@@ -420,6 +420,11 @@ public class MainActivity extends Activity
     private long shuffleLastStrokeMs;
     private boolean shuffleMystery;
     private TextView shuffleDeckChip;
+    /** The live game and its screen, kept so a look at the gauges can come back to it unharmed. */
+    private GameView shuffleGameView;
+    private View shuffleGameScreen;
+    private String shuffleGameTitle;
+    private TextView shuffleReturnChip;
     /** Latest status on the UI thread, for once-a-second sampling. */
     private S4Protocol.Status lastStatus;
     // Bounded so a slow or absent laptop drops old telemetry instead of growing without limit.
@@ -661,6 +666,11 @@ public class MainActivity extends Activity
                 shuffleRecapPending = true;
             }
             shuffleActive = false;
+            shuffleGameView = null;
+            shuffleGameScreen = null;
+            if (shuffleReturnChip != null) {
+                shuffleReturnChip.setVisibility(View.GONE);
+            }
         }
         if (currentGame != null) {
             currentGame.stop();
@@ -1418,9 +1428,19 @@ public class MainActivity extends Activity
         veto.setTextColor(getColorCompat(R.color.bad));
         veto.setOnClickListener(v -> vetoShuffle());
         row.addView(veto);
-        TextView skip = chip("SKIP  ▶");
+        // The rower asked for "a toggle button force to the next game" - which SKIP already did,
+        // but it sat sixth in a row of seven identical grey chips and was never found. Same call,
+        // named for what it does and coloured so it reads as the action it is.
+        TextView skip = chip("NEXT GAME  ▶");
+        skip.setTypeface(Typeface.DEFAULT_BOLD);
+        skip.setTextColor(getColorCompat(R.color.primary));
         skip.setOnClickListener(v -> skipShuffle());
         row.addView(skip);
+        // A look at the instruments mid-shuffle. The game is held, not rebuilt, and the session
+        // recorder carries straight on through both hops.
+        TextView toGauges = chip("GAUGES");
+        toGauges.setOnClickListener(v -> shuffleToGauges());
+        row.addView(toGauges);
         TextView length = chip(SHUFFLE_MINUTES[shuffleMinutesIndex] + " MIN EACH");
         length.setOnClickListener(v -> {
             shuffleMinutesIndex = (shuffleMinutesIndex + 1) % SHUFFLE_MINUTES.length;
@@ -1429,7 +1449,11 @@ public class MainActivity extends Activity
         row.addView(length);
         shuffleSwitching = true;
         try {
-            showGame(game, gameScreen("SHUFFLE  ·  " + SHUFFLE_TITLES[pick], game, row, shuffleOverlay));
+            View screen = gameScreen("SHUFFLE  ·  " + SHUFFLE_TITLES[pick], game, row, shuffleOverlay);
+            shuffleGameView = game;
+            shuffleGameScreen = screen;
+            shuffleGameTitle = "SHUFFLE  \u00b7  " + SHUFFLE_TITLES[pick];
+            showGame(game, screen);
         } finally {
             shuffleSwitching = false;
         }
@@ -1607,6 +1631,51 @@ public class MainActivity extends Activity
     }
 
     /** Rowing-clock seconds until the switch, or -1 when locked in (no switch coming). */
+    /**
+     * Step off the shuffle onto the instruments without ending it. {@code shuffleSwitching} keeps
+     * {@link #showScreen} from closing the shuffle and keeps {@link #startRecorder} on the same
+     * recorder, so the row being logged does not break in two. The countdown holds while you are
+     * here, because it is measured off the game's own rowing clock and there is no game in front.
+     */
+    private void shuffleToGauges() {
+        if (!shuffleActive) {
+            return;
+        }
+        shuffleSwitching = true;
+        try {
+            showInstruments();
+        } finally {
+            shuffleSwitching = false;
+        }
+        if (shuffleReturnChip != null) {
+            shuffleReturnChip.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /** Back to the game that was running, the same instance, with its score and scene intact. */
+    private void shuffleBackToGame() {
+        if (!shuffleActive || shuffleGameView == null || shuffleGameScreen == null) {
+            return;
+        }
+        if (shuffleReturnChip != null) {
+            shuffleReturnChip.setVisibility(View.GONE);
+        }
+        shuffleSwitching = true;
+        try {
+            // Not showGame: that calls start(), which would zero the leg's clock, distance and
+            // strokes. The first build of this hop did exactly that - the strip went 0:28 -> 0:07.
+            showScreen(shuffleGameScreen);
+            startRecorder(shuffleGameTitle);
+            currentGame = shuffleGameView;
+            currentGame.setDrag(coastDrag);
+            currentGame.setProfile(profile);
+            currentGame.setHeartRate(bleHeartRate);
+            currentGame.resume();
+        } finally {
+            shuffleSwitching = false;
+        }
+    }
+
     private double shuffleSecondsLeft() {
         if (!shuffleActive || shuffleLocked || currentGame == null) {
             return -1;
@@ -3518,10 +3587,11 @@ public class MainActivity extends Activity
                     return true;
                 });
             }
-            // 62dp -> 74dp -> 92dp: this strip is the instrument during a game, and the games
-            // themselves lose very little by it.
+            // 62dp -> 74dp -> 92dp -> 116dp. This strip is the instrument during a game and the
+            // figure the rower actually watches, and after a 25-minute piece on the tablet their
+            // verdict was that it should be bigger still. The games lose 24dp of scenery for it.
             LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(116));
             stripParams.topMargin = dp(4);
             root.addView(gameStrip, stripParams);
         } else {
@@ -3692,6 +3762,13 @@ public class MainActivity extends Activity
         // Diagnostics live at the bottom, out of the way until asked for.
         diagnosticsToggle = button("Diagnostics");
         diagnosticsToggle.setOnClickListener(v -> setDiagnosticsOpen(true));
+        // Reserved space for the coach's dock. It is an overlay, so before this it floated on top
+        // of the POWER PER STROKE card - the rower's own tablet frame showed the effort bank and
+        // the week ring sitting across that card's bars and labels. An empty slot the dock's own
+        // height means the instruments end above it and nothing is covered.
+        View coachSlot = new View(this);
+        root.addView(coachSlot, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(118)));
         root.addView(diagnosticsToggle, marginTop(dp(6)));
 
         // The coach layer sits over the instruments, and the end-of-piece card over both.
@@ -3703,10 +3780,10 @@ public class MainActivity extends Activity
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         // The coach's dock is bottom-right; lift it clear of the Diagnostics button so the button
         // stays visible, and so a full effort bank cannot swallow a tap meant for it.
-        final Button diagButton = diagnosticsToggle;
+        final View dockSlot = coachSlot;
         stack.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            if (gaugeCoach != null && diagButton.getHeight() > 0) {
-                gaugeCoach.setBottomInset(stack.getHeight() - diagButton.getTop() + dp(6));
+            if (gaugeCoach != null && dockSlot.getHeight() > 0) {
+                gaugeCoach.setBottomInset(stack.getHeight() - dockSlot.getBottom() + dp(6));
             }
         });
         pieceSummary = new GaugeSummaryView(this);
@@ -4040,6 +4117,14 @@ public class MainActivity extends Activity
 
         header.addView(titles, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        // Only visible while a shuffle is holding behind this screen.
+        shuffleReturnChip = chip("◀  BACK TO SHUFFLE");
+        shuffleReturnChip.setTypeface(Typeface.DEFAULT_BOLD);
+        shuffleReturnChip.setTextColor(getColorCompat(R.color.primary));
+        shuffleReturnChip.setVisibility(View.GONE);
+        shuffleReturnChip.setOnClickListener(v -> shuffleBackToGame());
+        header.addView(shuffleReturnChip);
 
         stateChip = new TextView(this);
         stateChip.setText("WAITING");

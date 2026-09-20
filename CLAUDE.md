@@ -1041,6 +1041,74 @@ vignette and speed lines over the top, HUD last so it never shakes.
 
 **The Run's scores are relative to the drag setting** and are for beating yourself only.
 
+## An incremental build after deleting iCloud duplicates can write a corrupt APK (3.24.0)
+
+iCloud duplicated 51 files inside `app/build` as `NightGridGame 2.class`; D8 fails on those with a
+stack trace that never names the cause, so the fix is
+`find app/build -name '* [0-9].*' -delete`. **Do a clean `rm -rf app/build` after that, not another
+incremental build.** The incremental one succeeded, published, installed and ran - and the APK was
+2,632,515 bytes against the usual 1.76 MB, with a single **860 KB run of zero bytes** sitting
+between the last dex and `AndroidManifest.xml`. Every entry's compressed size was identical to the
+previous build, so nothing had actually grown; the packager had written a hole. A clean rebuild
+gave 1,768,729 bytes and no gap.
+
+How to check, since nothing else reports it - compare the file size against the sum of the entries:
+
+```sh
+python3 -c "
+import zipfile,os
+p='app/build/outputs/apk/debug/app-debug.apk'
+z=zipfile.ZipFile(p); infos=sorted(z.infolist(), key=lambda i:i.header_offset)
+prev=0; holes=0
+for i in infos:
+    if i.header_offset-prev>1000: holes+=i.header_offset-prev
+    prev=i.header_offset+len(i.filename)+30+i.compress_size+len(i.extra)
+print(os.path.getsize(p), 'holes', holes)"
+```
+
+## Sizes come from the seat, not from a desk (3.24.0)
+
+The rower's verdict after a real 25-minute piece on the tablet - 6,693 m at 115 W - was that the
+text is too small and the top gauge bar should be bigger. Both were right, and both are read at
+rowing distance, which is an arm's length further away than any screen you design on.
+
+- **All game text goes through `GameView.label` / `bold`** - 879 of the 895 draws - so one curve in
+  `textDp()` sets how big the games read. Small text scales hardest (10dp x1.35), large text barely
+  moves (>=30dp x1.08), because the captions are what is illegible while the big figures were
+  already sized to fit their panels. A flat multiplier pushes those out of their boxes.
+- **The vitals strip is 116dp** (62 -> 74 -> 92 -> 116) with the clock at 64dp and every caption at
+  13dp. It is the instrument during a game; the scenery can give up the height.
+- **ZONE ROW is the size reference.** It was already drawn at arm's length and the rower never
+  complained about it. When something reads too small, compare it against Zone Row rather than
+  against a number.
+
+## An overlay with nothing reserved for it will land on something (3.24.0)
+
+`GaugeCoachView` is a full-screen overlay whose dock is pinned bottom-right, lifted only above the
+Diagnostics button. On the tablet that put the effort bank and the week ring straight across the
+POWER PER STROKE card - the bars, the "123 W -13%" label and the hint line all collided, and the
+card is drawn at 89% alpha so it looked like a rendering fault rather than a layout one.
+
+The fix is an empty `View` of the dock's height in the instruments column, with the dock's inset
+measured from **that slot's bottom** instead of the button's top. The instruments now end above the
+dock and nothing is covered. **If you add another floating layer, give it a slot.**
+
+The same frame showed the week ring's "2 DAY STREAK" cut to "DAY STREA": it was drawn inside a
+34dp ring. Text that can grow goes under its ring, not in it.
+
+## SHUFFLE: the button was there, nobody could find it (3.24.0)
+
+The rower asked for "a toggle button force to the next game". SKIP already did exactly that - it
+was sixth in a row of seven identical grey chips. It is now **NEXT GAME** in bold and in the accent
+colour. *A control nobody finds is a missing feature, however correct the code is.*
+
+They also asked to be able to flip to the gauges mid-shuffle. `shuffleToGauges()` /
+`shuffleBackToGame()` do it by holding the game instance and its screen and setting
+`shuffleSwitching` around both hops, which is what keeps `showScreen` from ending the shuffle and
+keeps `startRecorder` on the same recorder - so **the row being logged does not break in two**, the
+game comes back with its score and scene intact, and the countdown simply holds while you are on
+the instruments (it is measured off the game's own rowing clock, and there is no game in front).
+
 ## Screen Layout
 
 **Home** (3.2.0): one-line header (name, RECORDS, STREAM toggle, exit), then a fixed grid

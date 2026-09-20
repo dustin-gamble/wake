@@ -925,8 +925,19 @@ final class GaugeCoachView extends View {
         label.setTextAlign(Paint.Align.CENTER);
         label.setColor(weekFlareAge < 4f ? warn : dim);
         label.setAlpha(255);
-        label.setTextSize(dp(8.5f));
-        c.drawText(weekFlareAge < 4f ? "WEEK DONE" : weekStreakText, cx, cy + dp(16f), label);
+        // "2 DAY STREAK" is wider than the ring, so inside it the word was cut to "DAY STREA".
+        // It goes under the ring instead, where it has the dock's full width to sit in, and it
+        // shrinks a little further if a long streak still overruns.
+        String note = weekFlareAge < 4f ? "WEEK DONE" : weekStreakText;
+        float size = dp(9.5f);
+        label.setTextSize(size);
+        float room = r * 2.6f;
+        float wide = label.measureText(note);
+        if (wide > room) {
+            label.setTextSize(size * room / wide);
+        }
+        c.drawText(note, cx, cy + r + dp(12f), label);
+        label.setTextSize(size);
         label.setTextAlign(Paint.Align.LEFT);
     }
 

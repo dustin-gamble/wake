@@ -6,15 +6,15 @@
 
 <!-- screenshots:start -->
 
-<img src="docs/screenshots/zone-row-the-piece-as-one-instrument.png" alt="Zone Row - the piece as one instrument" width="49%">
-<img src="docs/screenshots/river-explorer-a-river-that-forks-where-you-steer.png" alt="River Explorer - a river that forks where you steer" width="49%">
-<img src="docs/screenshots/night-grid-your-watts-light-the-town.png" alt="Night Grid - your watts light the town" width="49%">
 <img src="docs/screenshots/canyon-fly-the-rings-at-the-speed-they-ask-for.png" alt="Canyon - fly the rings at the speed they ask for" width="49%">
 <img src="docs/screenshots/wave-rider-hold-the-pocket-not-the-throttle.png" alt="Wave Rider - hold the pocket, not the throttle" width="49%">
-<img src="docs/screenshots/skyline-every-strong-stroke-drops-another-floor.png" alt="Skyline - every strong stroke drops another floor" width="49%">
 <img src="docs/screenshots/row-runner-rowing-sets-the-pace-the-runner-jumps-itself.png" alt="Row Runner - rowing sets the pace, the runner jumps itself" width="49%">
-<img src="docs/screenshots/zombie-run-the-horde-is-right-behind-you.png" alt="Zombie Run - the horde is right behind you" width="49%">
 <img src="docs/screenshots/stroke-coach-the-shape-of-your-drive-scored.png" alt="Stroke Coach - the shape of your drive, scored" width="49%">
+<img src="docs/screenshots/skyline-every-strong-stroke-drops-another-floor.png" alt="Skyline - every strong stroke drops another floor" width="49%">
+<img src="docs/screenshots/night-grid-your-watts-light-the-town.png" alt="Night Grid - your watts light the town" width="49%">
+<img src="docs/screenshots/river-explorer-a-river-that-forks-where-you-steer.png" alt="River Explorer - a river that forks where you steer" width="49%">
+<img src="docs/screenshots/zombie-run-the-horde-is-right-behind-you.png" alt="Zombie Run - the horde is right behind you" width="49%">
+<img src="docs/screenshots/zone-row-the-piece-as-one-instrument.png" alt="Zone Row - the piece as one instrument" width="49%">
 
 <!-- screenshots:end -->
 

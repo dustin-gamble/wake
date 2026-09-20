@@ -2716,17 +2716,17 @@ final class RiverExplorerGame extends GameView {
         String reach = reachName(prefixFor(idx), idx);
         bold(c, reach.toUpperCase(java.util.Locale.US), dp(18f), dp(36f), 22f, TEXT, Paint.Align.LEFT);
         label(c, String.format(java.util.Locale.US, "%.2f km up the river  ·  %d landmarks  ·  %d boats passed  ·  %s /500",
-                along / 1000.0, landmarksFound, passedToday, pace(speed)), dp(18f), dp(54f), 10f, DIM, Paint.Align.LEFT);
+                along / 1000.0, landmarksFound, passedToday, pace(speed)), dp(18f), dp(58f), 10f, DIM, Paint.Align.LEFT);
         label(c, lightName() + "   ·   " + season.name + ", " + season.flow
                         + String.format(java.util.Locale.US, " (%.1f m/s %s you)", current,
                         dir > 0 ? "against" : "with"),
-                dp(18f), dp(70f), 10f, light < 0.5f ? 0xFFB9C4FF : 0xFFF2C39A, Paint.Align.LEFT);
+                dp(18f), dp(80f), 10f, light < 0.5f ? 0xFFB9C4FF : 0xFFF2C39A, Paint.Align.LEFT);
 
         // The album button: a small postcard stack with a count.
         albumBtnL = dp(18f);
-        albumBtnT = dp(80f);
+        albumBtnT = dp(92f);
         albumBtnR = dp(158f);
-        albumBtnB = dp(116f);
+        albumBtnB = dp(128f);
         rect.set(albumBtnL, albumBtnT, albumBtnR, albumBtnB);
         paint.setColor(0xCC0A121C);
         c.drawRoundRect(rect, dp(8f), dp(8f), paint);
