@@ -259,3 +259,28 @@ real numbers.
 | 11 | Night Grid, Regatta Season, Daily Row, Rhythm Row | M–L | Once the core is strong |
 
 **Effort:** S = about a day, M = a few days, L = a week or more.
+
+## TODO: deep verification round for 3.22.0 (agreed 2026-09-19)
+
+The 3.22.0 emulator pass launched all 21 cards for 34 s each: no crashes, and every
+screenshot showed its new features. That only reaches what happens in the first half
+minute. Still unverified on screen, because they need time, distance or repeat sessions:
+
+- Row Runner: the crab king boss at 1 km (~4.5 min of demo rowing), checkpoints, ghost
+- Zone Row: a full piece to the finish - time-in-zone chart, last-piece marker
+- Regatta: a complete heat then the final, season ladder promotion, trophy cabinet
+- Rocket Launch: booster landing, mission chain, the moon campaign end
+- Night Grid / Skyline: growth across sessions, blackout events, weekly landmark
+- Wave Rider: barrels, big sets, medals - and whether the ~25 s lip wipeout stands up
+  on the real machine (an A/B showed it is NOT a 3.22.0 regression: the pre-upgrade
+  file wiped out 3 of 3, the new one 2 of 3 with one 49 s ride)
+- Daily Row: the Sunday boss, the month view after several days
+- Crew Boat: a Power 10 call and the rival eight over a full 1000 m
+- Coast Flight: postcards at Big Sur / Golden Gate (trip progress persists, so a
+  postcard may be many sessions away), the ghost bird, cliff lift
+- Head Race: bridges and bends late in the course, staggered starts, course records
+
+Method that works: launch with the demo rower, sample with 10-frame bursts (a 3-frame
+burst misses sub-second events), and validate each burst before trusting it. Cosmetic
+fix also queued: Records shows "Rocket Launch - mission 3 best" rather than the
+mission's own name.
