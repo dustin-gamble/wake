@@ -2675,7 +2675,8 @@ public class MainActivity extends Activity
                     || key.equals("megapull.rung") || key.startsWith("city.week.")
                     || key.equals("river.frontier") || key.equals("river.dir")
                     || key.equals("river.home") || key.startsWith("river.exp.")
-                    || key.equals("river.exp")) {
+                    || key.equals("river.exp")
+                    || key.equals("runner.bank") || key.equals("rocket.credits")) {
                 continue;   // a recording or a calibration constant, not a record
             }
             Object raw = e.getValue();
@@ -2683,6 +2684,9 @@ public class MainActivity extends Activity
                 continue;
             }
             float v = (Float) raw;
+            if (Math.abs(v) < 0.0005f) {
+                continue;   // a record of nothing is not a record - it only crowds the list
+            }
             // crew.time.* and the 500 m daily trial are times too (Crew Boat showed "285" on the emulator).
             String shown = key.startsWith("time.") || key.startsWith("run.streak")
                     || key.startsWith("storm.") || key.startsWith("tug.")
@@ -2752,6 +2756,24 @@ public class MainActivity extends Activity
                     : key.equals("coach.challenge") ? Math.round(v) + " strokes"
                     : key.equals("coach.badges") ? Integer.bitCount(Math.round(v)) + " badges"
                     : key.equals("surf.heatsWon") ? Math.round(v) + " heats"
+                    : key.equals("river.km") ? String.format(Locale.US, "%.1f km", v)
+                    : key.equals("tugrating.strength") ? Math.round(v) + " strength"
+                    : key.equals("coast.fronts") ? Math.round(v) + " fronts"
+                    : key.equals("coast.legs") ? Math.round(v) + " legs"
+                    : key.equals("coast.photos") ? Math.round(v) + " stars"
+                    : key.equals("coast.stamps") ? Math.round(v) + " stamps"
+                    : key.equals("coast.migrate") ? Math.round(v) + " km"
+                    : key.equals("rocket.xp") ? Math.round(v) + " XP"
+                    : key.equals("runner.combo") ? Math.round(v) + "x"
+                    : key.equals("runner.daily.runs") ? Math.round(v) + " runs"
+                    : key.equals("runner.endless") ? Math.round(v) + " m"
+                    : key.equals("tuganchor.held") ? Math.round(v) + " rounds"
+                    : key.equals("tugleague.top") ? "division " + Math.round(v)
+                    : key.equals("zrun.district") ? Math.round(v) + " districts"
+                    : key.equals("zrun.wave") ? Math.round(v) + " waves"
+                    : key.equals("river.along") ? Math.round(v) + " m"
+                    : key.equals("river.landmarks") ? Math.round(v) + " landmarks"
+                    : key.equals("collector.score") ? Math.round(v) + " pts"
                     : String.valueOf(Math.round(v));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2833,6 +2855,20 @@ public class MainActivity extends Activity
         if (key.equals("surf.wave")) return "Wave Rider - best single wave";
         if (key.equals("surf.heat")) return "Wave Rider - best heat score";
         if (key.equals("surf.heatsWon")) return "Wave Rider - heats won";
+        if (key.equals("tugrating.strength")) return "Tug of War - crew strength";
+        if (key.equals("tuganchor.held")) return "Tug of War - anchor rounds held";
+        if (key.equals("tugleague.top")) return "Tug of War - highest division reached";
+        if (key.equals("coast.fronts")) return "Coast Flight - weather fronts crossed";
+        if (key.equals("coast.legs")) return "Coast Flight - legs of the coast flown";
+        if (key.equals("coast.photos")) return "Coast Flight - postcard stars";
+        if (key.equals("coast.stamps")) return "Coast Flight - passport stamps";
+        if (key.equals("coast.migrate")) return "Coast Flight - furthest with the flock";
+        if (key.equals("rocket.xp")) return "Rocket Launch - experience";
+        if (key.equals("runner.combo")) return "Row Runner - best combo";
+        if (key.equals("runner.daily.runs")) return "Row Runner - daily runs taken";
+        if (key.equals("runner.endless")) return "Row Runner - furthest endless run";
+        if (key.equals("zrun.district")) return "Zombie Run - districts cleared";
+        if (key.equals("zrun.wave")) return "Zombie Run - waves cleared";
         if (key.startsWith("time.")) return key.substring(5) + " m fastest";
         // 3.22.0 upgrades - checked before the broad zonerow./crew.time./daily.best. branches below.
         if (key.equals("zonerow.lock")) return "Zone Row - longest zone + rate lock";
