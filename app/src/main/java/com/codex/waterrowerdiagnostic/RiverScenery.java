@@ -82,6 +82,11 @@ final class RiverScenery {
         }
     }
 
+    /** Half-brightness, for the crowd's back row: depth without a second palette. */
+    private static int dim(int argb) {
+        return 0xFF000000 | ((argb >>> 1) & 0x007F7F7F);
+    }
+
     /**
      * The far bank between {@code top} and {@code bottom}: trees at a slow parallax, then a crowd
      * that jumps when {@code cheer} (0..1) is up, with flags on poles.
@@ -103,35 +108,54 @@ final class RiverScenery {
         paint.setColor(0xFF3F7A45);
         c.drawRect(0, bottom - dp(12f), w, bottom, paint);
 
-        float fanGap = dp(15f);
+        // A crowd, not a picket fence. At dp(15) with dp(8)-wide bodies the old spacing left a
+        // dp(7) gap the whole width of the screen, which reads on the tablet as a barcode stripe.
+        // Three things make it a crowd instead: irregular empty stretches, per-person jitter and
+        // height, and a dimmer back row standing between the front one's shoulders.
+        float fanGap = dp(22f);
         double fanScroll = metres * ppm * 0.8;
         float foff = (float) (fanScroll % fanGap);
         float ground = bottom - dp(4f);
-        for (float x = -foff - fanGap; x < w + fanGap; x += fanGap) {
+        for (float x = -foff - fanGap * 2f; x < w + fanGap; x += fanGap) {
             int k = (int) Math.floor((x + fanScroll) / fanGap + 0.5);
-            if (Math.abs(k * 13) % 7 == 0) {
-                continue;
+            int h = Math.abs((k * 73) ^ (k >> 2) ^ (k * 1367));
+            if (h % 7 < 2) {
+                continue;       // an irregular gap in the line - people do not stand evenly
             }
             float jump = cheer * (float) Math.abs(Math.sin(time * 7 + k * 1.7)) * dp(5f);
+            float fx = x + ((h % 5) - 2) * dp(2.2f);
+            float tall = dp(12f) + (h % 4) * dp(1.6f);
+            if (h % 3 == 0) {
+                // Back row: smaller, darker, offset - depth without another pass of geometry.
+                float bx = fx + dp(8f);
+                float bjump = cheer * (float) Math.abs(Math.sin(time * 7 + k * 2.3)) * dp(4f);
+                paint.setColor(dim(SHIRTS[Math.abs(k * 3 + 1) % SHIRTS.length]));
+                c.drawRect(bx - dp(3f), ground - dp(4f) - tall * 0.8f - bjump,
+                        bx + dp(3f), ground - dp(4f) - bjump, paint);
+                paint.setColor(dim((k & 3) == 0 ? 0xFF8D5524 : 0xFFF1C27D));
+                c.drawCircle(bx, ground - dp(4f) - tall * 0.8f - dp(2.6f) - bjump, dp(2.6f), paint);
+            }
             paint.setColor(SHIRTS[Math.abs(k) % SHIRTS.length]);
-            c.drawRect(x - dp(4f), ground - dp(14f) - jump, x + dp(4f), ground - jump, paint);
+            c.drawRect(fx - dp(3.6f), ground - tall - jump, fx + dp(3.6f), ground - jump, paint);
             paint.setColor((k & 3) == 0 ? 0xFF8D5524 : 0xFFF1C27D);
-            c.drawCircle(x, ground - dp(18f) - jump, dp(3.4f), paint);
+            c.drawCircle(fx, ground - tall - dp(3.2f) - jump, dp(3.2f), paint);
             if (cheer > 0.5f && (k & 1) == 0) {
                 // Arms up.
                 paint.setColor(0xFFF1C27D);
-                c.drawRect(x - dp(6f), ground - dp(24f) - jump, x - dp(4.5f), ground - dp(12f) - jump, paint);
-                c.drawRect(x + dp(4.5f), ground - dp(24f) - jump, x + dp(6f), ground - dp(12f) - jump, paint);
+                c.drawRect(fx - dp(5.6f), ground - tall - dp(8f) - jump,
+                        fx - dp(4.2f), ground - tall * 0.5f - jump, paint);
+                c.drawRect(fx + dp(4.2f), ground - tall - dp(8f) - jump,
+                        fx + dp(5.6f), ground - tall * 0.5f - jump, paint);
             }
             if (Math.abs(k) % 9 == 4) {
                 paint.setColor(0xFF9AA5B1);
-                c.drawRect(x + dp(3.5f), ground - dp(40f) - jump, x + dp(5f), ground - dp(14f) - jump, paint);
+                c.drawRect(fx + dp(3.2f), ground - dp(40f) - jump, fx + dp(4.6f), ground - dp(14f) - jump, paint);
                 float wave = (float) Math.sin(time * 6 + k) * dp(3f);
                 paint.setColor(SHIRTS[(Math.abs(k) + 2) % SHIRTS.length]);
                 path.rewind();
-                path.moveTo(x + dp(5f), ground - dp(40f) - jump);
-                path.lineTo(x + dp(22f), ground - dp(35f) - jump + wave);
-                path.lineTo(x + dp(5f), ground - dp(29f) - jump);
+                path.moveTo(fx + dp(4.6f), ground - dp(40f) - jump);
+                path.lineTo(fx + dp(21f), ground - dp(35f) - jump + wave);
+                path.lineTo(fx + dp(4.6f), ground - dp(29f) - jump);
                 path.close();
                 c.drawPath(path, paint);
             }

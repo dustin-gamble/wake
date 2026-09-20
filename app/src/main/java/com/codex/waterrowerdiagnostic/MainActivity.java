@@ -2668,7 +2668,14 @@ public class MainActivity extends Activity
                     // 3.22.0: state the games keep between sessions, not achievements.
                     || key.equals("coach.best.drive") || key.equals("coach.best.length")
                     || key.equals("surf.spot") || key.equals("city.districts")
-                    || key.startsWith("city.landmark.") || key.equals("grid.battery")) {
+                    || key.startsWith("city.landmark.") || key.equals("grid.battery")
+                    // 3.23.1: carried state from the second round of upgrades.
+                    || key.equals("collector.bank") || key.startsWith("megapull.week")
+                    || key.equals("megapull.tickets") || key.equals("megapull.owned")
+                    || key.equals("megapull.rung") || key.startsWith("city.week.")
+                    || key.equals("river.frontier") || key.equals("river.dir")
+                    || key.equals("river.home") || key.startsWith("river.exp.")
+                    || key.equals("river.exp")) {
                 continue;   // a recording or a calibration constant, not a record
             }
             Object raw = e.getValue();
@@ -2711,6 +2718,40 @@ public class MainActivity extends Activity
                     : key.equals("gauges.best500") ? PersonalBests.formatPace(v) + " /500"
                     : key.equals("gauges.powerminute") ? Math.round(v) + " W"
                     : key.equals("shuffle.bosses") ? Math.round(v) + " bosses"
+                    // 3.23.1: the second round of upgrades.
+                    : key.equals("canyon.exit") || key.equals("chase.exit")
+                      || key.equals("crew.regatta.time") ? PersonalBests.formatTime(v)
+                    : key.equals("canyon.gold") ? Math.round(v) + " gold rings"
+                    : key.equals("chase.gold") ? Math.round(v) + " gold gates"
+                    : key.equals("chase.score") || key.equals("collector.rush")
+                      || key.equals("megapull.ten") || key.equals("surf.wave")
+                      || key.equals("surf.heat") || key.equals("daily.points") ? Math.round(v) + " pts"
+                    : key.equals("collector.sets") ? Math.round(v) + " sets"
+                    : key.equals("crew.swing") ? Math.round(v) + "%"
+                    : key.startsWith("crew.margin.") ? Math.round(v) + " m / 1000"
+                    : key.equals("crew.regatta.wins") || key.equals("city.rushwins")
+                      || key.equals("race.series.wins") || key.equals("regatta.grudges")
+                      || key.equals("headrace.event.wins") ? Math.round(v) + " wins"
+                    : key.equals("daily.week.best") ? Math.round(v) + " days"
+                    : key.equals("megapull.called") ? Math.round(v) + " calls"
+                    : key.startsWith("megapull.rival.") ? Math.round(v) + " pts"
+                    : key.equals("grid.contracts") ? Math.round(v) + " contracts"
+                    : key.equals("grid.peaks") ? Math.round(v) + " peaks"
+                    : key.equals("grid.festivals") ? Math.round(v) + " festivals"
+                    : key.equals("grid.towns") ? Math.round(v) + " towns"
+                    : key.equals("regatta.grands") ? Math.round(v) + " grand finals"
+                    : key.equals("river.pct") ? Math.round(v) + "%"
+                    : key.equals("river.exped") ? Math.round(v) + " expeditions"
+                    : key.equals("river.cruise") ? String.format(Locale.US, "%.1f km", v)
+                    : key.equals("river.weirs") ? Math.round(v) + " weirs"
+                    : key.equals("city.civic") ? Math.round(v) + " civic"
+                    : key.equals("city.rating") ? skylineRating(v)
+                    : key.equals("city.rush") ? Math.round(v) + " floors"
+                    : key.equals("city.repairs") ? Math.round(v) + " repairs"
+                    : key.equals("city.storms") ? Math.round(v) + " storms"
+                    : key.equals("coach.challenge") ? Math.round(v) + " strokes"
+                    : key.equals("coach.badges") ? Integer.bitCount(Math.round(v)) + " badges"
+                    : key.equals("surf.heatsWon") ? Math.round(v) + " heats"
                     : String.valueOf(Math.round(v));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2742,7 +2783,56 @@ public class MainActivity extends Activity
         return i >= 0 && i < names.length ? names[i] : String.valueOf(Math.round(v));
     }
 
+    /** Skyline stores the rating as tier + 1; these are the city's own names for them. */
+    private static String skylineRating(float v) {
+        String[] names = {"Outpost", "Town", "City", "Metropolis", "Megacity"};
+        int i = Math.round(v) - 1;
+        return i >= 0 && i < names.length ? names[i] : String.valueOf(Math.round(v));
+    }
+
     private static String recordName(String key) {
+        // 3.23.1: the second round of upgrades, before any broader prefix below.
+        if (key.equals("canyon.gold")) return "Canyon FLY - golden rings";
+        if (key.equals("canyon.exit")) return "Canyon FLY - fastest way out";
+        if (key.equals("chase.exit")) return "Canyon DRIVE - fastest way out";
+        if (key.equals("chase.score")) return "Canyon DRIVE - best run";
+        if (key.equals("chase.gold")) return "Canyon DRIVE - golden gates";
+        if (key.equals("collector.sets")) return "Collector - prize sets completed";
+        if (key.equals("collector.rush")) return "Collector - best gold rush";
+        if (key.equals("crew.swing")) return "Crew Boat - best swing";
+        if (key.startsWith("crew.margin.")) return "Crew Boat - biggest margin from "
+                + key.substring(12).toLowerCase(Locale.US) + " seat";
+        if (key.equals("crew.regatta.wins")) return "Crew Boat - regattas won";
+        if (key.equals("crew.regatta.time")) return "Crew Boat - fastest regatta";
+        if (key.equals("daily.points")) return "Daily Row - points banked";
+        if (key.equals("daily.week.best")) return "Daily Row - best week";
+        if (key.equals("headrace.event.wins")) return "Head Race - events won";
+        if (key.equals("megapull.called")) return "Mega Pull - called shots hit";
+        if (key.equals("megapull.ten")) return "Mega Pull - best power ten";
+        if (key.startsWith("megapull.rival.")) return "Mega Pull - best against rival "
+                + key.substring(15);
+        if (key.equals("grid.contracts")) return "Night Grid - contracts delivered";
+        if (key.equals("grid.peaks")) return "Night Grid - peak demands covered";
+        if (key.equals("grid.festivals")) return "Night Grid - festivals powered";
+        if (key.equals("grid.towns")) return "Night Grid - towns connected";
+        if (key.equals("race.series.wins")) return "Race - series won";
+        if (key.equals("regatta.grands")) return "Regatta - grand finals won";
+        if (key.equals("regatta.grudges")) return "Regatta - grudge matches won";
+        if (key.equals("river.pct")) return "River Explorer - river explored";
+        if (key.equals("river.exped")) return "River Explorer - expeditions completed";
+        if (key.equals("river.cruise")) return "River Explorer - longest cruise";
+        if (key.equals("river.weirs")) return "River Explorer - weirs portaged";
+        if (key.equals("city.civic")) return "Skyline - civic buildings";
+        if (key.equals("city.rating")) return "Skyline - city rating";
+        if (key.equals("city.rush")) return "Skyline - best build rush";
+        if (key.equals("city.rushwins")) return "Skyline - build rushes won";
+        if (key.equals("city.repairs")) return "Skyline - repairs made";
+        if (key.equals("city.storms")) return "Skyline - storms weathered";
+        if (key.equals("coach.challenge")) return "Stroke Coach - longest challenge run";
+        if (key.equals("coach.badges")) return "Stroke Coach - badges earned";
+        if (key.equals("surf.wave")) return "Wave Rider - best single wave";
+        if (key.equals("surf.heat")) return "Wave Rider - best heat score";
+        if (key.equals("surf.heatsWon")) return "Wave Rider - heats won";
         if (key.startsWith("time.")) return key.substring(5) + " m fastest";
         // 3.22.0 upgrades - checked before the broad zonerow./crew.time./daily.best. branches below.
         if (key.equals("zonerow.lock")) return "Zone Row - longest zone + rate lock";
