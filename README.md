@@ -4,6 +4,11 @@
 
 📥 **[Download the APK and read the guide →](https://dustin-gamble.github.io/wake/)**
 
+<img src="docs/photos/rower.jpg" alt="A WaterRower in an Ergatta fit-out, its tablet showing WAKE's home screen of game cards" width="100%">
+
+*The machine all of this was written on and measured against. Nothing was added to the hardware —
+the app reads the S4 monitor over the USB cable that is already there.*
+
 <!-- screenshots:start -->
 
 <img src="docs/screenshots/canyon-fly-the-rings-at-the-speed-they-ask-for.png" alt="Canyon - fly the rings at the speed they ask for" width="49%">
