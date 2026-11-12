@@ -52,6 +52,14 @@ import android.view.MotionEvent;
  * <li><b>Tomorrow's preview.</b> On finishing, a panel shows tomorrow's challenge, its target at the
  * chosen difficulty and an animated glyph - a bobbing Kraken when tomorrow is a Sunday.</li>
  * </ul>
+ *
+ * <p>3.25.0 graphics pass (look only - no challenge, date, streak, points or boss logic changed): a
+ * gradient backdrop with a drifting nebula, a lit plaque behind the day's name, the ring as a groove
+ * in a metal bezel with dial ticks and a comet fill whose leading edge glows and sheds sparks, every
+ * medal struck in real metal (bronze / silver / gold / boss, steel while unearned, tarnished on a
+ * miss) with a sweeping glint, a glossy progress bar with a lit head, hand-stamped calendar days,
+ * and a layered animated streak flame with embers (an unlit wick at zero). All gradients are cached
+ * by size; nothing is allocated per frame.
  */
 final class DailyRowGame extends GameView {
 
@@ -239,12 +247,80 @@ final class DailyRowGame extends GameView {
     private final java.util.ArrayDeque<String> bannerQueue = new java.util.ArrayDeque<>();
     private final java.util.ArrayDeque<Integer> bannerTints = new java.util.ArrayDeque<>();
 
+    /* ---------- 3.25.0 graphics: cached shaders, built on size change and never per frame ---------- */
+
+    /** Gradient fills get their own paint, so a leftover alpha or shader on {@link #paint} cannot leak. */
+    private final Paint gp = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final android.graphics.Matrix shineMatrix = new android.graphics.Matrix();
+    /** Metal shader sets by palette and rounded radius: a handful of keys, made once each. */
+    private final android.util.SparseArray<Metal> metals = new android.util.SparseArray<>();
+    /** Calendar cell gloss by kind and rounded height. */
+    private final android.util.SparseArray<android.graphics.LinearGradient> cellShaders =
+            new android.util.SparseArray<>();
+    private android.graphics.LinearGradient bgShader;
+    private float bgShaderH;
+    private boolean bgShaderBoss;
+    private android.graphics.LinearGradient plaqueShader;
+    private float plaqueShaderH;
+    private android.graphics.LinearGradient barFill;
+    private android.graphics.LinearGradient barFillWarn;
+    private float barShaderH;
+    private android.graphics.LinearGradient bezelShader;
+    private float bezelShaderR;
+    private android.graphics.LinearGradient flameShader;
+    private int flameShaderKey;
+    /** Ring fills, comet-shaped: dark at the tail, bright at the leading edge. Size-independent. */
+    private final android.graphics.SweepGradient ringAccent;
+    private final android.graphics.SweepGradient ringWarn;
+    private final android.graphics.Path flame = new android.graphics.Path();
+
+    // Metal palettes, indexed by medal tier: 0 unearned steel, 1 bronze, 2 silver, 3 gold, 4 boss,
+    // 5 tarnished (a missed day). hi is the specular, deep the shadowed far side.
+    private static final int PAL_STEEL = 0;
+    private static final int PAL_TARNISHED = 5;
+    private static final int[] PAL_HI = {0xFF8C99AC, 0xFFFFD9B0, 0xFFFFFFFF, 0xFFFFF6C8, 0xFFF0DCFF, 0xFF9C8A74};
+    private static final int[] PAL_FACE = {0xFF3A4658, 0xFFCD7F32, 0xFFC9D3DE, 0xFFF5C518, 0xFFB06CFF, 0xFF4A3F36};
+    private static final int[] PAL_DEEP = {0xFF161E2B, 0xFF6A3A12, 0xFF5E6A7A, 0xFF8A6206, 0xFF4A2490, 0xFF221B15};
+    private static final int[] PAL_RIM_LIGHT = {0xFF5E6B7E, 0xFFEBB07A, 0xFFF4F8FC, 0xFFFFE38A, 0xFFDDBEFF, 0xFF7E6E5C};
+    private static final int[] PAL_RIM_DARK = {0xFF0E141E, 0xFF3E1F06, 0xFF3C4552, 0xFF5E4204, 0xFF2A1058, 0xFF16110D};
+    private static final int[] PAL_STAR = {0xFF56647A, 0xFFF2B47C, 0xFFF4F8FC, 0xFFFFE89A, 0xFFE6CCFF, 0xFF7A6A58};
+    private static final int[] PAL_STAR_SHADOW = {0xFF121A26, 0xFF5A300C, 0xFF56616F, 0xFF8A6206, 0xFF3A1A78, 0xFF1A1410};
+
+    /** One medal's shaders, centred on the origin and drawn under a canvas translate. */
+    private static final class Metal {
+        final android.graphics.RadialGradient face;
+        final android.graphics.LinearGradient rim;
+        final android.graphics.LinearGradient shine;
+
+        Metal(int pal, float r) {
+            face = new android.graphics.RadialGradient(-r * 0.32f, -r * 0.38f, r * 1.3f,
+                    new int[] {PAL_HI[pal], PAL_FACE[pal], PAL_DEEP[pal]}, new float[] {0f, 0.42f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+            rim = new android.graphics.LinearGradient(-r, -r, r, r,
+                    new int[] {PAL_RIM_LIGHT[pal], PAL_FACE[pal], PAL_RIM_DARK[pal]}, new float[] {0f, 0.45f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+            // A narrow diagonal band of light; moved across the face with a local matrix.
+            shine = new android.graphics.LinearGradient(-r, -r, r, r,
+                    new int[] {0x00FFFFFF, 0x00FFFFFF, 0xC8FFFFFF, 0x00FFFFFF, 0x00FFFFFF},
+                    new float[] {0f, 0.42f, 0.5f, 0.58f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+        }
+    }
+
     DailyRowGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
         for (int i = 0; i < diffChips.length; i++) {
             diffChips[i] = new RectF();
         }
+        gp.setDither(true);
+        // Stops: bright across the wrap (so the round cap past the tip never meets a hard edge), a
+        // quick fall to dark just after it, then a long rise to the leading edge at 0.96. The arc is
+        // drawn rotated so its tip sits on 0.96, and its tail lands at 0.96 minus the fraction filled.
+        float[] stops = {0f, 0.015f, 0.08f, 0.70f, 0.96f, 1f};
+        ringAccent = new android.graphics.SweepGradient(0, 0,
+                new int[] {0xFFB4FFF3, 0xFF8AF5E6, 0xFF0F5E55, 0xFF2BB8A4, 0xFFB4FFF3, 0xFFB4FFF3}, stops);
+        ringWarn = new android.graphics.SweepGradient(0, 0,
+                new int[] {0xFFFFE6A8, 0xFFFFD27A, 0xFF6A4A0E, 0xFFD69A22, 0xFFFFE6A8, 0xFFFFE6A8}, stops);
     }
 
     @Override
@@ -1019,9 +1095,8 @@ final class DailyRowGame extends GameView {
             return;
         }
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(boss ? 0xFF100A1C : 0xFF08111C);
-        c.drawRect(0, 0, w, h, paint);
-        // Slow sparkles drifting up the background.
+        drawBackdrop(c, w, h);
+        // Slow sparkles drifting up the background; every sixth one is a four-point twinkle.
         int sparkle = boss ? 0xB06CFF : 0x35D0BA;
         for (int i = 0; i < 36; i++) {
             float sx = ((i * 0.137f + 0.05f) % 1f) * w;
@@ -1029,6 +1104,13 @@ final class DailyRowGame extends GameView {
             float tw = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 2 + i);
             paint.setColor(((int) (30 + 60 * tw) << 24) | sparkle);
             c.drawCircle(sx, sy, dp(1.5f) + tw * dp(1.5f), paint);
+            if (i % 6 == 0) {
+                float arm = dp(4f) + tw * dp(5f);
+                paint.setStrokeWidth(dp(1.2f));
+                paint.setColor(((int) (20 + 70 * tw) << 24) | sparkle);
+                c.drawLine(sx - arm, sy, sx + arm, sy, paint);
+                c.drawLine(sx, sy - arm, sx, sy + arm, paint);
+            }
         }
         fx.step(dt, dp(260f));
         double elapsed = phase == Phase.ACTIVE ? sessionSeconds - startSeconds : 0;
@@ -1161,6 +1243,14 @@ final class DailyRowGame extends GameView {
 
         stepBanner();
         float cx = w / 2f;
+        String targetHead = "TARGET  " + targetLine();
+        {
+            // A lit plaque behind the day's name, sized to its text and kept clear of the reward
+            // HUD on the left and the Kraken on the right.
+            float tw = Math.max(textWidth(challenge.title, 30f) * 1.1f, textWidth(targetHead, 13f) * 1.3f);
+            float pw = Math.min(w * 0.5f, Math.max(dp(420f), tw + dp(80f)));
+            drawPlaque(c, cx - pw / 2, dp(16f), cx + pw / 2, dp(132f), boss ? BOSS_COLOR : ACCENT);
+        }
         boolean atStake = doubling && doubleResult == 0;
         label(c, atStake ? "DOUBLE OR NOTHING  ·  " + todayPoints + " PTS AT STAKE"
                         : doubleResult > 0 ? "DOUBLE WON  ·  " + todayPoints + " PTS TODAY"
@@ -1169,7 +1259,7 @@ final class DailyRowGame extends GameView {
                 cx, dp(40f), 11f, atStake || doubleResult > 0 ? 0xFFF5C518
                         : doubleResult < 0 ? BAD : boss ? BOSS_COLOR : FAINT, Paint.Align.CENTER);
         bold(c, challenge.title, cx, dp(78f), 30f, boss ? BOSS_COLOR : ACCENT, Paint.Align.CENTER);
-        label(c, "TARGET  " + targetLine(), cx, dp(102f), 13f, TEXT, Paint.Align.CENTER);
+        label(c, targetHead, cx, dp(102f), 13f, TEXT, Paint.Align.CENTER);
         // The difficulty the target was set at, and what a win pays at it.
         label(c, DIFF_NAMES[diff] + (doubling ? " +1 STEP" : "") + "  ·  reward x"
                         + String.format(java.util.Locale.US, "%.1f", DIFF_REWARD[diff] * (doubling ? 2 : 1)),
@@ -1186,35 +1276,163 @@ final class DailyRowGame extends GameView {
         float rcx = w * 0.17f;
         float rcy = barY + dp(20f);
         float rr = Math.min(dp(70f), h * 0.12f);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(12f));
-        paint.setStrokeCap(Paint.Cap.ROUND);
-        paint.setColor(0x33FFFFFF);
-        c.drawCircle(rcx, rcy, rr, paint);
-        paint.setColor(phase == Phase.DONE && !success ? WARN : ACCENT);
-        c.drawArc(rcx - rr, rcy - rr, rcx + rr, rcy + rr, -90, 360 * ringShown, false, paint);
-        paint.setStrokeCap(Paint.Cap.BUTT);
-        paint.setStyle(Paint.Style.FILL);
         boolean won = phase == Phase.DONE && success;
+        boolean lost = phase == Phase.DONE && !success;
+        // A soft pool of light under the ring, so it sits on the stage rather than on black.
+        Fx.glow(c, rcx, rcy, rr * 2.4f, boss ? 0x20B06CFF : 0x2035D0BA);
         // The halo follows the outcome too: a teal glow around a dulled medal read as a win.
-        int haloTint = (phase == Phase.DONE && !success ? WARN : ACCENT) & 0x00FFFFFF;
+        int haloTint = (lost ? WARN : ACCENT) & 0x00FFFFFF;
         Fx.glow(c, rcx, rcy, rr * (1.2f + 0.3f * ringShown),
                 won ? 0x88F5C518 : ((int) (40 + 60 * ringShown) << 24) | haloTint);
-        boolean lost = phase == Phase.DONE && !success;
-        paint.setColor(won ? 0xFFF5C518 : lost ? 0xFF4A3F36 : blend(0xFF2A3648, 0xFFB8890B, ringShown));
-        c.drawCircle(rcx, rcy, rr * 0.55f, paint);
-        paint.setColor(won ? 0xFFFFE28A : lost ? 0xFF7A6A58 : blend(0xFF3A4658, 0xFFF5C518, ringShown));
-        star(rcx, rcy, rr * 0.38f, rr * 0.17f);
-        c.drawPath(shape, paint);
+        // The track is a groove cut into a metal bezel: a dark bed, a top wall in shadow and a
+        // bottom wall catching the light (light comes from the top left everywhere on this screen).
+        c.save();
+        c.translate(rcx, rcy);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(16f));
+        paint.setColor(0xFF03070C);
+        c.drawCircle(0, 0, rr, paint);
+        paint.setStrokeWidth(dp(12f));
+        paint.setColor(0xFF172231);
+        c.drawCircle(0, 0, rr, paint);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x88000000);
+        c.drawArc(-rr - dp(5f), -rr - dp(5f), rr + dp(5f), rr + dp(5f), 160f, 200f, false, paint);
+        c.drawArc(-rr + dp(5f), -rr + dp(5f), rr - dp(5f), rr - dp(5f), -20f, 200f, false, paint);
+        paint.setColor(0x24FFFFFF);
+        c.drawArc(-rr - dp(5f), -rr - dp(5f), rr + dp(5f), rr + dp(5f), -20f, 200f, false, paint);
+        c.drawArc(-rr + dp(5f), -rr + dp(5f), rr - dp(5f), rr - dp(5f), 160f, 200f, false, paint);
+        // Dial ticks between the groove and the medal: one per 5%, every quarter longer.
+        for (int k = 0; k < 20; k++) {
+            double a = -Math.PI / 2 + k * Math.PI / 10;
+            float ca = (float) Math.cos(a);
+            float sa = (float) Math.sin(a);
+            boolean major = k % 5 == 0;
+            boolean passed = k / 20f <= ringShown;
+            paint.setStrokeWidth(major ? dp(2f) : dp(1.2f));
+            paint.setColor(passed ? (lost ? 0x99F0B132 : 0x9935D0BA) : 0x40FFFFFF);
+            float r0 = rr - dp(10f);
+            float r1 = rr - (major ? dp(17f) : dp(14f));
+            c.drawLine(ca * r0, sa * r0, ca * r1, sa * r1, paint);
+        }
+        // The bezel: a thin bright-to-dark ring just outside the groove.
+        float bez = rr + dp(8.5f);
+        if (bezelShader == null || bezelShaderR != bez) {
+            bezelShaderR = bez;
+            bezelShader = new android.graphics.LinearGradient(-bez, -bez, bez, bez,
+                    new int[] {0xFF6F8098, 0xFF2A3648, 0xFF0A1018}, new float[] {0f, 0.5f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        gp.setStyle(Paint.Style.STROKE);
+        gp.setStrokeWidth(dp(2f));
+        gp.setColor(0xFFFFFFFF);
+        gp.setShader(bezelShader);
+        c.drawCircle(0, 0, bez, gp);
+        gp.setShader(null);
+        c.restore();
+        if (ringShown > 0.003f) {
+            // The fill is a comet: dark at its tail, brightest at the leading edge. On a win the
+            // full ring keeps turning, so the bright head laps it.
+            float sweep = 360f * Math.min(1f, ringShown);
+            float tipA = -90f + sweep;
+            if (won && ringShown > 0.995f) {
+                tipA = -90f + (float) ((sessionSeconds * 120) % 360);
+            }
+            float rot = tipA - 0.96f * 360f;
+            c.save();
+            c.translate(rcx, rcy);
+            c.rotate(rot);
+            gp.setStyle(Paint.Style.STROKE);
+            gp.setStrokeWidth(dp(12f));
+            gp.setStrokeCap(Paint.Cap.ROUND);
+            gp.setColor(0xFFFFFFFF);
+            gp.setShader(lost ? ringWarn : ringAccent);
+            c.drawArc(-rr, -rr, rr, rr, -90f - rot, sweep, false, gp);
+            gp.setShader(null);
+            gp.setStrokeCap(Paint.Cap.BUTT);
+            // A thin tube highlight along the outer, lit side of the fill.
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2f));
+            paint.setColor(0x38FFFFFF);
+            float hr = rr + dp(3f);
+            c.drawArc(-hr, -hr, hr, hr, -90f - rot, Math.max(0f, sweep - 4f), false, paint);
+            c.restore();
+            paint.setStyle(Paint.Style.FILL);
+            double ta = Math.toRadians(tipA);
+            float tx = rcx + (float) Math.cos(ta) * rr;
+            float ty = rcy + (float) Math.sin(ta) * rr;
+            Fx.glow(c, tx, ty, dp(30f), lost ? 0xA0F0B132 : 0xA035D0BA);
+            paint.setColor(0xE6FFFFFF);
+            c.drawCircle(tx, ty, dp(4.5f), paint);
+            // Sparks shed off the head while it is moving forward.
+            if (phase == Phase.ACTIVE && onTrack && Math.random() < dt * 10) {
+                float vx = (float) Math.cos(ta) * dp(50f);
+                float vy = (float) Math.sin(ta) * dp(50f);
+                fx.spawn(tx, ty, vx + (float) (Math.random() - 0.5) * dp(40f),
+                        vy + (float) (Math.random() - 0.5) * dp(40f), 0.5f, dp(2f), 0xFFB4FFF3, false);
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        // The medal: struck metal. Steel until the ring fills it with gold; tarnished on a miss.
+        float mr = rr * 0.55f;
+        paint.setColor(0x70000000);
+        c.drawCircle(rcx + mr * 0.07f, rcy + mr * 0.12f, mr, paint);
+        if (won) {
+            drawMetal(c, rcx, rcy, mr, GOLD, 255, 1f, 0f, false);
+        } else if (lost) {
+            drawMetal(c, rcx, rcy, mr, PAL_TARNISHED, 255, 0f, 0f, false);
+        } else {
+            drawMetal(c, rcx, rcy, mr, PAL_STEEL, 255, 0.25f, 0f, false);
+            if (ringShown > 0.01f) {
+                drawMetal(c, rcx, rcy, mr, GOLD, (int) (255 * Math.min(1f, ringShown)),
+                        0.3f + 0.7f * ringShown, 0f, false);
+            }
+        }
         bold(c, Math.round(ringShown * 100) + "%", rcx, rcy + rr + dp(26f), 14f, TEXT, Paint.Align.CENTER);
-        // The flat bar stays for the live readout, now with a moving sheen.
+        // The bar for the live readout: a sunken track and a glossy fill with a lit leading edge.
         float barL = w * 0.30f;
         float barR = w * 0.86f;
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(barL, barY, barR, barY + dp(18f), dp(9f), dp(9f), paint);
+        float bh = dp(18f);
+        paint.setColor(0xFF03070C);
+        c.drawRoundRect(barL - dp(2f), barY - dp(2f), barR + dp(2f), barY + bh + dp(2f), dp(11f), dp(11f), paint);
+        paint.setColor(0xFF172231);
+        c.drawRoundRect(barL, barY, barR, barY + bh, dp(9f), dp(9f), paint);
+        paint.setColor(0x70000000);
+        c.drawRect(barL + dp(9f), barY, barR - dp(9f), barY + dp(3f), paint);
+        paint.setColor(0x1CFFFFFF);
+        c.drawRect(barL + dp(9f), barY + bh - dp(1.5f), barR - dp(9f), barY + bh - dp(0.5f), paint);
+        if (barFill == null || barShaderH != bh) {
+            barShaderH = bh;
+            barFill = new android.graphics.LinearGradient(0, 0, 0, bh,
+                    new int[] {0xFF9AF8EA, 0xFF35D0BA, 0xFF16786B}, new float[] {0f, 0.45f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+            barFillWarn = new android.graphics.LinearGradient(0, 0, 0, bh,
+                    new int[] {0xFFFFE19A, 0xFFF0B132, 0xFF8A5E10}, new float[] {0f, 0.45f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
         // Same rule as the ring: a miss must not be drawn in the colour of a win.
-        paint.setColor(lost ? WARN : ACCENT);
-        c.drawRoundRect(barL, barY, barL + (barR - barL) * progress, barY + dp(18f), dp(9f), dp(9f), paint);
+        float fillR = barL + (barR - barL) * progress;
+        if (progress > 0f) {
+            c.save();
+            c.translate(0, barY);
+            gp.setStyle(Paint.Style.FILL);
+            gp.setColor(0xFFFFFFFF);
+            gp.setShader(lost ? barFillWarn : barFill);
+            c.drawRoundRect(barL, 0, fillR, bh, dp(9f), dp(9f), gp);
+            gp.setShader(null);
+            if (fillR - barL > dp(16f)) {
+                paint.setColor(0x3CFFFFFF);
+                c.drawRoundRect(barL + dp(5f), dp(2.5f), fillR - dp(5f), dp(7f), dp(3f), dp(3f), paint);
+            }
+            c.restore();
+            if (progress < 0.999f && progress > 0.01f) {
+                Fx.glow(c, fillR, barY + bh / 2, dp(28f), lost ? 0x90F0B132 : 0x9035D0BA);
+                paint.setColor(0xCCFFFFFF);
+                c.drawRoundRect(fillR - dp(3.5f), barY + dp(3f), fillR - dp(0.5f), barY + bh - dp(3f),
+                        dp(1.5f), dp(1.5f), paint);
+            }
+        }
         if (progress > 0.02f) {
             float sheen = barL + (barR - barL) * progress * (float) ((sessionSeconds * 0.6) % 1.0);
             paint.setColor(0x55FFFFFF);
@@ -1236,11 +1454,26 @@ final class DailyRowGame extends GameView {
             c.save();
             c.rotate(-8f, w * 0.58f, barY - dp(40f));
             c.scale(scale, scale, w * 0.58f, barY - dp(40f));
+            float sxc = w * 0.58f;
+            int ta = (int) (255 * t);
+            // Ink wash, then a heavy outer rule and a fine inner one, like a rubber stamp.
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(((int) (40 * t) << 24) | stamp);
+            c.drawRoundRect(sxc - dp(90f), barY - dp(68f), sxc + dp(90f), barY - dp(14f), dp(8f), dp(8f), paint);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(dp(4f));
-            paint.setColor(((int) (255 * t) << 24) | stamp);
-            c.drawRoundRect(w * 0.58f - dp(90f), barY - dp(68f), w * 0.58f + dp(90f), barY - dp(14f), dp(8f), dp(8f), paint);
+            paint.setColor((ta << 24) | stamp);
+            c.drawRoundRect(sxc - dp(90f), barY - dp(68f), sxc + dp(90f), barY - dp(14f), dp(8f), dp(8f), paint);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(((int) (170 * t) << 24) | stamp);
+            c.drawRoundRect(sxc - dp(83f), barY - dp(61f), sxc + dp(83f), barY - dp(21f), dp(5f), dp(5f), paint);
             paint.setStyle(Paint.Style.FILL);
+            // A star at each end of the stamp, outside the frame so they never touch the words.
+            paint.setColor((ta << 24) | stamp);
+            for (int s = -1; s <= 1; s += 2) {
+                star(sxc + s * dp(106f), barY - dp(41f), dp(9f), dp(4f));
+                c.drawPath(shape, paint);
+            }
             bold(c, boss ? "BOSS DOWN" : "DAY WON", w * 0.58f, barY - dp(30f), 26f, ((int) (255 * t) << 24) | stamp, Paint.Align.CENTER);
             c.restore();
         }
@@ -1305,7 +1538,8 @@ final class DailyRowGame extends GameView {
             drawStrip(c, calL, calY, cell, cells, true);
             label(c, "LAST 28 DAYS", calL, calY - dp(8f), 9f, FAINT, Paint.Align.LEFT);
             label(c, "TODAY", calL + cells * cell, calY - dp(8f), 9f, FAINT, Paint.Align.RIGHT);
-            drawStreak(c, cx, calY + cell + dp(40f), w / 2f - dp(150f), calY + cell + dp(30f));
+            // The flame stands on the streak line's baseline, beside the words.
+            drawStreak(c, cx, calY + cell + dp(40f), w / 2f - dp(150f), calY + cell + dp(38f));
         }
         monthChip.set(w - dp(128f), h * 0.58f - dp(34f), w - dp(16f), h * 0.58f - dp(4f));
         chip(c, monthChip, monthView ? "28 DAYS" : "MONTH", DIM);
@@ -1397,9 +1631,22 @@ final class DailyRowGame extends GameView {
         for (int i = 0; i < 7; i++) {
             float l = x0 + i * cell;
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(weekDone[i] ? ACCENT : i == todayCol ? 0xFF2A3648
-                    : saved.contains(weekStart + i) ? 0xFF24345C : 0xFF141D2A);
-            c.drawRoundRect(l + dp(2f) * s, cy0, l + cell - dp(2f) * s, cy0 + ch0, dp(4f) * s, dp(4f) * s, paint);
+            if (weekDone[i]) {
+                // Same glossy tile as the calendar's won days.
+                c.save();
+                c.translate(l + dp(2f) * s, cy0);
+                gp.setStyle(Paint.Style.FILL);
+                gp.setColor(0xFFFFFFFF);
+                gp.setShader(cellShader(0, ch0));
+                c.drawRoundRect(0, 0, cell - dp(4f) * s, ch0, dp(4f) * s, dp(4f) * s, gp);
+                gp.setShader(null);
+                paint.setColor(0x66FFFFFF);
+                c.drawRect(dp(4f) * s, dp(1f), cell - dp(8f) * s, dp(2f), paint);
+                c.restore();
+            } else {
+                drawSunkCell(c, l + dp(2f) * s, cy0, l + cell - dp(2f) * s, cy0 + ch0,
+                        i == todayCol ? 0xFF2A3648 : saved.contains(weekStart + i) ? 0xFF24345C : 0xFF141D2A);
+            }
             label(c, WEEKDAYS[i], l + cell / 2, cy0 + ch0 * 0.68f, 10f * s,
                     weekDone[i] ? 0xFF08111C : i == 6 ? BOSS_COLOR : FAINT, Paint.Align.CENTER);
             if (i == todayCol && !weekDone[i]) {
@@ -1430,9 +1677,25 @@ final class DailyRowGame extends GameView {
                 }
             }
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(claimed ? 0xFFF5C518 : 0xFF2A3648);
-            star(sx, sy, r, r * 0.45f);
-            c.drawPath(shape, paint);
+            if (claimed) {
+                // Gold with a shadowed underside and a lit core, rather than one flat yellow.
+                paint.setColor(0xFF7A5406);
+                star(sx + r * 0.08f, sy + r * 0.12f, r, r * 0.45f);
+                c.drawPath(shape, paint);
+                paint.setColor(0xFFF5C518);
+                star(sx, sy, r, r * 0.45f);
+                c.drawPath(shape, paint);
+                paint.setColor(0xFFFFF0B0);
+                star(sx - r * 0.06f, sy - r * 0.08f, r * 0.45f, r * 0.2f);
+                c.drawPath(shape, paint);
+            } else {
+                paint.setColor(0xFF0A111B);
+                star(sx + r * 0.06f, sy + r * 0.1f, r, r * 0.45f);
+                c.drawPath(shape, paint);
+                paint.setColor(0xFF2A3648);
+                star(sx, sy, r, r * 0.45f);
+                c.drawPath(shape, paint);
+            }
             label(c, "+" + WEEK_POINTS[k], sx, sy + dp(20f) * s, 8f * s, claimed ? WARN : FAINT,
                     Paint.Align.CENTER);
         }
@@ -1480,14 +1743,25 @@ final class DailyRowGame extends GameView {
             c.drawCircle(x + (float) Math.cos(a) * r * 0.78f, y + (float) Math.sin(a) * r * 0.78f,
                     r * 0.3f, paint);
         }
-        paint.setColor(face);
-        c.drawCircle(x, y, r * 0.72f, paint);
-        paint.setColor(rim);
-        c.drawCircle(x, y, r * 0.58f, paint);
+        // A lighter fold on each pleat, offset toward the light, so the petals have a front.
+        paint.setColor(blend(rim, tier > 0 ? face : 0xFF5A6678, 0.4f));
+        for (int k = 0; k < 12; k++) {
+            double a = spin + k * Math.PI / 6;
+            c.drawCircle(x + (float) Math.cos(a) * r * 0.74f - r * 0.04f,
+                    y + (float) Math.sin(a) * r * 0.74f - r * 0.05f, r * 0.18f, paint);
+        }
         if (tier > 0) {
+            // Earned: a struck metal centre in the badge's own metal.
+            drawMetal(c, x, y, r * 0.72f, Math.min(GOLD, tier), 255, 0.6f, x * 0.01f, false);
+            paint.setStyle(Paint.Style.FILL);
             paint.setColor(face);
-            star(x, y, r * 0.42f, r * 0.18f);
-            c.drawPath(shape, paint);
+        } else {
+            paint.setColor(face);
+            c.drawCircle(x, y, r * 0.72f, paint);
+            paint.setColor(rim);
+            c.drawCircle(x, y, r * 0.58f, paint);
+        }
+        if (tier > 0) {
             // One pip per tier around the foot of the badge.
             for (int k = 0; k < tier; k++) {
                 c.drawCircle(x + (k - (tier - 1) / 2f) * r * 0.34f, y + r * 0.95f, r * 0.1f, paint);
@@ -1878,20 +2152,9 @@ final class DailyRowGame extends GameView {
         if (streak > 0) {
             // A flame beside the streak, taller the longer it runs.
             float fh = dp(18f) + Math.min(10, streak) * dp(2f);
-            float flick = (float) Math.sin(sessionSeconds * 12) * dp(2f);
-            Fx.glow(c, fxc, fyc - fh * 0.3f, fh * 1.4f, 0x55FF8A3D);
-            shape.rewind();
-            shape.moveTo(fxc, fyc - fh + flick);
-            shape.quadTo(fxc + fh * 0.6f, fyc - fh * 0.3f, fxc, fyc + dp(4f));
-            shape.quadTo(fxc - fh * 0.6f, fyc - fh * 0.3f, fxc, fyc - fh + flick);
-            paint.setColor(0xFFFF8A3D);
-            c.drawPath(shape, paint);
-            shape.rewind();
-            shape.moveTo(fxc, fyc - fh * 0.55f - flick);
-            shape.quadTo(fxc + fh * 0.3f, fyc - fh * 0.1f, fxc, fyc + dp(2f));
-            shape.quadTo(fxc - fh * 0.3f, fyc - fh * 0.1f, fxc, fyc - fh * 0.55f - flick);
-            paint.setColor(0xFFFFD36A);
-            c.drawPath(shape, paint);
+            drawFlame(c, fxc, fyc + dp(4f), fh);
+        } else {
+            drawColdFlame(c, fxc, fyc + dp(4f), dp(18f));
         }
         bold(c, streak + " DAY STREAK", tx, ty, 26f, streak > 0 ? WARN : DIM, Paint.Align.CENTER);
         label(c, "best streak " + Math.round(bests.get("daily.streak", 0f)) + " days", tx, ty + dp(18f), 10f, FAINT, Paint.Align.CENTER);
@@ -1908,27 +2171,30 @@ final class DailyRowGame extends GameView {
 
     /** The 28-day strip: a tick on each day won, purple for a boss, a shield where a saver covered. */
     private void drawStrip(Canvas c, float calL, float calY, float cell, int cells, boolean pulseToday) {
+        float cw = cell - dp(4f);
+        float ch = cell - dp(4f);
+        // Today's stamp thumps down when the day is won, the same beat as the big DAY WON stamp.
+        float thump = phase == Phase.DONE && success
+                ? (float) Math.max(0, Math.min(1.0, (sessionSeconds - doneAt - 0.25) * 3)) : 1f;
         for (int i = 0; i < cells; i++) {
             long day = today - (cells - 1 - i);
             boolean done = days.contains(day);
             boolean cover = !done && saved.contains(day);
             Integer tier = done ? medals.get(day) : null;
             boolean bossDay = tier != null && tier == BOSS_MEDAL;
-            paint.setColor(bossDay ? BOSS_COLOR : done ? ACCENT : cover ? 0xFF24345C : day == today ? 0xFF2A3648 : 0xFF141D2A);
-            c.drawRoundRect(calL + i * cell + dp(2f), calY, calL + (i + 1) * cell - dp(2f), calY + cell - dp(4f), dp(5f), dp(5f), paint);
+            float l = calL + i * cell + dp(2f);
             float cx0 = calL + (i + 0.5f) * cell;
-            float cy0 = calY + (cell - dp(4f)) / 2f;
+            float cy0 = calY + ch / 2f;
             if (done) {
-                // A tick on every day you did it.
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(2.5f));
-                paint.setColor(0xFF08111C);
-                c.drawLine(cx0 - cell * 0.2f, cy0, cx0 - cell * 0.05f, cy0 + cell * 0.15f, paint);
-                c.drawLine(cx0 - cell * 0.05f, cy0 + cell * 0.15f, cx0 + cell * 0.22f, cy0 - cell * 0.15f, paint);
-                paint.setStyle(Paint.Style.FILL);
-            } else if (cover) {
+                // A stamp on every day you did it.
+                drawStampedCell(c, l, calY, cw, ch, day, bossDay ? 1 : 0, day == today ? thump : 1f);
+            } else {
+                drawSunkCell(c, l, calY, l + cw, calY + ch,
+                        cover ? 0xFF24345C : day == today ? 0xFF2A3648 : 0xFF141D2A);
+            }
+            if (cover) {
                 drawShield(c, cx0, cy0, cell * 0.28f, BLUE);
-            } else if (day == today && pulseToday) {
+            } else if (!done && day == today && pulseToday) {
                 float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 3);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
@@ -1938,6 +2204,7 @@ final class DailyRowGame extends GameView {
             }
             if ((day + 4) % 7 == 0) {
                 // Sundays are boss days: a small purple dot underneath.
+                paint.setStyle(Paint.Style.FILL);
                 paint.setColor(0x99B06CFF);
                 c.drawCircle(cx0, calY + cell + dp(1f), dp(2f), paint);
             }
@@ -1976,8 +2243,8 @@ final class DailyRowGame extends GameView {
             float x0 = gx + col * cellW;
             float y0 = gridTop + row * rowH;
             long day = monthFirst + i;
-            paint.setColor(day == today ? 0xFF2A3648 : day > today ? 0xFF0C1520 : 0xFF141D2A);
-            c.drawRoundRect(x0 + dp(2f), y0 + dp(2f), x0 + cellW - dp(2f), y0 + rowH - dp(2f), dp(5f), dp(5f), paint);
+            drawSunkCell(c, x0 + dp(2f), y0 + dp(2f), x0 + cellW - dp(2f), y0 + rowH - dp(2f),
+                    day == today ? 0xFF2A3648 : day > today ? 0xFF0C1520 : 0xFF141D2A);
             label(c, String.valueOf(i + 1), x0 + dp(6f), y0 + dp(13f), 9f, FAINT, Paint.Align.LEFT);
             int tier = monthTier[i];
             float mr = Math.min(cellW, rowH) * 0.28f;
@@ -2062,11 +2329,9 @@ final class DailyRowGame extends GameView {
             Fx.glow(c, mx, my, mr * 1.8f, 0x66F5C518);
             drawMedal(c, mx, my, mr, Math.max(BRONZE, todayTier), false);
         } else {
-            paint.setColor(0xFF4A3F36);
-            c.drawCircle(mx, my, mr, paint);
-            paint.setColor(0xFF7A6A58);
-            star(mx, my, mr * 0.6f, mr * 0.27f);
-            c.drawPath(shape, paint);
+            paint.setColor(0x66000000);
+            c.drawCircle(mx + mr * 0.07f, my + mr * 0.12f, mr, paint);
+            drawMetal(c, mx, my, mr, PAL_TARNISHED, 255, 0f, 0f, false);
         }
         bold(c, success ? (boss ? "BOSS DOWN" : "DAY WON") : "NOT TODAY", l + pad, t + ch * 0.36f, 40f, edge, Paint.Align.LEFT);
         bold(c, resultText(), l + pad, t + ch * 0.36f + dp(44f), 30f, TEXT, Paint.Align.LEFT);
@@ -2097,10 +2362,11 @@ final class DailyRowGame extends GameView {
     }
 
     private void drawMedal(Canvas c, float x, float y, float r, int tier, boolean shine) {
-        int face = tier == BOSS_MEDAL ? BOSS_COLOR : tier == GOLD ? 0xFFF5C518 : tier == SILVER ? 0xFFC9D3DE : 0xFFCD7F32;
-        int rim = tier == BOSS_MEDAL ? 0xFF6A3FB5 : tier == GOLD ? 0xFFB8890B : tier == SILVER ? 0xFF7F8A99 : 0xFF8A5220;
-        // Ribbon tails.
-        paint.setColor(tier == BOSS_MEDAL ? 0xFFF0655D : 0xFF6F8CFF);
+        // Ribbon tails, each with a darker fold down its inner half so they read as cloth.
+        int ribbon = tier == BOSS_MEDAL ? 0xFFF0655D : 0xFF6F8CFF;
+        int fold = tier == BOSS_MEDAL ? 0xFFA83A34 : 0xFF3A4FA8;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(ribbon);
         shape.rewind();
         shape.moveTo(x - r * 0.7f, y - r * 1.25f);
         shape.lineTo(x - r * 0.1f, y - r * 1.25f);
@@ -2113,31 +2379,310 @@ final class DailyRowGame extends GameView {
         shape.lineTo(x + r * 0.4f, y - r * 0.5f);
         shape.close();
         c.drawPath(shape, paint);
-        paint.setColor(rim);
-        c.drawCircle(x, y, r, paint);
-        paint.setColor(face);
-        c.drawCircle(x, y, r * 0.82f, paint);
-        paint.setColor(rim);
-        if (tier == BOSS_MEDAL) {
-            // A crown for a beaten boss.
-            shape.rewind();
-            shape.moveTo(x - r * 0.45f, y + r * 0.3f);
-            shape.lineTo(x - r * 0.45f, y - r * 0.3f);
-            shape.lineTo(x - r * 0.22f, y);
-            shape.lineTo(x, y - r * 0.4f);
-            shape.lineTo(x + r * 0.22f, y);
-            shape.lineTo(x + r * 0.45f, y - r * 0.3f);
-            shape.lineTo(x + r * 0.45f, y + r * 0.3f);
-            shape.close();
-        } else {
-            star(x, y, r * 0.5f, r * 0.22f);
-        }
+        paint.setColor(fold);
+        shape.rewind();
+        shape.moveTo(x - r * 0.1f, y - r * 1.25f);
+        shape.lineTo(x - r * 0.3f, y - r * 1.25f);
+        shape.lineTo(x - r * 0.02f, y - r * 0.5f);
+        shape.lineTo(x + r * 0.2f, y - r * 0.5f);
+        shape.close();
         c.drawPath(shape, paint);
-        if (shine) {
-            float s = (float) ((sessionSeconds * 0.8) % 1.0);
-            paint.setColor(0x88FFFFFF);
-            c.drawCircle(x - r * 0.5f + s * r, y - r * 0.4f + s * r * 0.8f, r * 0.15f, paint);
+        // Contact shadow, down and right of the light.
+        paint.setColor(0x66000000);
+        c.drawCircle(x + r * 0.07f, y + r * 0.12f, r, paint);
+        // Every won medal catches the light now and then, staggered by position so a month of
+        // them glints one at a time; today's sweeps at full strength.
+        float phase = ((x * 0.0137f + y * 0.0071f) % 1f + 1f) % 1f;
+        drawMetal(c, x, y, r, Math.max(1, Math.min(4, tier)), 255, shine ? 1f : 0.45f,
+                shine ? 0f : phase * 6f, tier == BOSS_MEDAL);
+    }
+
+    /**
+     * A struck metal disc: bevelled rim lit from the top left, a domed face, an embossed star (or a
+     * crown), and a band of light that sweeps across it. {@code shine} 0..1 sets that band's
+     * strength; {@code delay} offsets its timing. Gradients are cached by palette and radius.
+     */
+    private void drawMetal(Canvas c, float x, float y, float r, int pal, int alpha, float shine,
+                           float delay, boolean crown) {
+        if (alpha <= 0 || r < 1f) {
+            return;
         }
+        int ri = Math.max(2, Math.min(1023, Math.round(r)));
+        int key = pal * 1024 + ri;
+        Metal m = metals.get(key);
+        if (m == null) {
+            m = new Metal(pal, ri);
+            metals.put(key, m);
+        }
+        float k = r / ri;
+        c.save();
+        c.translate(x, y);
+        c.scale(k, k);
+        gp.setStyle(Paint.Style.FILL);
+        gp.setColor(0xFFFFFFFF);
+        gp.setAlpha(alpha);
+        gp.setShader(m.rim);
+        c.drawCircle(0, 0, ri, gp);
+        gp.setShader(m.face);
+        c.drawCircle(0, 0, ri * 0.84f, gp);
+        // The inner bevel is the rim's gradient turned half round: dark top left, lit bottom right.
+        gp.setShader(m.rim);
+        gp.setStyle(Paint.Style.STROKE);
+        gp.setStrokeWidth(ri * 0.07f);
+        c.rotate(180f);
+        c.drawCircle(0, 0, ri * 0.84f, gp);
+        c.rotate(180f);
+        gp.setStyle(Paint.Style.FILL);
+        gp.setShader(null);
+        // Emblem: shadow offset away from the light, then the lit face.
+        paint.setStyle(Paint.Style.FILL);
+        for (int pass = 0; pass < 2; pass++) {
+            float o = pass == 0 ? ri * 0.05f : 0f;
+            paint.setColor(withAlpha(pass == 0 ? PAL_STAR_SHADOW[pal] : PAL_STAR[pal], alpha));
+            if (crown) {
+                shape.rewind();
+                shape.moveTo(o - ri * 0.45f, o + ri * 0.3f);
+                shape.lineTo(o - ri * 0.45f, o - ri * 0.3f);
+                shape.lineTo(o - ri * 0.22f, o);
+                shape.lineTo(o, o - ri * 0.4f);
+                shape.lineTo(o + ri * 0.22f, o);
+                shape.lineTo(o + ri * 0.45f, o - ri * 0.3f);
+                shape.lineTo(o + ri * 0.45f, o + ri * 0.3f);
+                shape.close();
+            } else {
+                star(o, o, ri * 0.52f, ri * 0.23f);
+            }
+            c.drawPath(shape, paint);
+        }
+        // Sweep: a pass of about a second, then a rest, so it reads as a glint rather than a strobe.
+        if (shine > 0.02f) {
+            float u = (float) (((sessionSeconds + delay) * 0.42) % 1.6);
+            if (u < 1f) {
+                float d = (-1.5f + 3f * u) * ri;
+                shineMatrix.setTranslate(d, d);
+                m.shine.setLocalMatrix(shineMatrix);
+                gp.setColor(0xFFFFFFFF);
+                gp.setAlpha((int) (alpha * Math.min(1f, shine)));
+                gp.setShader(m.shine);
+                c.drawCircle(0, 0, ri * 0.84f, gp);
+                gp.setShader(null);
+            }
+        }
+        // A fixed specular point where the light hits the dome.
+        paint.setColor(withAlpha(0x99FFFFFF, alpha));
+        c.drawCircle(-ri * 0.36f, -ri * 0.42f, ri * 0.08f, paint);
+        c.restore();
+    }
+
+    private static int withAlpha(int argb, int alpha) {
+        int a = ((argb >>> 24) * Math.max(0, Math.min(255, alpha))) / 255;
+        return (a << 24) | (argb & 0x00FFFFFF);
+    }
+
+    /** Backdrop: a deep vertical gradient and one slow nebula of light, so the screen has a stage. */
+    private void drawBackdrop(Canvas c, float w, float h) {
+        if (bgShader == null || bgShaderH != h || bgShaderBoss != boss) {
+            bgShaderH = h;
+            bgShaderBoss = boss;
+            bgShader = new android.graphics.LinearGradient(0, 0, 0, h,
+                    boss ? new int[] {0xFF1A1030, 0xFF100A1C, 0xFF07050E}
+                            : new int[] {0xFF0D1A2C, 0xFF08111C, 0xFF04080E},
+                    new float[] {0f, 0.5f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+        }
+        gp.setStyle(Paint.Style.FILL);
+        gp.setColor(0xFFFFFFFF);
+        gp.setShader(bgShader);
+        c.drawRect(0, 0, w, h, gp);
+        gp.setShader(null);
+        float nx = w * (0.56f + 0.14f * (float) Math.sin(sessionSeconds * 0.05));
+        float ny = h * (0.46f + 0.08f * (float) Math.cos(sessionSeconds * 0.07));
+        Fx.glow(c, nx, ny, w * 0.34f, boss ? 0x20B06CFF : 0x206F8CFF);
+    }
+
+    /** The plaque behind the challenge name: a rounded, lit panel in the app's HUD family. */
+    private void drawPlaque(Canvas c, float l, float t, float r, float b, int edge) {
+        float ph = b - t;
+        if (plaqueShader == null || plaqueShaderH != ph) {
+            plaqueShaderH = ph;
+            plaqueShader = new android.graphics.LinearGradient(0, 0, 0, ph,
+                    new int[] {0xE6142032, 0xD90D1420, 0xCC080E18}, new float[] {0f, 0.5f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        float rad = dp(18f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x55000000);
+        c.drawRoundRect(l + dp(2f), t + dp(5f), r + dp(2f), b + dp(5f), rad, rad, paint);
+        c.save();
+        c.translate(0, t);
+        gp.setStyle(Paint.Style.FILL);
+        gp.setColor(0xFFFFFFFF);
+        gp.setShader(plaqueShader);
+        c.drawRoundRect(l, 0, r, ph, rad, rad, gp);
+        gp.setShader(null);
+        c.restore();
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor((0x48 << 24) | (edge & 0x00FFFFFF));
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // The lit top edge.
+        paint.setColor(0x30FFFFFF);
+        c.drawRect(l + rad, t + dp(1f), r - rad, t + dp(2f), paint);
+    }
+
+    /** Glossy vertical fill for a calendar cell; kind 0 a won day, 1 a boss day. */
+    private android.graphics.LinearGradient cellShader(int kind, float ch) {
+        int key = kind * 4096 + Math.max(1, Math.min(4095, Math.round(ch)));
+        android.graphics.LinearGradient g = cellShaders.get(key);
+        if (g == null) {
+            g = new android.graphics.LinearGradient(0, 0, 0, Math.round(ch),
+                    kind == 1 ? new int[] {0xFFDDB8FF, 0xFFB06CFF, 0xFF6A38B8}
+                            : new int[] {0xFF8AF7E7, 0xFF35D0BA, 0xFF1A8576},
+                    new float[] {0f, 0.45f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+            cellShaders.put(key, g);
+        }
+        return g;
+    }
+
+    /**
+     * A won calendar cell: a glossy tile with an inked stamp on it - a broken ring and a tick, set at
+     * a slant that is fixed per day, so the strip looks hand-stamped rather than printed.
+     */
+    private void drawStampedCell(Canvas c, float l, float t, float cw, float ch, long day, int kind,
+                                 float thump) {
+        float rad = Math.min(dp(5f), cw * 0.2f);
+        c.save();
+        c.translate(l, t);
+        gp.setStyle(Paint.Style.FILL);
+        gp.setColor(0xFFFFFFFF);
+        gp.setShader(cellShader(kind, ch));
+        c.drawRoundRect(0, 0, cw, ch, rad, rad, gp);
+        gp.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x66FFFFFF);
+        c.drawRect(rad, dp(1f), cw - rad, dp(2f), paint);
+        long hsh = day * 2654435761L;
+        float slant = (float) (((hsh >>> 9) & 31) - 15);
+        float sc = 1f + 1.3f * (1f - thump);
+        c.translate(cw / 2f, ch / 2f);
+        c.rotate(slant);
+        c.scale(sc, sc);
+        int ink = withAlpha(0xE00A1626, (int) (255 * thump));
+        float sr = Math.min(cw, ch) * 0.34f;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(Math.max(dp(1.5f), sr * 0.16f));
+        paint.setColor(ink);
+        float gap = (float) ((hsh >>> 17) & 255) * 1.4f;
+        c.drawArc(-sr, -sr, sr, sr, gap, 300f, false, paint);
+        paint.setStrokeWidth(Math.max(dp(2f), sr * 0.2f));
+        c.drawLine(-sr * 0.5f, 0, -sr * 0.12f, sr * 0.4f, paint);
+        c.drawLine(-sr * 0.12f, sr * 0.4f, sr * 0.55f, -sr * 0.42f, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+    }
+
+    /** An empty calendar cell, sunk into the panel: dark top lip, faint lit bottom edge. */
+    private void drawSunkCell(Canvas c, float l, float t, float r, float b, int fill) {
+        float rad = Math.min(dp(5f), (r - l) * 0.2f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(fill);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setColor(0x70000000);
+        c.drawRect(l + rad, t, r - rad, t + dp(2f), paint);
+        paint.setColor(0x16FFFFFF);
+        c.drawRect(l + rad, b - dp(1.5f), r - rad, b - dp(0.5f), paint);
+    }
+
+    /**
+     * The streak flame: four nested tongues (red, orange, yellow, a white heart) that sway and
+     * stretch on unrelated sines so it never loops visibly, two side licks, and embers lifting off.
+     * {@code base} is the bottom of the flame.
+     */
+    private void drawFlame(Canvas c, float x, float base, float fh) {
+        float t = (float) sessionSeconds;
+        Fx.glow(c, x, base - fh * 0.4f, fh * 1.5f, 0x50FF6A2A);
+        Fx.glow(c, x, base - fh * 0.1f, fh * 0.7f, 0x60FFB347);
+        int fkey = Math.round(fh);
+        if (flameShader == null || flameShaderKey != fkey) {
+            flameShaderKey = fkey;
+            flameShader = new android.graphics.LinearGradient(0, 0, 0, -fh * 1.1f,
+                    new int[] {0xFFE0401E, 0xFFFF6A2A, 0x30FF3A10}, new float[] {0f, 0.55f, 1f},
+                    android.graphics.Shader.TileMode.CLAMP);
+        }
+        float sway = fh * (0.10f * (float) Math.sin(t * 6.3f) + 0.04f * (float) Math.sin(t * 15.7f));
+        float stretch = 1f + 0.07f * (float) Math.sin(t * 9.1f) + 0.04f * (float) Math.sin(t * 21.3f);
+        c.save();
+        c.translate(x, base);
+        // Side licks first, so the main tongue covers their roots.
+        paint.setStyle(Paint.Style.FILL);
+        for (int s = -1; s <= 1; s += 2) {
+            float lick = 0.5f + 0.5f * (float) Math.sin(t * (7.7f + s * 1.3f) + s);
+            c.save();
+            c.translate(s * fh * 0.2f, -fh * 0.04f);
+            c.rotate(s * (14f + 8f * lick));
+            flamePath(fh * 0.17f, fh * (0.38f + 0.18f * lick), sway * 0.6f);
+            paint.setColor(0xCCFF5A24);
+            c.drawPath(flame, paint);
+            c.restore();
+        }
+        flamePath(fh * 0.46f, fh * 1.08f * stretch, sway);
+        gp.setStyle(Paint.Style.FILL);
+        gp.setColor(0xFFFFFFFF);
+        gp.setShader(flameShader);
+        c.drawPath(flame, gp);
+        gp.setShader(null);
+        flamePath(fh * 0.33f, fh * 0.80f * stretch, sway * 0.8f);
+        paint.setColor(0xFFFF9A3D);
+        c.drawPath(flame, paint);
+        float s2 = 1f + 0.08f * (float) Math.sin(t * 12.4f + 1f);
+        flamePath(fh * 0.21f, fh * 0.52f * s2, sway * 0.55f);
+        paint.setColor(0xFFFFD36A);
+        c.drawPath(flame, paint);
+        flamePath(fh * 0.10f, fh * 0.26f * s2, sway * 0.3f);
+        paint.setColor(0xFFFFF6DA);
+        c.drawPath(flame, paint);
+        c.restore();
+        // Embers: deterministic, a handful, fading before they get far.
+        for (int i = 0; i < 5; i++) {
+            float ph = (t * 0.55f + i * 0.21f) % 1f;
+            float ex = x + fh * (0.22f * (float) Math.sin(i * 1.7f + t * 1.9f) + (i - 2) * 0.05f);
+            float ey = base - fh * (0.75f + 0.4f * ph);
+            paint.setColor(((int) (210 * (1f - ph)) << 24) | (i % 2 == 0 ? 0xFFC14A : 0xFF7A2E));
+            c.drawCircle(ex, ey, dp(1.4f) + (i % 3) * dp(0.5f), paint);
+        }
+    }
+
+    /** One flame tongue into {@link #flame}, base at the origin: round belly, pointed swaying tip. */
+    private void flamePath(float wb, float hh, float sway) {
+        flame.rewind();
+        flame.moveTo(0, 0);
+        flame.cubicTo(wb * 0.95f, 0, wb * 1.05f, -hh * 0.36f, wb * 0.55f + sway * 0.3f, -hh * 0.6f);
+        flame.quadTo(wb * 0.22f + sway * 0.7f, -hh * 0.84f, sway, -hh);
+        flame.quadTo(-wb * 0.28f + sway * 0.7f, -hh * 0.8f, -wb * 0.55f + sway * 0.3f, -hh * 0.58f);
+        flame.cubicTo(-wb * 1.05f, -hh * 0.36f, -wb * 0.95f, 0, 0, 0);
+        flame.close();
+    }
+
+    /** No streak yet: an unlit wick in slate, with the faintest warmth, waiting for today. */
+    private void drawColdFlame(Canvas c, float x, float base, float fh) {
+        float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 1.4);
+        Fx.glow(c, x, base - fh * 0.15f, fh * 0.6f, pulse > 0.5f ? 0x20FF7A2E : 0x10FF7A2E);
+        c.save();
+        c.translate(x, base);
+        flamePath(fh * 0.36f, fh * 0.85f, 0f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF1C2736);
+        c.drawPath(flame, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0xFF34445A);
+        c.drawPath(flame, paint);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+        paint.setColor(((int) (60 + 80 * pulse) << 24) | 0xFF7A2E);
+        c.drawCircle(x, base - dp(2f), dp(2.5f), paint);
     }
 
     private void drawShield(Canvas c, float x, float y, float r, int color) {

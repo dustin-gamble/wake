@@ -305,7 +305,9 @@ abstract class GameView extends View {
      * flat multiplier would push those out of their boxes. 10dp becomes 13.5dp, 14dp becomes
      * 18dp, 40dp gains 8%.
      */
-    private static float textDp(float sizeDp) {
+    // Protected (3.25.0): a game that wraps or fits text has to measure it at the size it is
+    // actually drawn, not the nominal one, or the 3.24 curve pushes lines into each other.
+    protected static float textDp(float sizeDp) {
         float scale;
         if (sizeDp <= 10f) {
             scale = 1.35f;

@@ -854,20 +854,56 @@ function drawWings(dt, rowing) {
   var bankL = -state.bank * 0.9;
   var bankR = state.bank * 0.9;
 
-  el('wingL').setAttribute('d',
-    'M -10 ' + (612 + bankL)
-    + ' C 70 ' + (556 - lift + bankL) + ', 190 ' + (528 - lift * 0.8 + bankL)
-    + ', 300 ' + (540 - lift * 0.5 + bankL)
-    + ' L 276 ' + (560 + bankL) + ' L 292 ' + (558 + bankL) + ' L 262 ' + (576 + bankL)
-    + ' L 278 ' + (574 + bankL) + ' L 236 ' + (590 + bankL)
-    + ' C 150 ' + (600 + bankL) + ', 60 ' + (606 + bankL) + ', -10 ' + (640 + bankL) + ' Z');
-  el('wingR').setAttribute('d',
-    'M 1010 ' + (612 + bankR)
-    + ' C 930 ' + (556 - lift + bankR) + ', 810 ' + (528 - lift * 0.8 + bankR)
-    + ', 700 ' + (540 - lift * 0.5 + bankR)
-    + ' L 724 ' + (560 + bankR) + ' L 708 ' + (558 + bankR) + ' L 738 ' + (576 + bankR)
-    + ' L 722 ' + (574 + bankR) + ' L 764 ' + (590 + bankR)
-    + ' C 850 ' + (600 + bankR) + ', 940 ' + (606 + bankR) + ', 1010 ' + (640 + bankR) + ' Z');
+  // 3.25: four paths a wing now, so skip the rewrite when nothing visible has moved - a held
+  // glide or a hover at rest rebuilds no strings and repaints no SVG.
+  if (Math.abs(lift - wingShown.lift) < 0.2 && Math.abs(bankR - wingShown.bank) < 0.2) {
+    return;
+  }
+  wingShown.lift = lift;
+  wingShown.bank = bankR;
+  drawWing(1, lift, bankL, 'wingL', 'covL', 'featL', 'rimL');
+  drawWing(-1, lift, bankR, 'wingR', 'covR', 'featR', 'rimR');
+}
+
+var wingShown = { lift: 1e9, bank: 1e9 };
+
+/** One decimal is finer than the screen can show and keeps the path strings short. */
+function r1(v) { return Math.round(v * 10) / 10; }
+
+/**
+ * One wing, in the left wing's coordinates; `side` -1 mirrors it about x = 500 for the right.
+ * The outline is exactly the 3.19 silhouette. The covert band, feather seams and rim light are
+ * drawn inside a clip of that outline (see fly.html), so they only need to be roughly placed.
+ */
+function drawWing(side, lift, b, outlineId, covertId, featherId, rimId) {
+  var o = side > 0 ? 0 : 1000;
+  var k = side;
+  var y0 = r1(612 + b);
+  var y1 = r1(556 - lift + b);
+  var y2 = r1(528 - lift * 0.8 + b);
+  var y3 = r1(540 - lift * 0.5 + b);
+  // The leading edge, shared by the outline, the covert band and the rim.
+  var edge = 'M ' + (o + k * -10) + ' ' + y0 + ' C ' + (o + k * 70) + ' ' + y1 + ', '
+    + (o + k * 190) + ' ' + y2 + ', ' + (o + k * 300) + ' ' + y3;
+  el(outlineId).setAttribute('d', edge
+    + ' L ' + (o + k * 276) + ' ' + r1(560 + b) + ' L ' + (o + k * 292) + ' ' + r1(558 + b)
+    + ' L ' + (o + k * 262) + ' ' + r1(576 + b) + ' L ' + (o + k * 278) + ' ' + r1(574 + b)
+    + ' L ' + (o + k * 236) + ' ' + r1(590 + b)
+    + ' C ' + (o + k * 150) + ' ' + r1(600 + b) + ', ' + (o + k * 60) + ' ' + r1(606 + b) + ', '
+    + (o + k * -10) + ' ' + r1(640 + b) + ' Z');
+  // Coverts: a paler band hugging the leading edge, about a third of the chord deep at the root
+  // and thinning to the tip. Anything past the trailing edge on a downbeat is clipped away.
+  el(covertId).setAttribute('d', edge
+    + ' C ' + (o + k * 205) + ' ' + r1(y2 + 30) + ', ' + (o + k * 80) + ' ' + r1(y1 + 38) + ', '
+    + (o + k * -10) + ' ' + r1(y0 + 20) + ' Z');
+  // Seams between the primaries and the outer secondaries, running in from the trailing notches.
+  el(featherId).setAttribute('d',
+    'M ' + (o + k * 276) + ' ' + r1(560 + b) + ' L ' + (o + k * 244) + ' ' + r1(553 - lift * 0.45 + b)
+    + ' M ' + (o + k * 262) + ' ' + r1(576 + b) + ' L ' + (o + k * 220) + ' ' + r1(565 - lift * 0.5 + b)
+    + ' M ' + (o + k * 236) + ' ' + r1(590 + b) + ' L ' + (o + k * 188) + ' ' + r1(577 - lift * 0.55 + b)
+    + ' M ' + (o + k * 196) + ' ' + r1(595 + b) + ' L ' + (o + k * 150) + ' ' + r1(584 - lift * 0.6 + b));
+  // Afternoon light catching the leading edge: a wide stroke, half of it clipped off outside.
+  el(rimId).setAttribute('d', edge);
 }
 
 /* ---------------- the ground rush ---------------- */
@@ -900,25 +936,45 @@ function drawRush() {
   }
 }
 
-function updateHud(fresh, climb) {
-  el('alt').textContent = Math.round(state.altitude);
-  el('spd').textContent = Math.round(state.airspeed * 3.6);
-  el('watts').textContent = Math.round(fresh ? state.watts : 0);
-  el('spm').textContent = Math.round(fresh ? state.spm : 0);
-  el('dist').textContent = (state.along / 1000).toFixed(1);
+/* What the climb bar last drew, so an unchanged frame writes nothing to the DOM. */
+var climbShown = { top: -1, height: -1, cls: 'up' };
 
-  // Climb indicator: fills up from the middle, or down when sinking.
+function updateHud(fresh, climb) {
+  // 3.25: every HUD write goes through setText, which touches the DOM only when the figure
+  // actually changes. These used to be rewritten 60 times a second, unchanged, each a relayout.
+  setText('alt', String(Math.round(state.altitude)));
+  setText('spd', String(Math.round(state.airspeed * 3.6)));
+  setText('watts', String(Math.round(fresh ? state.watts : 0)));
+  setText('spm', String(Math.round(fresh ? state.spm : 0)));
+  setText('dist', (state.along / 1000).toFixed(1));
+
+  // Climb indicator: fills up from the middle, or down when sinking. Half the 260 px tube.
   var fill = el('climbFill');
   var frac = Math.max(-1, Math.min(1, climb / 8));
-  var half = 110;
+  var half = 130;
+  var top;
+  var height;
+  var cls;
   if (frac >= 0) {
-    fill.style.top = (half - frac * half) + 'px';
-    fill.style.height = (frac * half) + 'px';
-    fill.style.background = lifting.strength > 0.05 ? 'var(--warn)' : 'var(--accent)';
+    top = Math.round(half - frac * half);
+    height = half - top;
+    cls = lifting.strength > 0.05 ? 'lift' : 'up';
   } else {
-    fill.style.top = half + 'px';
-    fill.style.height = (-frac * half) + 'px';
-    fill.style.background = 'var(--bad)';
+    top = half;
+    height = Math.round(-frac * half);
+    cls = 'down';
+  }
+  if (top !== climbShown.top) {
+    climbShown.top = top;
+    fill.style.top = top + 'px';
+  }
+  if (height !== climbShown.height) {
+    climbShown.height = height;
+    fill.style.height = height + 'px';
+  }
+  if (cls !== climbShown.cls) {
+    climbShown.cls = cls;
+    fill.className = cls;
   }
 
   var next = nextLandmark(state.along);
@@ -926,27 +982,31 @@ function updateHud(fresh, climb) {
   if (state.hovering) {
     var left = TAKEOFF_STROKES - Math.max(0, state.strokes - state.strokesAtStart);
     var loaded = preload.total > 0 ? Math.round((100 * preload.done) / preload.total) : 0;
-    el('landmark').textContent = 'Hovering over ' + next.name + ' — row to take off';
-    el('hint').textContent = left + (left === 1 ? ' stroke' : ' strokes') + ' to take off · map ahead '
-      + loaded + '% loaded';
+    setText('landmark', 'Hovering over ' + next.name + ' — row to take off');
+    setText('hint', left + (left === 1 ? ' stroke' : ' strokes') + ' to take off · map ahead '
+      + loaded + '% loaded');
   } else {
-    el('landmark').textContent = fresh
+    setText('landmark', fresh
       ? next.name + ' — ' + (next.remaining / 1000).toFixed(1) + ' km ahead'
-      : 'Resting — gliding down';
-    el('hint').textContent = !fresh
+      : 'Resting — gliding down');
+    setText('hint', !fresh
       ? 'Take a stroke to climb again.'
       : state.ditched
         ? 'Skimming the water — ' + level + ' W holds your height, more climbs'
         : state.smoothWatts < level
           ? 'Sinking — ' + level + ' W holds you level'
-          : '';
+          : '');
   }
 
-  el('progressFill').style.width =
-    (((state.along % routeLength) / routeLength) * 100).toFixed(2) + '%';
-  el('trip').textContent = 'Trip: ' + (state.along / 1000).toFixed(0) + ' km of '
+  // The fill moves 0.01% about every 90 m, so most frames this is the same string as before.
+  var pct = (((state.along % routeLength) / routeLength) * 100).toFixed(2) + '%';
+  if (pct !== shownText.__progress) {
+    shownText.__progress = pct;
+    el('progressFill').style.width = pct;
+  }
+  setText('trip', 'Trip: ' + (state.along / 1000).toFixed(0) + ' km of '
     + (routeLength / 1000).toFixed(0) + ' km · lap '
-    + (Math.floor(state.along / routeLength) + 1);
+    + (Math.floor(state.along / routeLength) + 1));
 }
 
 /* ---------------- flight extras: flock, ridge lift, fog, postcards, ghost ----------------
@@ -1017,6 +1077,7 @@ var FLOCK_SLOTS = [
   [700, 250, 1.0], [645, 272, 1.1], [755, 272, 1.1], [590, 294, 1.2], [810, 294, 1.2], [535, 316, 1.3]
 ];
 var FLOCK_ENTRY = [1150, 760, 3.2];  // birds arrive from behind the camera, and drop back to it
+var FLOCK_TONES = ['#4a4441', '#3b3531', '#3b3531', '#2c2622', '#2c2622', '#1d1713'];
 
 var flock = { birds: [], want: 0, inSlot: 0, timer: 0, fullToasted: false, rotShown: '', opShown: '' };
 
@@ -1025,6 +1086,11 @@ function initFlock() {
   for (var i = 0; i < FLOCK_MAX; i++) {
     var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', '');
+    // Atmospheric perspective, set once: the lead birds far up the V are hazier and paler, the
+    // trailing ones nearest the camera are the darkest shapes in the sky.
+    var tone = FLOCK_TONES[i] || FLOCK_TONES[FLOCK_TONES.length - 1];
+    path.setAttribute('fill', tone);
+    path.setAttribute('stroke', tone);
     g.appendChild(path);
     flock.birds.push({ el: path, pres: 0, phase: i * 1.3, visible: false });
   }
@@ -1088,9 +1154,13 @@ function updateFlock(dt, now, fresh) {
     b.visible = true;
     b.phase += dt * Math.PI * 2 * (0.5 + 1.9 * beat);
     var flap = Math.sin(b.phase) * (0.25 + 0.75 * beat) + (1 - beat) * 0.35;
-    var tip = (-10 * flap).toFixed(1);
-    var elbow = (-3 - 5 * flap).toFixed(1);
-    b.el.setAttribute('d', 'M -22 ' + tip + ' Q -11 ' + elbow + ' 0 2 Q 11 ' + elbow + ' 22 ' + tip);
+    var tip = r1(-10 * flap);
+    var elbow = r1(-3 - 5 * flap);
+    // 3.25: a filled bird, not a tick - the wing has a chord that thins to the tip, a body
+    // under the shoulders and a wedge of tail, so it reads as a bird at arm's length.
+    var under = r1(elbow + 4.5);
+    b.el.setAttribute('d', 'M -22 ' + tip + ' Q -11 ' + elbow + ' 0 1 Q 11 ' + elbow + ' 22 ' + tip
+      + ' Q 12 ' + under + ' 2.5 5 L 1.5 8.5 L 0 7.5 L -1.5 8.5 L -2.5 5 Q -12 ' + under + ' -22 ' + tip + ' Z');
     var slot = FLOCK_SLOTS[i];
     var k = ease(b.pres);
     var x = FLOCK_ENTRY[0] + (slot[0] - FLOCK_ENTRY[0]) * k;
@@ -1585,15 +1655,37 @@ function ghostBird() {
   glow.addColorStop(1, 'rgba(170,200,255,0)');
   g.fillStyle = glow;
   g.fillRect(0, 0, 96, 48);
-  g.strokeStyle = 'rgba(225,236,255,0.95)';
-  g.lineWidth = 4;
-  g.lineCap = 'round';
-  g.beginPath();
-  g.moveTo(10, 18);
-  g.quadraticCurveTo(30, 12, 48, 30);
-  g.quadraticCurveTo(66, 12, 86, 18);
+  // 3.25: the same filled bird as the flock, in pale ghost-light with a brighter leading edge.
+  birdShape(g, 48, 30, 38, 12);
+  var body = g.createLinearGradient(0, 12, 0, 40);
+  body.addColorStop(0, 'rgba(240,246,255,0.95)');
+  body.addColorStop(1, 'rgba(170,198,245,0.7)');
+  g.fillStyle = body;
+  g.fill();
+  g.strokeStyle = 'rgba(255,255,255,0.9)';
+  g.lineWidth = 1.5;
+  g.lineJoin = 'round';
   g.stroke();
   return c;
+}
+
+/**
+ * A bird seen from behind, wings up in a shallow V: shoulders at (cx, cy), wingtips `span` out
+ * and `rise` up. Builds the path only - the caller fills and strokes it. Boot only (billboards).
+ */
+function birdShape(g, cx, cy, span, rise) {
+  var tipY = cy - rise;
+  g.beginPath();
+  g.moveTo(cx - span, tipY);
+  g.quadraticCurveTo(cx - span * 0.5, cy - rise * 0.55, cx, cy);
+  g.quadraticCurveTo(cx + span * 0.5, cy - rise * 0.55, cx + span, tipY);
+  g.quadraticCurveTo(cx + span * 0.55, cy - rise * 0.05, cx + 4, cy + 5);
+  g.lineTo(cx + 3, cy + 11);
+  g.lineTo(cx, cy + 9);
+  g.lineTo(cx - 3, cy + 11);
+  g.lineTo(cx - 4, cy + 5);
+  g.quadraticCurveTo(cx - span * 0.55, cy - rise * 0.05, cx - span, tipY);
+  g.closePath();
 }
 
 function initGhost() {
@@ -2127,7 +2219,7 @@ function updateMigration(dt) {
   var cardOn = mig.armed;
   if (cardOn !== mig.cardOn) {
     mig.cardOn = cardOn;
-    el('migCard').className = cardOn ? 'card on' : 'card';
+    el('migCard').className = cardOn ? 'seg tap on' : 'seg tap';
   }
   if (!mig.armed) {
     mig.draft = 0;
@@ -2225,16 +2317,16 @@ function leaderBirdImage() {
   glow.addColorStop(1, 'rgba(240,177,50,0)');
   g.fillStyle = glow;
   g.fillRect(0, 0, 112, 60);
-  g.strokeStyle = 'rgba(32,24,16,0.96)';
-  g.lineWidth = 6;
-  g.lineCap = 'round';
-  g.beginPath();
-  g.moveTo(10, 20);
-  g.quadraticCurveTo(34, 12, 56, 34);
-  g.quadraticCurveTo(78, 12, 102, 20);
-  g.stroke();
-  g.strokeStyle = 'rgba(240,177,50,0.9)';
-  g.lineWidth = 2;
+  // 3.25: a solid dark bird with a gold rim, so the leader reads as a bird and as THE bird.
+  birdShape(g, 56, 36, 44, 15);
+  var body = g.createLinearGradient(0, 18, 0, 48);
+  body.addColorStop(0, 'rgba(70,52,34,0.98)');
+  body.addColorStop(1, 'rgba(28,20,13,0.98)');
+  g.fillStyle = body;
+  g.fill();
+  g.strokeStyle = 'rgba(255,200,90,0.95)';
+  g.lineWidth = 2.2;
+  g.lineJoin = 'round';
   g.stroke();
   return c;
 }
@@ -2856,6 +2948,7 @@ el('mapCard').addEventListener('click', function () {
     el('hint').textContent = ION_TOKEN
       ? 'This WebView is too old for the 3D tiles.'
       : 'No Ion token yet - start the laptop server once to fetch it.';
+    shownText.hint = null;   // written around setText: the next frame takes the line back, as before
   }
 });
 el('reset').addEventListener('click', function (ev) {

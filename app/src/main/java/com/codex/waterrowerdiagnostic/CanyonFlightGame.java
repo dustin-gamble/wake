@@ -2,8 +2,10 @@ package com.codex.waterrowerdiagnostic;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Shader;
 import android.view.MotionEvent;
 
 /**
@@ -160,9 +162,43 @@ final class CanyonFlightGame extends GameView {
     private float nextGateAt;
     private float nextForkAt;
     private final java.util.Random rng = new java.util.Random();
-    private android.graphics.LinearGradient skyShader;
+    private LinearGradient skyShader;
     private float skyHeight;
     private float skyT = -1f;
+
+    /* ---------- 3.25.0 graphics: cached light, rebuilt with the sky ---------- */
+
+    /** Scratch paths, so layered rock is a handful of multi-contour draws and nothing allocates. */
+    private final Path path2 = new Path();
+    private final Path path3 = new Path();
+    /** Haze over the far layers, and the lit gradients of each rock layer. */
+    private LinearGradient hazeFar;
+    private LinearGradient hazeNear;
+    private LinearGradient farLitShader;
+    private LinearGradient mesaShader;
+    private LinearGradient nearLitShader;
+    private LinearGradient nearShadowShader;
+    private LinearGradient roofShader;
+    private LinearGradient floorShader;
+    private int rangeCol;
+    private int farShadowCol;
+    private int mesaShadowCol;
+    private int mesaHiCol;
+    private int nearRimCol;
+    private int floorRimCol;
+    private int roofRimCol;
+    private int strataDark;
+    private int strataLight;
+    /** The planes' fuselage shading, one per livery, built once. */
+    private LinearGradient planeShaderYou;
+    private LinearGradient planeShaderRival;
+    /** The boost meter's panel. */
+    private LinearGradient panelShader;
+    private float panelTop = -1f;
+    private float panelBottom = -1f;
+    /** How much bigger the hero plane is drawn than the 3.24 one; the rival is a little smaller. */
+    private static final float YOU_SCALE = 1.55f;
+    private static final float RIVAL_SCALE = 1.2f;
     private int streak;
     private double popupUntil;
     private float popupY;
@@ -642,6 +678,10 @@ final class CanyonFlightGame extends GameView {
                     continue;
                 }
                 paint.setStyle(Paint.Style.STROKE);
+                // A dark keyline under the ring, so it separates from sunlit rock behind it.
+                paint.setStrokeWidth(dp(12f));
+                paint.setColor(0x55140A14);
+                c.drawArc(gx - rx, gy - band, gx + rx, gy + band, -90, 180, false, paint);
                 paint.setStrokeWidth(dp(8f));
                 paint.setColor(col);
                 c.drawArc(gx - rx, gy - band, gx + rx, gy + band, -90, 180, false, paint);
@@ -677,8 +717,6 @@ final class CanyonFlightGame extends GameView {
         double left = x - youX / ppm - stepM;
         double right = x + (w - youX) / ppm + stepM;
         long k0 = (long) Math.floor(left / stepM);
-        int rock = Daylight.blend(0xFF3A2026, 0xFF140A14, dusk);
-        int rim = (int) (0x55 * (1f - dusk * 0.7f)) << 24 | 0xFFD9A8;
         for (int side = 0; side < 2; side++) {
             path.reset();
             float edgeY = side == 0 ? -dp(40f) : h + dp(40f);
@@ -701,22 +739,48 @@ final class CanyonFlightGame extends GameView {
             if (!visible) {
                 continue;
             }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(rock);
-            c.drawPath(path, paint);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2f));
-            paint.setColor(rim);
-            c.drawPath(path, paint);
-            paint.setStyle(Paint.Style.FILL);
+            // The floor is lit from above along its edge; the roof only catches warm light bounced
+            // up off the sunlit floor. Both carry the same level strata as the scenery.
+            drawRockBody(c, w, h, side == 0 ? roofShader : floorShader, side == 0 ? roofRimCol : floorRimCol,
+                    side == 0 ? 0f : h * 0.5f);
         }
+    }
+
+    /**
+     * Fills {@link #path} as solid rock: a lit gradient, level strata and a lit band just inside
+     * its edge. The edge band is a wide stroke clipped to the rock, so only its inner half shows -
+     * one clip, four draws, no layer.
+     */
+    private void drawRockBody(Canvas c, float w, float h, LinearGradient body, int rim, float strataFrom) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(body);
+        c.drawPath(path, paint);
+        paint.setShader(null);
+        c.save();
+        c.clipPath(path);
+        for (int j = 0; j < 7; j++) {
+            float sy = strataFrom + h * 0.07f * j + dp(8f);
+            paint.setColor((j & 1) == 0 ? strataDark : strataLight);
+            c.drawRect(-dp(40f), sy, w + dp(40f), sy + dp(5f + (j % 3) * 4f), paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        paint.setStrokeWidth(dp(16f));
+        paint.setColor((rim & 0x00FFFFFF) | 0x66000000);
+        c.drawPath(path, paint);
+        paint.setStrokeWidth(dp(5f));
+        paint.setColor(rim);
+        c.drawPath(path, paint);
+        paint.setStrokeJoin(Paint.Join.MITER);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
     }
 
     /** The spire (or the pair of them) that splits a fork, and the road signs at its mouth. */
     private void drawForks(Canvas c, float w, float youX, float ppm, float dusk) {
         double left = x - youX / ppm;
         double right = x + (w - youX) / ppm;
-        int rock = Daylight.blend(0xFF452630, 0xFF1A0E18, dusk);
         for (int i = 0; i < forks.size(); i++) {
             Fork f = forks.get(i);
             if (f.end < left || f.start > right + 40) {
@@ -759,14 +823,7 @@ final class CanyonFlightGame extends GameView {
                     path.lineTo(youX + (float) (m - x) * ppm, yOf(rockLo[band]) + hash * dp(2f));
                 }
                 path.close();
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(rock);
-                c.drawPath(path, paint);
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(2f));
-                paint.setColor(0x55FFD9A8);
-                c.drawPath(path, paint);
-                paint.setStyle(Paint.Style.FILL);
+                drawRockBody(c, w, getHeight(), floorShader, floorRimCol, skyTopY);
             }
             if (f.chosen < 0) {
                 // Signs at the fork mouth, one per road.
@@ -791,8 +848,14 @@ final class CanyonFlightGame extends GameView {
     private void signBoard(Canvas c, float sx, float sy, String title, String sub, int col) {
         float bw = dp(128f);
         float bh = dp(36f);
-        paint.setColor(0xDD1A1016);
+        // A soft drop shadow, so the board stands off the rock behind it.
+        paint.setColor(0x44000000);
+        c.drawRoundRect(sx - bw / 2f + dp(3f), sy - bh / 2f + dp(4f), sx + bw / 2f + dp(3f), sy + bh / 2f + dp(4f),
+                dp(5f), dp(5f), paint);
+        paint.setColor(0xEE1A1016);
         c.drawRoundRect(sx - bw / 2f, sy - bh / 2f, sx + bw / 2f, sy + bh / 2f, dp(5f), dp(5f), paint);
+        paint.setColor(0x22FFFFFF);
+        c.drawRect(sx - bw / 2f + dp(5f), sy - bh / 2f + dp(1f), sx + bw / 2f - dp(5f), sy - bh / 2f + dp(2f), paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
         paint.setColor(col);
@@ -843,37 +906,184 @@ final class CanyonFlightGame extends GameView {
         }
     }
 
-    /** A small high-wing plane pointing right, pitched with the climb, prop spinning. */
-    private void drawPlane(Canvas c, float px, float py, float speed, float roll, int body, int trim) {
-        c.save();
-        c.rotate((float) Math.toDegrees(-roll * 0.6f), px, py);
+    /**
+     * A high-wing plane pointing right, pitched with the climb. 3.25.0: drawn in its own
+     * coordinates and scaled, so it can be the hero of the frame - a shaded, tapered fuselage
+     * (light from above), a wing with a lit leading edge, a glazed cabin with a glint, fixed gear,
+     * a spinner and a translucent propeller disc with a blade blur that turns with speed.
+     */
+    private void drawPlane(Canvas c, float px, float py, float speed, float roll, int body, int trim,
+                           float scale, boolean you) {
         float s = dp(1f);
+        LinearGradient shade = you ? planeShaderYou : planeShaderRival;
+        if (shade == null) {
+            // Built once per livery: the colours never change, and the canvas scale moves it.
+            shade = new LinearGradient(0, -8.5f * s, 0, 8f * s,
+                    new int[] {Daylight.blend(body, 0xFFFFFFFF, 0.5f), body,
+                            Daylight.blend(body, 0xFF000000, 0.25f), Daylight.blend(body, 0xFF1A1020, 0.55f)},
+                    new float[] {0f, 0.32f, 0.7f, 1f}, Shader.TileMode.CLAMP);
+            if (you) {
+                planeShaderYou = shade;
+            } else {
+                planeShaderRival = shade;
+            }
+        }
+        int dark = Daylight.blend(body, 0xFF1A1020, 0.45f);
+        c.save();
+        c.translate(px, py);
+        c.rotate((float) Math.toDegrees(-roll * 0.6f));
+        c.scale(scale, scale);
         paint.setStyle(Paint.Style.FILL);
-        // Fuselage.
-        paint.setColor(body);
-        c.drawRoundRect(px - 34 * s, py - 7 * s, px + 30 * s, py + 7 * s, 7 * s, 7 * s, paint);
-        paint.setColor(trim);
-        c.drawRect(px - 30 * s, py - 1.5f * s, px + 26 * s, py + 2.5f * s, paint);
-        // Tail.
-        path.reset();
-        path.moveTo(px - 30 * s, py - 5 * s);
-        path.lineTo(px - 42 * s, py - 22 * s);
-        path.lineTo(px - 24 * s, py - 6 * s);
+        // Far-side tailplane, behind the fuselage.
+        paint.setColor(dark);
+        c.drawRoundRect(-45 * s, -3 * s, -27 * s, 1 * s, 2 * s, 2 * s, paint);
+        // Fin, with a trim-coloured tip.
+        path.rewind();
+        path.moveTo(-26 * s, -6 * s);
+        path.lineTo(-38 * s, -24 * s);
+        path.lineTo(-45 * s, -24 * s);
+        path.lineTo(-42 * s, -3 * s);
         path.close();
-        c.drawPath(path, paint);
-        // Wing (seen edge-on, slightly below the top) and strut.
         paint.setColor(Daylight.blend(body, 0xFF000000, 0.12f));
-        c.drawRoundRect(px - 12 * s, py - 12 * s, px + 14 * s, py - 6 * s, 3 * s, 3 * s, paint);
-        // Cockpit.
-        paint.setColor(0xFF6FB8E8);
-        c.drawRoundRect(px + 8 * s, py - 6 * s, px + 20 * s, py - 1 * s, 3 * s, 3 * s, paint);
-        // Propeller blur.
+        c.drawPath(path, paint);
+        path.rewind();
+        path.moveTo(-35.3f * s, -20 * s);
+        path.lineTo(-38 * s, -24 * s);
+        path.lineTo(-45 * s, -24 * s);
+        path.lineTo(-44.4f * s, -20 * s);
+        path.close();
+        paint.setColor(trim);
+        c.drawPath(path, paint);
+        // Fuselage: round nose, tapering to the tail, shaded top to bottom.
+        path.rewind();
+        path.moveTo(31 * s, 0);
+        path.cubicTo(31 * s, -5 * s, 27 * s, -8 * s, 21 * s, -8 * s);
+        path.lineTo(-4 * s, -8.5f * s);
+        path.lineTo(-42 * s, -4 * s);
+        path.lineTo(-44 * s, -1 * s);
+        path.lineTo(-40 * s, 2 * s);
+        path.lineTo(-4 * s, 8 * s);
+        path.lineTo(21 * s, 8 * s);
+        path.cubicTo(27 * s, 8 * s, 31 * s, 5 * s, 31 * s, 0);
+        path.close();
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(shade);
+        c.drawPath(path, paint);
+        paint.setShader(null);
+        // Cheat line down the side.
+        path.rewind();
+        path.moveTo(28 * s, -1 * s);
+        path.lineTo(-40 * s, -1.8f * s);
+        path.lineTo(-40 * s, 0.2f * s);
+        path.lineTo(28 * s, 2.4f * s);
+        path.close();
+        paint.setColor(trim);
+        c.drawPath(path, paint);
+        // Engine cowling: the nose, a shade darker, with a panel seam.
+        path.rewind();
+        path.moveTo(31 * s, 0);
+        path.cubicTo(31 * s, -5 * s, 27 * s, -8 * s, 21 * s, -8 * s);
+        path.lineTo(21 * s, 8 * s);
+        path.cubicTo(27 * s, 8 * s, 31 * s, 5 * s, 31 * s, 0);
+        path.close();
+        paint.setColor(0x40000000);
+        c.drawPath(path, paint);
+        // Cabin glazing with a glint.
+        path.rewind();
+        path.moveTo(4 * s, -8.3f * s);
+        path.lineTo(15 * s, -8.1f * s);
+        path.lineTo(20 * s, -2.5f * s);
+        path.lineTo(4 * s, -2.5f * s);
+        path.close();
+        paint.setColor(0xFF27445E);
+        c.drawPath(path, paint);
+        path.rewind();
+        path.moveTo(6 * s, -7.6f * s);
+        path.lineTo(9.5f * s, -7.5f * s);
+        path.lineTo(7.5f * s, -3.4f * s);
+        path.lineTo(5 * s, -3.4f * s);
+        path.close();
+        paint.setColor(0x99FFFFFF);
+        c.drawPath(path, paint);
+        paint.setColor(dark);
+        c.drawRect(11 * s, -8.2f * s, 12.2f * s, -2.5f * s, paint);
+        // High wing, edge-on: lit leading edge on top, shadowed underside.
+        paint.setColor(Daylight.blend(body, 0xFF000000, 0.06f));
+        c.drawRoundRect(-14 * s, -13.5f * s, 16 * s, -8 * s, 3 * s, 3 * s, paint);
+        paint.setColor(0x99FFFFFF);
+        c.drawRect(-12 * s, -13.5f * s, 14 * s, -12.3f * s, paint);
+        paint.setColor(0x38000000);
+        c.drawRect(-13 * s, -9.8f * s, 15 * s, -8 * s, paint);
+        // Strut and fixed gear.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(1.4f * s);
+        paint.setColor(dark);
+        c.drawLine(4 * s, -9 * s, -3 * s, 5 * s, paint);
+        paint.setStrokeWidth(2 * s);
+        c.drawLine(12 * s, 7 * s, 15 * s, 14 * s, paint);
+        // Rim light along the top of the fuselage.
+        paint.setStrokeWidth(1.2f * s);
+        paint.setColor(0x99FFFFFF);
+        c.drawLine(20 * s, -7.4f * s, -4 * s, -7.9f * s, paint);
+        c.drawLine(-4 * s, -7.9f * s, -40 * s, -3.6f * s, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF1E1A22);
+        c.drawCircle(15 * s, 16 * s, 3.6f * s, paint);
+        c.drawCircle(-40 * s, 3.8f * s, 1.6f * s, paint);
+        paint.setColor(0xFFB8B8C0);
+        c.drawCircle(15 * s, 16 * s, 1.3f * s, paint);
+        // Propeller: a translucent disc, a blade blur that swings with the spin, and the spinner.
+        paint.setColor(0x30FFFFFF);
+        c.drawOval(33.5f * s, -19 * s, 36.5f * s, 19 * s, paint);
+        float blade = (float) Math.abs(Math.sin(sessionSeconds * (20 + speed * 10))) * 17 * s + 2 * s;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(2.4f * s);
+        paint.setColor(0x99E8E8F0);
+        c.drawLine(35 * s, -blade, 35 * s, blade, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        path.rewind();
+        path.moveTo(31 * s, -3.6f * s);
+        path.quadTo(38.5f * s, -1.4f * s, 38.5f * s, 0);
+        path.quadTo(38.5f * s, 1.4f * s, 31 * s, 3.6f * s);
+        path.close();
+        paint.setColor(0xFF3A3F4A);
+        c.drawPath(path, paint);
         paint.setColor(0x88FFFFFF);
-        float blade = (float) Math.abs(Math.sin(sessionSeconds * (20 + speed * 10))) * 14 * s + 4 * s;
-        c.drawOval(px + 30 * s, py - blade, px + 35 * s, py + blade, paint);
-        paint.setColor(0xFF333333);
-        c.drawCircle(px + 32 * s, py, 2.5f * s, paint);
+        c.drawCircle(34 * s, -1.5f * s, 0.9f * s, paint);
         c.restore();
+    }
+
+    /**
+     * The plane's shadow on whatever is under it - the canyon floor, a fork spire, or the near
+     * wall - sharper and darker the lower you fly, and thrown left because the sun is high on the
+     * right. Drawing only: nothing here is read by the rock or ring tests.
+     */
+    private void drawPlaneShadow(Canvas c, float h, float youX, float youY, float ppm) {
+        corridor(x);
+        float ground = Math.min(yOf(cFloor), nearWallY(youX, h, ppm));
+        for (int i = 0; i < rockCount; i++) {
+            float top = yOf(rockHi[i]);
+            if (top > youY && top < ground) {
+                ground = top;
+            }
+        }
+        ground = Math.min(ground, h - dp(6f));
+        float dist = ground - youY;
+        if (dist < dp(26f)) {
+            return;
+        }
+        float near = clamp01(1f - dist / (h * 0.75f));
+        float sw = dp(52f) * YOU_SCALE * (1.3f - 0.45f * near);
+        float sh = sw * 0.12f;
+        float sx = youX - dist * 0.18f;
+        int a = (int) (26 + 80 * near);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(((a / 2) << 24) | 0x1A0810);
+        c.drawOval(sx - sw * 1.2f, ground - sh * 1.5f, sx + sw * 1.2f, ground + sh * 1.5f, paint);
+        paint.setColor((a << 24) | 0x1A0810);
+        c.drawOval(sx - sw * 0.8f, ground - sh, sx + sw * 0.8f, ground + sh, paint);
     }
 
     /**
@@ -890,16 +1100,20 @@ final class CanyonFlightGame extends GameView {
         float ry = skyBottomY - (skyBottomY - skyTopY) * rivalAlt;
         boolean onScreen = rx > -dp(60f) && rx < w + dp(60f);
         if (onScreen) {
-            Fx.glow(c, rx, ry, dp(46f), 0x44FF6FA8);
-            // Contrail.
+            Fx.glow(c, rx, ry, dp(58f), 0x44FF6FA8);
+            // Contrail, from its tail.
+            float tail = dp(48f) * RIVAL_SCALE;
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeWidth(dp(3f));
+            paint.setStrokeWidth(dp(3.5f));
             paint.setColor(0x66FF9ABF);
-            c.drawLine(rx - dp(30f), ry, rx - dp(30f) - rivalSpeed * dp(16f), ry + dp(2f), paint);
+            c.drawLine(rx - tail, ry, rx - tail - rivalSpeed * dp(18f), ry + dp(2f), paint);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(0x44FFFFFF);
+            c.drawLine(rx - tail, ry - dp(1f), rx - tail - rivalSpeed * dp(12f), ry, paint);
             paint.setStrokeCap(Paint.Cap.BUTT);
             paint.setStyle(Paint.Style.FILL);
-            drawPlane(c, rx, ry, rivalSpeed, 0f, 0xFFE8557F, 0xFF2A1220);
+            drawPlane(c, rx, ry, rivalSpeed, 0f, 0xFFE8557F, 0xFF2A1220, RIVAL_SCALE, false);
         } else {
             // Off screen: a chevron on the edge it went out of, with the gap.
             boolean ahead = rivalX > x;
@@ -918,7 +1132,7 @@ final class CanyonFlightGame extends GameView {
         }
         if (sessionSeconds < rivalTauntUntil) {
             float bx = onScreen ? rx : (rivalX > x ? w - dp(120f) : dp(120f));
-            float by = onScreen ? ry - dp(46f) : skyTopY + dp(70f);
+            float by = onScreen ? ry - dp(56f) : skyTopY + dp(70f);
             paint.setColor(0xEE1A1016);
             paint.setTextSize(dp(11f));
             float tw = paint.measureText(rivalTaunt) + dp(22f);
@@ -943,28 +1157,65 @@ final class CanyonFlightGame extends GameView {
         boostHitY = by;
         boostHitW = bw;
         boostHitH = bh;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xAA0A0E14);
-        c.drawRoundRect(bx - dp(8f), by - dp(16f), bx + bw + dp(8f), by + bh + dp(8f), dp(6f), dp(6f), paint);
+        panel(c, bx - dp(8f), by - dp(16f), bx + bw + dp(8f), by + bh + dp(8f));
         float cell = (bw - dp(4f) * (boostCapacity - 1)) / boostCapacity;
         boolean burning = boosting();
         for (int i = 0; i < boostCapacity; i++) {
             float cx = bx + i * (cell + dp(4f));
             boolean lit = i < boostCharges;
-            paint.setColor(lit ? 0xFFFF8A3D : 0x332A3648);
-            c.drawRoundRect(cx, by, cx + cell, by + bh, dp(3f), dp(3f), paint);
             if (lit) {
                 Fx.glow(c, cx + cell / 2f, by + bh / 2f, dp(24f), 0x55FF8A3D);
+            }
+            paint.setColor(lit ? 0xFFFF8A3D : 0xFF151D29);
+            c.drawRoundRect(cx, by, cx + cell, by + bh, dp(4f), dp(4f), paint);
+            // Gloss on a lit cell, a recessed edge on an empty one.
+            paint.setColor(lit ? 0x55FFFFFF : 0x22000000);
+            c.drawRoundRect(cx + dp(1.5f), by + dp(1.5f), cx + cell - dp(1.5f), by + bh * 0.48f, dp(3f), dp(3f), paint);
+            if (!lit) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1f));
+                paint.setColor(0xFF243042);
+                c.drawRoundRect(cx, by, cx + cell, by + bh, dp(4f), dp(4f), paint);
+                paint.setStyle(Paint.Style.FILL);
             }
         }
         if (burning) {
             float left = (float) ((boostUntil - sessionSeconds) / (BOOST_PER_CHARGE * boostCapacity));
+            float fill = bw * Math.max(0f, Math.min(1f, left));
             paint.setColor(0xFFFFD36A);
-            c.drawRoundRect(bx, by, bx + bw * Math.max(0f, Math.min(1f, left)), by + bh, dp(3f), dp(3f), paint);
+            c.drawRoundRect(bx, by, bx + fill, by + bh, dp(4f), dp(4f), paint);
+            paint.setColor(0x66FFFFFF);
+            c.drawRoundRect(bx + dp(1.5f), by + dp(1.5f), bx + Math.max(dp(3f), fill - dp(1.5f)), by + bh * 0.48f,
+                    dp(3f), dp(3f), paint);
         }
         String hint = burning ? "BOOSTING" : boostCharges > 0 ? "TAP TO BOOST" : "CLEAN RINGS CHARGE THE BOOST";
         label(c, hint, bx, by - dp(4f), 8.5f, burning ? 0xFFFFD36A : boostCharges > 0 ? 0xFFFF8A3D : FAINT,
                 Paint.Align.LEFT);
+    }
+
+    /**
+     * A HUD panel in the app's family: rounded, a vertical gradient, a hairline border and a 1px
+     * lighter top edge. The gradient is cached by the panel's rows, which do not move.
+     */
+    private void panel(Canvas c, float l, float t, float r, float b) {
+        if (panelShader == null || panelTop != t || panelBottom != b) {
+            panelTop = t;
+            panelBottom = b;
+            panelShader = new LinearGradient(0, t, 0, b, 0xE8182232, 0xE80A0F17, Shader.TileMode.CLAMP);
+        }
+        float rad = dp(8f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(panelShader);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0xFF1C2736);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x30FFFFFF);
+        c.drawRect(l + rad, t + dp(1f), r - rad, t + dp(2f), paint);
     }
 
     /** Sun (sinking with the route), stars at dusk, drifting clouds and a flock of birds. */
@@ -979,13 +1230,24 @@ final class CanyonFlightGame extends GameView {
                 c.drawCircle(sx, sy, dp(1.1f + (i % 3) * 0.5f), paint);
             }
         }
+        float sunX = w * 0.78f;
         float sunY = h * (0.2f + 0.52f * Daylight.sunDrop(t));
+        float sunR = dp(40f + 10f * Math.min(1f, t));
         int sun = Daylight.sun(t);
-        Fx.glow(c, w * 0.78f, sunY, dp(160f), (sun & 0x00FFFFFF) | 0x88000000);
+        // A wide soft bloom and a tight hot one, then the disc with a paler core.
+        Fx.glow(c, sunX, sunY, dp(230f), (sun & 0x00FFFFFF) | 0x50000000);
+        Fx.glow(c, sunX, sunY, dp(105f), (sun & 0x00FFFFFF) | 0x90000000);
         paint.setColor(sun);
-        c.drawCircle(w * 0.78f, sunY, dp(40f + 10f * Math.min(1f, t)), paint);
+        c.drawCircle(sunX, sunY, sunR, paint);
+        paint.setColor(Daylight.blend(sun, 0xFFFFFFFF, 0.55f));
+        c.drawCircle(sunX, sunY, sunR * 0.72f, paint);
+        // Clouds: a shaded flat base under lit lobes, and a sun-side highlight on the crown. Opaque,
+        // so the overlapping lobes do not stack into seams.
+        int top = Daylight.top(t);
         int cloud = Daylight.blend(0xFFFFFFFF, 0xFFFF9A7A, Math.min(1f, t));
-        paint.setColor((cloud & 0x00FFFFFF) | 0xB3000000);
+        int lit = Daylight.blend(Daylight.blend(cloud, top, 0.1f), top, stars * 0.6f);
+        int under = Daylight.blend(Daylight.blend(cloud, top, 0.42f), top, stars * 0.6f);
+        int crown = Daylight.blend(lit, Daylight.blend(sun, 0xFFFFFFFF, 0.6f), 0.6f);
         for (int i = 0; i < 6; i++) {
             float span = w + dp(400f);
             float cx = (float) (((i * 377 + 90) - x * ppm * (0.05 + i * 0.02)) % span);
@@ -993,52 +1255,297 @@ final class CanyonFlightGame extends GameView {
                 cx += span;
             }
             float cy = h * (0.12f + (i % 3) * 0.1f);
-            float sc = 0.7f + (i % 3) * 0.25f;
-            c.drawOval(cx - dp(70f) * sc, cy - dp(12f) * sc, cx + dp(70f) * sc, cy + dp(12f) * sc, paint);
-            c.drawOval(cx - dp(34f) * sc, cy - dp(26f) * sc, cx + dp(36f) * sc, cy + dp(4f) * sc, paint);
+            float sc = (0.7f + (i % 3) * 0.25f) * dp(1f);
+            paint.setColor(under);
+            c.drawOval(cx - 72 * sc, cy - 6 * sc, cx + 72 * sc, cy + 14 * sc, paint);
+            paint.setColor(lit);
+            c.drawOval(cx - 62 * sc, cy - 12 * sc, cx + 62 * sc, cy + 5 * sc, paint);
+            c.drawCircle(cx - 34 * sc, cy - 10 * sc, 16 * sc, paint);
+            c.drawCircle(cx + 2 * sc, cy - 16 * sc, 22 * sc, paint);
+            c.drawCircle(cx + 36 * sc, cy - 8 * sc, 14 * sc, paint);
+            paint.setColor(crown);
+            c.drawCircle(cx + 9 * sc, cy - 26 * sc, 9 * sc, paint);
+            c.drawCircle(cx + 40 * sc, cy - 14 * sc, 6 * sc, paint);
         }
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2f));
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(2.5f));
         paint.setColor(0xCC2A1A2A);
         float flockX = (float) (w - ((x * ppm * 0.3 + sessionSeconds * dp(30f)) % (w + dp(300f))));
         for (int b = 0; b < 5; b++) {
             float bx = flockX + b * dp(26f);
             float by = h * 0.28f + (b % 2) * dp(12f) + (float) Math.sin(sessionSeconds * 1.3 + b) * dp(4f);
             float flap = (float) Math.sin(sessionSeconds * 9 + b) * dp(5f);
-            c.drawLine(bx - dp(8f), by - flap, bx, by, paint);
-            c.drawLine(bx, by, bx + dp(8f), by - flap, paint);
+            c.drawLine(bx - dp(9f), by - flap, bx, by, paint);
+            c.drawLine(bx, by, bx + dp(9f), by - flap, paint);
         }
+        paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
+    }
+
+    private static int land(int col, float dusk) {
+        return Daylight.blend(col, 0xFF140A18, dusk);
+    }
+
+    /**
+     * The scenery's light for one step of the day: haze, the lit gradient of every rock layer and
+     * their flat colours. Called only when the quantised daylight changes, a few dozen times a run.
+     * One light for the whole scene - the sun, high on the right - so every sunlit face is the
+     * right-hand, down-sloping one and every shadow is violet.
+     */
+    private void buildLight(float h, float t) {
+        float dusk = Daylight.shade(t);
+        int hz = Daylight.horizon(t);
+        int sun = Daylight.sun(t);
+        Shader.TileMode clamp = Shader.TileMode.CLAMP;
+        hazeFar = new LinearGradient(0, h * 0.46f, 0, h * 0.74f, hz & 0x00FFFFFF,
+                (hz & 0x00FFFFFF) | 0x88000000, clamp);
+        hazeNear = new LinearGradient(0, h * 0.58f, 0, h * 0.95f, hz & 0x00FFFFFF,
+                (hz & 0x00FFFFFF) | 0x50000000, clamp);
+        rangeCol = land(Daylight.blend(0xFFA0605A, hz, 0.58f), dusk);
+        farShadowCol = land(Daylight.blend(0xFF6E3442, hz, 0.42f), dusk);
+        int farLit = land(Daylight.blend(Daylight.blend(0xFFCC7448, sun, 0.25f), hz, 0.34f), dusk);
+        farLitShader = new LinearGradient(0, h * 0.55f, 0, h * 0.98f, farLit, farShadowCol, clamp);
+        int mesaTop = land(Daylight.blend(Daylight.blend(0xFFD8783E, sun, 0.3f), hz, 0.18f), dusk);
+        int mesaMid = land(Daylight.blend(0xFFB04A30, hz, 0.2f), dusk);
+        int mesaBase = land(Daylight.blend(0xFF6A2E3C, hz, 0.38f), dusk);
+        mesaShader = new LinearGradient(0, h * 0.44f, 0, h, new int[] {mesaTop, mesaMid, mesaBase},
+                new float[] {0f, 0.45f, 1f}, clamp);
+        mesaShadowCol = land(Daylight.blend(0xFF55305A, hz, 0.22f), dusk);
+        mesaHiCol = land(Daylight.blend(0xFFFFB878, sun, 0.35f), dusk);
+        // Shadow faces still catch light bounced off the sunlit rock, most of all near the top.
+        nearShadowShader = new LinearGradient(0, h * 0.45f, 0, h, land(Daylight.blend(0xFF6E3044, hz, 0.12f), dusk),
+                land(0xFF2A1220, dusk), clamp);
+        int nearLit = land(Daylight.blend(0xFFB8582E, sun, 0.2f), dusk);
+        nearLitShader = new LinearGradient(0, h * 0.45f, 0, h, nearLit, land(0xFF4A2026, dusk), clamp);
+        nearRimCol = (((int) (0xAA * (1f - dusk))) << 24) | (Daylight.blend(0xFFFFC890, sun, 0.3f) & 0x00FFFFFF);
+        roofShader = new LinearGradient(0, 0, 0, h * 0.55f, land(0xFF1E0E18, dusk), land(0xFF5E2E34, dusk), clamp);
+        floorShader = new LinearGradient(0, h * 0.35f, 0, h, land(0xFF9A4E34, dusk), land(0xFF26121A, dusk), clamp);
+        floorRimCol = land(Daylight.blend(0xFFF0A060, sun, 0.3f), dusk);
+        roofRimCol = land(0xFFB0604A, dusk);
+        strataDark = 0x2A200814;
+        strataLight = (((int) (0x1C * (1f - dusk))) << 24) | 0xFFE0B0;
+    }
+
+    /** A full-width haze band: everything drawn before it recedes into the horizon colour. */
+    private void drawHaze(Canvas c, float w, float h, LinearGradient haze, float from) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(haze);
+        c.drawRect(-dp(20f), from, w + dp(20f), h + dp(20f), paint);
+        paint.setShader(null);
+    }
+
+    /** The farthest layer: a low range of buttes, mostly haze, scrolled at 0.12. */
+    private void drawRange(Canvas c, float w, float h, float ppm) {
+        float step = dp(170f);
+        double scroll = x * ppm * 0.12;
+        float off = (float) (scroll % step);
+        int base = (int) Math.floor(scroll / step);
+        float valley = h * 0.62f;
+        path.rewind();
+        path.moveTo(-off - step, h);
+        path.lineTo(-off - step, valley);
+        float end = -off;
+        for (int n = -1; n * step - off <= w + step; n++) {
+            float px = n * step - off;
+            int seed = base + n;
+            float top = h * (0.47f + ((seed * 2971) & 3) * 0.022f);
+            path.lineTo(px + step * 0.16f, top + dp(7f));
+            path.lineTo(px + step * 0.22f, top);
+            path.lineTo(px + step * 0.58f, top);
+            path.lineTo(px + step * 0.66f, top + dp(9f));
+            path.lineTo(px + step * 0.84f, valley);
+            path.lineTo(px + step, valley);
+            end = px + step;
+        }
+        path.lineTo(end, h);
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(rangeCol);
+        c.drawPath(path, paint);
+    }
+
+    private static float peakY(int k, int layer, float h) {
+        return h * (0.55f + ((k * 7919) % 5) * 0.08f) - layer * h * 0.1f;
+    }
+
+    /**
+     * A jagged canyon wall, far (layer 0, scrolled at 0.25) or near (layer 1, at 0.6). Same
+     * silhouette as 3.24; now the down-sloping face of every peak is a sunlit spur, the rest is
+     * violet shadow, the ridgelines catch a rim of light and the near wall carries level strata.
+     */
+    private void drawWall(Canvas c, float w, float h, float ppm, int layer) {
+        float step = dp(90f);
+        double scroll = x * ppm * (layer == 0 ? 0.25 : 0.6);
+        float off = (float) (scroll % step);
+        int base = (int) Math.floor(scroll / step);
+        path.rewind();
+        path2.rewind();
+        path3.rewind();
+        path.moveTo(-off, h);
+        for (int n = 0; -off + n * step <= w + step; n++) {
+            float px = -off + n * step;
+            float pk = peakY(base + n, layer, h);
+            float vx = px + step * 0.5f;
+            float vy = pk + h * 0.06f;
+            path.lineTo(px, pk);
+            path.lineTo(vx, vy);
+            path2.moveTo(px, pk);
+            path2.lineTo(vx, vy);
+            path2.lineTo(px + step * 0.62f, h);
+            path2.lineTo(px + step * 0.08f, h);
+            path2.close();
+            path3.moveTo(px, pk);
+            path3.lineTo(vx, vy);
+        }
+        path.lineTo(w + step, h);
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        if (layer == 0) {
+            paint.setColor(farShadowCol);
+        } else {
+            paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+            paint.setShader(nearShadowShader);
+        }
+        c.drawPath(path, paint);
+        paint.setShader(null);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(layer == 0 ? farLitShader : nearLitShader);
+        c.drawPath(path2, paint);
+        paint.setShader(null);
+        if (layer == 1) {
+            c.save();
+            c.clipPath(path);
+            for (int j = 0; j < 6; j++) {
+                float sy = h * (0.58f + j * 0.075f);
+                paint.setColor((j & 1) == 0 ? strataDark : strataLight);
+                c.drawRect(-dp(20f), sy, w + dp(20f), sy + dp(5f + (j % 3) * 4f), paint);
+            }
+            c.restore();
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(layer == 0 ? 1.5f : 2.5f));
+        paint.setColor(layer == 0 ? (nearRimCol & 0x00FFFFFF) | ((nearRimCol >>> 25) << 24) : nearRimCol);
+        c.drawPath(path3, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** Screen y of the near wall's surface at {@code sx}: where the plane's shadow lands. */
+    private float nearWallY(float sx, float h, float ppm) {
+        float step = dp(90f);
+        double scroll = x * ppm * 0.6;
+        float off = (float) (scroll % step);
+        int base = (int) Math.floor(scroll / step);
+        float rel = sx + off;
+        int n = (int) Math.floor(rel / step);
+        float fx = rel - n * step;
+        float pk = peakY(base + n, 1, h);
+        float vy = pk + h * 0.06f;
+        float half = step * 0.5f;
+        if (fx <= half) {
+            return pk + (vy - pk) * (fx / half);
+        }
+        return vy + (peakY(base + n + 1, 1, h) - vy) * ((fx - half) / half);
+    }
+
+    /** x of a mesa's slanted left side at height {@code y}. */
+    private static float mesaLeft(float foot, float shoulder, float top, float h, float y) {
+        return foot + (shoulder - foot) * (h - y) / (h - top);
+    }
+
+    /** x of a mesa's slanted right side at height {@code y}. */
+    private static float mesaRight(float shoulder, float foot, float top, float h, float y) {
+        return shoulder + (foot - shoulder) * (y - top) / (h - top);
     }
 
     /**
      * Mesas between the far wall and the near one. Flat-topped on purpose: the walls either side
-     * are jagged, so repeating that shape a third time reads as one wall, not as distance. Hazed
-     * toward the sky colour and scrolled at 0.4 - between the far 0.25 and the near 0.6.
+     * are jagged, so repeating that shape a third time reads as one wall, not as distance. Scrolled
+     * at 0.4 - between the far 0.25 and the near 0.6.
+     *
+     * <p>3.25.0: a sunlit face that hazes toward its foot, a violet shadow flank on the left, a
+     * bright sun-facing flank on the right, a lit top under a cap-rock shadow, and level strata
+     * cut to the slanted sides. Every mesa goes into the same few multi-contour paths, so the whole
+     * layer is six draws however many are on screen.
      */
-    private void drawMesas(Canvas c, float w, float h, float ppm, float dusk) {
+    private void drawMesas(Canvas c, float w, float h, float ppm) {
         float step = dp(210f);
-        float off = (float) ((x * ppm * 0.4) % step);
-        int base = (int) ((x * ppm * 0.4) / step);
-        int mesaA = Daylight.blend(0xFF3E2329, 0xFF1E1226, dusk);
-        int mesaB = Daylight.blend(0xFF452830, 0xFF22142A, dusk);
-        int rim = ((int) (0x33 * (1f - dusk * 0.8f)) << 24) | 0xFFD9A8;
-        for (int k = -1; k * step - off <= w + step; k++) {
-            float px = k * step - off;
-            int seed = base + k;
-            float top = h * (0.44f + ((seed * 6421) & 3) * 0.05f);
-            float wide = step * (0.46f + ((seed * 3571) & 3) * 0.1f);
-            paint.setColor(((seed & 1) == 0) ? mesaA : mesaB);
-            path.reset();
-            path.moveTo(px, h);
-            path.lineTo(px + step * 0.1f, top);
-            path.lineTo(px + wide, top);
-            path.lineTo(px + wide + step * 0.13f, h);
-            path.close();
-            c.drawPath(path, paint);
-            // A lit rim on the sunward side, so the flat top is not a silhouette slab.
-            paint.setColor(rim);
-            c.drawRect(px + step * 0.1f, top, px + wide, top + dp(3f), paint);
+        double scroll = x * ppm * 0.4;
+        float off = (float) (scroll % step);
+        int base = (int) (scroll / step);
+        for (int pass = 0; pass < 2; pass++) {
+            path.rewind();
+            path2.rewind();
+            path3.rewind();
+            for (int k = -1; k * step - off <= w + step; k++) {
+                float px = k * step - off;
+                int seed = base + k;
+                float top = h * (0.44f + ((seed * 6421) & 3) * 0.05f);
+                float wide = step * (0.46f + ((seed * 3571) & 3) * 0.1f);
+                float l1 = px + step * 0.1f;
+                float r1 = px + wide;
+                float r0 = r1 + step * 0.13f;
+                float tall = h - top;
+                if (pass == 0) {
+                    path.moveTo(px, h);
+                    path.lineTo(l1, top);
+                    path.lineTo(r1, top);
+                    path.lineTo(r0, h);
+                    path.close();
+                    float sw = (wide - step * 0.1f) * 0.2f;
+                    path2.moveTo(px, h);
+                    path2.lineTo(l1, top);
+                    path2.lineTo(l1 + sw, top);
+                    path2.lineTo(px + sw * 1.5f, h);
+                    path2.close();
+                    path3.moveTo(r1 - dp(7f), top);
+                    path3.lineTo(r1, top);
+                    path3.lineTo(r0, h);
+                    path3.lineTo(r0 - dp(12f), h);
+                    path3.close();
+                } else {
+                    for (int j = 0; j < 4; j++) {
+                        float ya = top + tall * (0.14f + j * 0.18f);
+                        float yb = ya + tall * (j == 0 ? 0.035f : 0.055f);
+                        Path band = (j & 1) == 0 ? path : path2;
+                        band.moveTo(mesaLeft(px, l1, top, h, ya), ya);
+                        band.lineTo(mesaRight(r1, r0, top, h, ya), ya);
+                        band.lineTo(mesaRight(r1, r0, top, h, yb), yb);
+                        band.lineTo(mesaLeft(px, l1, top, h, yb), yb);
+                        band.close();
+                    }
+                    // The shadow under the cap rock, and the sunlit top itself.
+                    float ya = top + dp(3f);
+                    float yb = top + dp(10f);
+                    path.moveTo(mesaLeft(px, l1, top, h, ya), ya);
+                    path.lineTo(mesaRight(r1, r0, top, h, ya), ya);
+                    path.lineTo(mesaRight(r1, r0, top, h, yb), yb);
+                    path.lineTo(mesaLeft(px, l1, top, h, yb), yb);
+                    path.close();
+                    path3.addRect(l1 - dp(2f), top - dp(2f), r1 + dp(2f), top + dp(2.5f), Path.Direction.CW);
+                }
+            }
+            paint.setStyle(Paint.Style.FILL);
+            if (pass == 0) {
+                paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+                paint.setShader(mesaShader);
+                c.drawPath(path, paint);
+                paint.setShader(null);
+                paint.setColor(mesaShadowCol);
+                c.drawPath(path2, paint);
+                paint.setColor(mesaHiCol);
+                c.drawPath(path3, paint);
+            } else {
+                paint.setColor(0x38200814);
+                c.drawPath(path, paint);
+                paint.setColor(strataLight);
+                c.drawPath(path2, paint);
+                paint.setColor(mesaHiCol);
+                c.drawPath(path3, paint);
+            }
         }
     }
 
@@ -1328,7 +1835,7 @@ final class CanyonFlightGame extends GameView {
                     sparkClock += dt;
                     if (sparkClock > 0.04) {
                         sparkClock = 0;
-                        fx.spawn(youX + dp(10f), youY + (high ? -dp(8f) : dp(8f)),
+                        fx.spawn(youX + dp(10f), youY + (high ? -dp(13f) : dp(13f)),
                                 -dp(80f) - (float) Math.random() * dp(120f),
                                 (high ? -1 : 1) * (float) Math.random() * dp(60f),
                                 0.4f, dp(2.5f), 0xFFFFD36A, false);
@@ -1364,8 +1871,9 @@ final class CanyonFlightGame extends GameView {
         if (skyShader == null || skyHeight != h || skyT != dayT) {
             skyHeight = h;
             skyT = dayT;
-            skyShader = new android.graphics.LinearGradient(0, 0, 0, h, Daylight.top(dayT), Daylight.horizon(dayT),
-                    android.graphics.Shader.TileMode.CLAMP);
+            skyShader = new LinearGradient(0, 0, 0, h, Daylight.top(dayT), Daylight.horizon(dayT),
+                    Shader.TileMode.CLAMP);
+            buildLight(h, dayT);
         }
         // Opaque first: a shader is drawn at the paint's alpha, and the HUD leaves it at 20%.
         paint.setStyle(Paint.Style.FILL);
@@ -1374,29 +1882,14 @@ final class CanyonFlightGame extends GameView {
         c.drawRect(-dp(20f), -dp(20f), w + dp(20f), h + dp(20f), paint);
         paint.setShader(null);
         drawSkyLife(c, w, h, ppm, dayT);
-        // Canyon walls: jagged silhouettes scrolling, one far, one near.
-        for (int layer = 0; layer < 2; layer++) {
-            float speedMul = layer == 0 ? 0.25f : 0.6f;
-            paint.setColor(layer == 0 ? Daylight.blend(0xFF4A2A2A, 0xFF1C1024, dusk)
-                    : Daylight.blend(0xFF2B1717, 0xFF100812, dusk));
-            float step = dp(90f);
-            float off = (float) ((x * ppm * speedMul) % step);
-            path.reset();
-            path.moveTo(0, h);
-            for (float px = -off; px <= w + step; px += step) {
-                int k = (int) ((px + off + x * ppm * speedMul) / step);
-                float peak = h * (0.55f + ((k * 7919) % 5) * 0.08f) - layer * h * 0.1f;
-                path.lineTo(px, peak);
-                path.lineTo(px + step * 0.5f, peak + h * 0.06f);
-            }
-            path.lineTo(w + step, h);
-            path.close();
-            c.drawPath(path, paint);
-            if (layer == 0) {
-                // Between the two walls, so the canyon has a middle distance.
-                drawMesas(c, w, h, ppm, dusk);
-            }
-        }
+        // The canyon in four layers, far to near, each hazier than the one in front of it: a low
+        // range, the far wall, the mesas, the near wall.
+        drawRange(c, w, h, ppm);
+        drawHaze(c, w, h, hazeFar, h * 0.46f);
+        drawWall(c, w, h, ppm, 0);
+        drawHaze(c, w, h, hazeNear, h * 0.58f);
+        drawMesas(c, w, h, ppm);
+        drawWall(c, w, h, ppm, 1);
         // Speed lanes on the left as a subtle altitude scale.
         for (float sp = (float) Math.ceil(minSpeed * 2f) / 2f; sp <= maxSpeed; sp += 0.5f) {
             float ly = skyBottom - (skyBottom - skyTop) * altFor(sp);
@@ -1408,6 +1901,7 @@ final class CanyonFlightGame extends GameView {
         // The closing rock and any fork spires, in front of the far scenery, behind the plane.
         drawCorridor(c, w, h, youX, ppm, dusk);
         drawForks(c, w, youX, ppm, dusk);
+        drawPlaneShadow(c, h, youX, youY, ppm);
         drawCheckpoints(c, w, h, youX, ppm);
         // Gates: the back half of each ring now, the front half after the plane, so you fly through.
         drawGates(c, w, youX, ppm, band, false);
@@ -1416,29 +1910,34 @@ final class CanyonFlightGame extends GameView {
         float climb = dt > 0 && lastYouY != 0f ? (lastYouY - youY) / dt : 0f;
         lastYouY = youY;
         pitch += (Math.max(-0.5f, Math.min(0.5f, climb / dp(160f))) - pitch) * Math.min(1f, 4f * dt);
-        Fx.glow(c, youX, youY, dp(60f), boostGlow > 0.2f ? 0x88FF8A3D : streak >= 3 ? 0x66F5C518 : 0x4035D0BA);
+        Fx.glow(c, youX, youY, dp(84f), boostGlow > 0.2f ? 0x88FF8A3D : streak >= 3 ? 0x66F5C518 : 0x4035D0BA);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
+        // Contrails from the tail of the bigger plane.
+        float tail = dp(50f) * YOU_SCALE * 0.9f;
+        // The tail drops as the nose pitches up: its distance times the 0.6 rad-per-pitch rotation.
+        float tailY = youY + pitch * tail * 0.6f;
         for (int k = 0; k < 3; k++) {
             int trail = boostGlow > 0.2f ? (k == 0 ? 0xCCFFD36A : k == 1 ? 0x88FF8A3D : 0x55FF6A2A)
                     : (k == 0 ? 0x88FFFFFF : k == 1 ? 0x55FFFFFF : 0x33FFFFFF);
             paint.setColor(trail);
-            paint.setStrokeWidth(dp(4f - k) * (1f + boostGlow));
-            float tx = youX - dp(40f) - k * speed * dp(14f) - boostGlow * dp(90f);
-            c.drawLine(youX - dp(30f), youY + pitch * dp(20f), tx - speed * dp(10f), youY + pitch * dp(20f) + k * dp(3f), paint);
+            paint.setStrokeWidth(dp(5f - k * 1.3f) * (1f + boostGlow));
+            float tx = youX - tail - dp(14f) - k * speed * dp(16f) - boostGlow * dp(100f);
+            c.drawLine(youX - tail, tailY, tx - speed * dp(12f), tailY + k * dp(3.5f), paint);
         }
         paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
         boolean hurt = sessionSeconds < hurtUntil;
         boolean grace = sessionSeconds < graceUntil && !boosting();
         if ((!hurt && !grace) || ((int) (sessionSeconds * 10) % 2 == 0)) {
-            drawPlane(c, youX, youY, speed, pitch, 0xFFF4F4F4, ACCENT);
+            drawPlane(c, youX, youY, speed, pitch, 0xFFF4F4F4, ACCENT, YOU_SCALE, true);
         }
         drawGates(c, w, youX, ppm, band, true);
         fx.draw(c);
         if (sessionSeconds < popupUntil) {
+            // Clear of the bigger plane's nose and propeller.
             float rise = (float) (1.1 - (popupUntil - sessionSeconds)) * dp(50f);
-            bold(c, popupText, youX + dp(40f), popupY - dp(30f) - rise, 20f, popupColor, Paint.Align.LEFT);
+            bold(c, popupText, youX + dp(62f), popupY - dp(34f) - rise, 20f, popupColor, Paint.Align.LEFT);
         }
         c.restore();
         Fx.speedLines(c, paint, w, h, speed + boostGlow * 3f, sessionSeconds, dp(1f));

@@ -5,6 +5,9 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.RadialGradient;
 import android.graphics.Region;
 import android.graphics.Shader;
 import android.view.MotionEvent;
@@ -146,7 +149,6 @@ final class ZombieRunGame extends GameView {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path path = new Path();
     private final Path darkPath = new Path();
-    private final Path beamPath = new Path();
 
     private float hordePaceSec = 150f;    // 2:30 /500
     private Phase phase = Phase.READY;
@@ -327,9 +329,68 @@ final class ZombieRunGame extends GameView {
     private int skyShaderTop;
     private float skyShaderH;
 
+    /*
+     * 3.25.0 graphics pass. Everything below is built once per view size in ensureScene() and only
+     * read in the frame loop: shapes are cached Paths drawn through a canvas transform, gradients are
+     * cached shaders, and nothing in render() allocates.
+     */
+    /** Limbs, rails and grass: round-capped strokes. Kept off {@code paint} so its style never leaks. */
+    private final Paint limb = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** Shader fills (fog, moon, heads, ground). Colour is set to opaque white before every use. */
+    private final Paint shade = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** Additive light: the torch beam brightens whatever it falls on rather than painting over it. */
+    private final Paint light = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private float sceneW = -1;
+    private float sceneH = -1;
+    private static final int STARS = 90;
+    private final float[] starX = new float[STARS];
+    private final float[] starY = new float[STARS];
+    private final float[] starR = new float[STARS];
+    private final int[] starA = new int[STARS];
+    private int starCount;
+    private final Path[] treeShape = new Path[3];
+    private final Path[] stoneShape = new Path[4];
+    private final Path[] torsoShape = new Path[5];
+    private final RadialGradient[] headShader = new RadialGradient[5];
+    private final Path beamCone = new Path();
+    private final Path beamCore = new Path();
+    private final Path batPath = new Path();
+    private RadialGradient fogShader;
+    private RadialGradient moonShader;
+    private RadialGradient poolShader;
+    private LinearGradient groundShader;
+    private LinearGradient pathShader;
+    private LinearGradient bottomShader;
+    private LinearGradient beamShader;
+    private LinearGradient beamCoreShader;
+    private LinearGradient glossShader;
+    private float fogR;
+    private float poolR;
+    private float beamLen;
+    private static final double BEAM_SPREAD = 0.26;
+    private static final float GLOSS_UNIT = 100f;
+    private final float[] fenceLines = new float[4 * 220];
+    /* Distance each part of the horde has walked, so their legs move with their own pace, not yours. */
+    private float walkStride;
+    private float bruteStride;
+    private final float[] runStride = new float[RUNNER_SLOTS];
+    /* Where your headlamp is this frame: the beam and the night's light hole start from it. */
+    private float lampX = -1;
+    private float lampY;
+    /* Props are drawn at the figures' scale (they were half their size beside the 3.2x figures). */
+    private static final float HOUSE_K = 2.1f;
+    private static final float WALL_K = 1.6f;
+    private static final float CAR_K = 2.0f;
+    private static final float CHOPPER_K = 1.5f;
+    private static final float CRATE_K = 1.35f;
+
     ZombieRunGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        limb.setStyle(Paint.Style.STROKE);
+        limb.setStrokeCap(Paint.Cap.ROUND);
+        limb.setStrokeJoin(Paint.Join.ROUND);
+        light.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.ADD));
     }
 
     void setHordePace(float secondsPer500) {
@@ -503,26 +564,39 @@ final class ZombieRunGame extends GameView {
             return;
         }
         float alpha = (float) Math.min(1.0, Math.min(left / 0.3, (2.8 - left) / 0.2 + 0.1));
-        textPaint.setTextSize(dp(15f));
+        // Measured at the size bold() draws it: at the raw 15dp the text ran out of its own bubble.
+        textPaint.setTextSize(dp(textDp(15f)));
         float tw = textPaint.measureText(bubble);
-        float padX = dp(12f);
-        float bh = dp(34f);
+        float padX = dp(14f);
+        float bh = dp(38f);
         float bx = Math.max(dp(10f), Math.min(w - tw - padX * 2 - dp(10f), headX - tw / 2f - padX));
         float by = Math.max(dp(4f), headY - dp(22f) - bh);
-        paint.setColor(0xFFFFFFFF);
-        paint.setAlpha((int) (235 * alpha));
-        c.drawRoundRect(bx, by, bx + tw + padX * 2, by + bh, dp(14f), dp(14f), paint);
-        path.reset();
-        float tailX = Math.max(bx + dp(14f), Math.min(bx + tw + padX * 2 - dp(14f), headX));
-        path.moveTo(tailX - dp(8f), by + bh - dp(1f));
-        path.lineTo(tailX + dp(8f), by + bh - dp(1f));
+        float br = bx + tw + padX * 2;
+        float tailX = Math.max(bx + dp(16f), Math.min(br - dp(16f), headX));
+        path.rewind();
+        path.addRoundRect(bx, by, br, by + bh, dp(16f), dp(16f), Path.Direction.CW);
+        path.moveTo(tailX - dp(9f), by + bh - dp(2f));
         path.lineTo(headX, headY - dp(6f));
+        path.lineTo(tailX + dp(9f), by + bh - dp(2f));
         path.close();
+        c.save();
+        c.translate(dp(3f), dp(4f));
+        paint.setColor(0x000000 | ((int) (90 * alpha) << 24));
         c.drawPath(path, paint);
+        c.restore();
+        paint.setColor(0xFFFFFFFF);
+        paint.setAlpha((int) (240 * alpha));
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(bubbleWho == WHO_YOU ? 0xFF35D0BA : bubbleWho >= WHO_GROUP ? 0xFF8FB4FF : 0xFFB0453A);
+        paint.setAlpha((int) (220 * alpha));
+        c.drawRoundRect(bx, by, br, by + bh, dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.FILL);
         paint.setAlpha(255);
         int textColour = bubbleWho == WHO_YOU ? 0xFF0E6E60
                 : bubbleWho >= WHO_GROUP ? 0xFF1E3A8A : 0xFF3A1010;
-        bold(c, bubble, bx + padX + tw / 2f, by + bh * 0.66f, 15f,
+        bold(c, bubble, bx + padX + tw / 2f, by + bh * 0.68f, 15f,
                 (((int) (255 * alpha)) << 24) | (textColour & 0x00FFFFFF), Paint.Align.CENTER);
     }
 
@@ -1248,117 +1322,16 @@ final class ZombieRunGame extends GameView {
 
         // Sky reddens as they close in. Quantised so the gradient is rebuilt a handful of times, not every frame.
         float dq = Math.round(danger * 12f) / 12f;
-        int skyTop = blend(0xFF1B2A44, 0xFF5A1010, dq);
-        if (skyShader == null || skyTop != skyShaderTop || h != skyShaderH) {
-            skyShader = new LinearGradient(0, 0, 0, h * 0.7f, skyTop, 0xFF0A0E14, Shader.TileMode.CLAMP);
-            skyShaderTop = skyTop;
-            skyShaderH = h;
-        }
-        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
-        paint.setShader(skyShader);
-        c.drawRect(0, 0, w, h, paint);
-        paint.setShader(null);
+        float groundY = h * 0.70f;
+        ensureScene(w, h);
+        drawSky(c, w, h, groundY, danger, dq);
 
         c.save();
         c.translate(shake.dx, shake.dy);
-        float groundY = h * 0.70f;
         eyeCount = 0;
-
-        // Moon, low and large, redder as the horde closes.
-        Fx.glow(c, w * 0.80f, h * 0.20f, dp(70f), blend(0x66DCEBF7, 0x66FF6A4D, dq));
-        paint.setColor(blend(0xFFE9EEF5, 0xFFFF8A6A, danger));
-        c.drawCircle(w * 0.80f, h * 0.20f, dp(26f), paint);
         float ppm = w / 90f;   // 90 m across the screen
         double scroll = sessionMeters;
-
-        // Bats flapping across the sky.
-        for (int i = 0; i < batX.length; i++) {
-            batX[i] -= batSpeed[i] * dt;
-            if (batX[i] < -0.05f) {
-                batX[i] = 1.05f;
-                batY[i] = 0.10f + (float) Math.random() * 0.3f;
-            }
-            float bx = batX[i] * w;
-            float by = batY[i] * h + (float) Math.sin(sessionSeconds * 2 + i) * dp(10f);
-            float flap = (float) Math.sin(sessionSeconds * 14 + i * 2) * dp(7f);
-            paint.setColor(0xFF05070C);
-            paint.setStrokeWidth(dp(2.5f));
-            c.drawLine(bx, by, bx - dp(11f), by - flap, paint);
-            c.drawLine(bx, by, bx + dp(11f), by - flap, paint);
-            c.drawCircle(bx, by, dp(3f), paint);
-        }
-
-        // Far hills, slow parallax.
-        paint.setColor(0xFF141C2B);
-        path.reset();
-        path.moveTo(0, groundY);
-        for (float x = 0; x <= w + dp(40f); x += dp(40f)) {
-            float wx = (float) ((x + scroll * ppm * 0.15) / dp(160f));
-            path.lineTo(x, groundY - dp(40f) - (float) Math.abs(Math.sin(wx) * dp(50f)));
-        }
-        path.lineTo(w, groundY);
-        path.close();
-        c.drawPath(path, paint);
-
-        // Glowing eyes blinking in the dark between the hills.
-        for (int i = 0; i < 6; i++) {
-            float ex = (float) (((i * 311 + 90) - scroll * ppm * 0.25) % (w + dp(200f)));
-            if (ex < 0) {
-                ex += w + dp(200f);
-            }
-            boolean open = ((int) (sessionSeconds * 1.3 + i * 0.7)) % 4 != 0;
-            if (open) {
-                float ey = groundY - dp(28f) - (i % 3) * dp(12f);
-                paint.setColor(i % 2 == 0 ? 0xFFFFD23A : 0xFFFF4D4D);
-                c.drawCircle(ex, ey, dp(2.2f), paint);
-                c.drawCircle(ex + dp(8f), ey, dp(2.2f), paint);
-            }
-        }
-
-        // Tombstones in a graveyard strip, mid parallax.
-        float stoneGap = dp(110f);
-        float soff = (float) ((scroll * ppm * 0.3) % stoneGap);
-        for (float x = -soff; x < w + stoneGap; x += stoneGap) {
-            int k = (int) Math.floor((x + scroll * ppm * 0.3) / stoneGap);
-            float sh = dp(16f) + ((k * 7) % 3) * dp(6f);
-            float sx = x + ((k * 13) % 5) * dp(8f);
-            paint.setColor(0xFF2A3342);
-            c.drawRoundRect(sx - dp(7f), groundY - sh, sx + dp(7f), groundY, dp(6f), dp(6f), paint);
-            paint.setColor(0xFF394356);
-            c.drawRect(sx - dp(1.2f), groundY - sh + dp(4f), sx + dp(1.2f), groundY - sh + dp(11f), paint);
-            c.drawRect(sx - dp(4f), groundY - sh + dp(6f), sx + dp(4f), groundY - sh + dp(8.5f), paint);
-        }
-
-        // Dead trees, mid parallax.
-        paint.setColor(0xFF0E1420);
-        float treeGap = dp(150f);
-        float toff = (float) ((scroll * ppm * 0.45) % treeGap);
-        for (float x = -toff; x < w + treeGap; x += treeGap) {
-            float th = dp(60f) + ((int) (x / treeGap) % 3) * dp(18f);
-            c.drawRect(x - dp(3f), groundY - th, x + dp(3f), groundY, paint);
-            c.drawLine(x, groundY - th * 0.7f, x + dp(18f), groundY - th * 0.95f, paint);
-            c.drawLine(x, groundY - th * 0.5f, x - dp(16f), groundY - th * 0.75f, paint);
-        }
-
-        // Ground with fence posts scrolling at your speed.
-        paint.setColor(0xFF1A2416);
-        c.drawRect(0, groundY, w, h, paint);
-        paint.setColor(0xFF2A3A22);
-        float post = dp(70f);
-        float off = (float) ((scroll * ppm) % post);
-        for (float x = -off; x < w; x += post) {
-            c.drawRect(x, groundY - dp(18f), x + dp(4f), groundY, paint);
-        }
-
-        // Fog rolling low over the ground.
-        for (int i = 0; i < 5; i++) {
-            float fx = (float) (((i * 420) - scroll * ppm * 0.6 - sessionSeconds * dp(12f)) % (w + dp(500f)));
-            if (fx < -dp(250f)) {
-                fx += w + dp(500f);
-            }
-            paint.setColor(0x1ECBD5E6);
-            c.drawOval(fx - dp(220f), groundY - dp(26f), fx + dp(220f), groundY + dp(18f), paint);
-        }
+        drawBackdrop(c, w, h, groundY, ppm, scroll, dt);
 
         float youX = w * 0.62f;
         spkX = youX;
@@ -1406,7 +1379,7 @@ final class ZombieRunGame extends GameView {
         }
         // While the rest lasts, the wall you are nailing up rises at the house itself.
         if (safe() && barricadePlanks > 0 && houseVisible && !chopperShown) {
-            drawBarricade(c, houseX + dp(40f), groundY, barricadePlanks);
+            drawBarricade(c, houseX + dp(112f), groundY, barricadePlanks);
         }
 
         // The supply crate: parachuting in, then sitting on its beacon with the clock running.
@@ -1431,7 +1404,8 @@ final class ZombieRunGame extends GameView {
 
         // You, running, with a glow and dust off your heels.
         // blend() forces opaque, so the wounded glow is picked rather than mixed.
-        Fx.glow(c, youX, groundY - dp(20f), dp(48f), limp > 0.15 ? 0x50FF4A4A : 0x4035D0BA);
+        Fx.glow(c, youX, groundY - dp(70f), dp(110f), limp > 0.15 ? 0x40FF4A4A : 0x3035D0BA);
+        Fx.glow(c, youX, groundY - dp(10f), dp(60f), limp > 0.15 ? 0x50FF4A4A : 0x4035D0BA);
         if (speed > 0.5f && phase == Phase.RUNNING) {
             dustAccum += dt * speed * 6f;
             while (dustAccum >= 1f) {
@@ -1454,9 +1428,6 @@ final class ZombieRunGame extends GameView {
             sparks.burst(youX, groundY - dp(30f), 34, dp(150f), 0.9f, dp(3f), 0xFFB3122E, true);
         }
         dust.draw(c);
-        if (!night) {
-            drawTorch(c, youX, groundY);
-        }
 
         // Survivors running behind you, between you and the horde.
         for (int i = groupCount - 1; i >= 0; i--) {
@@ -1490,12 +1461,14 @@ final class ZombieRunGame extends GameView {
 
         // The horde: walkers, then the brute, then any runners out in front.
         float hs = hordeSpeed();
+        float bruteSpeed = bruteState == 2 ? hs + (float) bruteBoost : hs;
+        walkStride += hs * dt;
+        bruteStride += bruteSpeed * dt;
         float hordeX = youX - (float) gap * ppm;
         for (int i = 0; i < WALKERS; i++) {
             float zx = hordeX - (i + 1) * dp(46f) - (i % 3) * dp(14f);
-            float bob = (float) Math.sin(sessionSeconds * 6 + i) * dp(2f);
-            drawFigure(c, zx, groundY + bob, i % 2 == 0 ? BAD : 0xFF9A3B32, hs,
-                    (float) (scroll * 2.2 + i * 40), K_WALKER, false);
+            drawFigure(c, zx, groundY, i % 2 == 0 ? BAD : 0xFF9A3B32, hs,
+                    walkStride * 1.7f + i * 1.9f, K_WALKER, false);
             if (i == bubbleWho) {
                 spkX = zx;
             }
@@ -1505,9 +1478,8 @@ final class ZombieRunGame extends GameView {
         if (bruteState == 1 || bruteState == 2) {
             Fx.glow(c, bruteX, groundY - dp(90f), dp(110f), 0x55FF2A1A);
         }
-        drawFigure(c, bruteX + bruteShake, groundY, 0xFF4A3A5A,
-                bruteState == 2 ? hs + (float) bruteBoost : hs,
-                (float) (scroll * (bruteState == 2 ? 2.6 : 1.4)), K_BRUTE, bruteState == 1);
+        drawFigure(c, bruteX + bruteShake, groundY, 0xFF4A3A5A, bruteSpeed,
+                bruteStride * 1.25f, K_BRUTE, bruteState == 1);
         if (bubbleWho == WHO_BRUTE) {
             spkX = bruteX;
             spkY = groundY - 46f * FIGURE_SCALE * 1.5f * dp(1f);
@@ -1518,14 +1490,20 @@ final class ZombieRunGame extends GameView {
             }
             float rx = hordeX + (float) runLead[i] * ppm + i * dp(12f);
             float rs = runState[i] == 1 ? hs + (float) runBoost[i] : Math.max(0.5f, hs * 0.75f);
-            drawFigure(c, rx, groundY, 0xFFC7A23A, rs, (float) (scroll * 4.0 + sessionSeconds * 6 + i * 3),
-                    K_RUNNER, false);
+            runStride[i] += rs * dt;
+            drawFigure(c, rx, groundY, 0xFFC7A23A, rs, runStride[i] * 2.4f + i * 3f, K_RUNNER, false);
             if (bubbleWho == WHO_RUNNER + i) {
                 spkX = rx;
             }
         }
         if (bubbleWho >= 0 && bubbleWho < WALKERS) {
             spkX = Math.max(dp(40f), spkX);
+        }
+        // Ground fog rolling over everyone's feet, so the horde wades out of it.
+        fogPuffs(c, w, groundY + dp(10f), 6, dp(14f), 3.4f, 0.34f, 52, dp(16f), scroll, ppm, 0.9f, 700);
+        // The torch, drawn after the horde: when it swings back it lights the faces it lands on.
+        if (!night) {
+            drawBeamLight(c, groundY, 1f);
         }
 
         // The flare: an arc from your hand into the horde, then a burst of red light.
@@ -1694,55 +1672,99 @@ final class ZombieRunGame extends GameView {
         } else {
             cap = "nearest zombie  ·  safe house in " + Math.round(nextSafeHouse - runMeters()) + " m";
         }
-        bold(c, cap, w / 2f, h * 0.17f + dp(22f), 11f, capCol, Paint.Align.CENTER);
+        // 3.25.0: the caption, the district line and the wave pips used to sit 6dp apart and printed
+        // on top of each other at the text sizes the seat needs. Same information, spaced out.
+        bold(c, cap, w / 2f, h * 0.17f + dp(25f), 11f, capCol, Paint.Align.CENTER);
 
         // Route bar: to the next safe house, or - in the final chase - to the chopper, with the
         // survivor waiting on it and the wave pips above.
         if (phase == Phase.RUNNING) {
             float bw = w * 0.30f;
             float bx = w / 2f - bw / 2f;
-            float by = h * 0.17f + dp(36f);
+            float by = h * 0.17f + dp(64f);
             double segStart = finalChase ? districtStart + WAVES_PER_DISTRICT * SAFE_EVERY
                     : nextSafeHouse - SAFE_EVERY;
             double segLen = finalChase ? FINAL_METRES : SAFE_EVERY;
             float f = (float) Math.max(0, Math.min(1, (runMeters() - segStart) / segLen));
-            paint.setColor(0x33FFFFFF);
-            c.drawRoundRect(bx, by, bx + bw, by + dp(5f), dp(3f), dp(3f), paint);
-            paint.setColor(finalChase ? 0xFFFF7A4D : ACCENT);
-            c.drawRoundRect(bx, by, bx + bw * f, by + dp(5f), dp(3f), dp(3f), paint);
+            int fillCol = finalChase ? 0xFFFF7A4D : ACCENT;
+            paint.setColor(0x66000000);
+            c.drawRoundRect(bx - dp(1.5f), by - dp(1.5f), bx + bw + dp(1.5f), by + dp(7.5f), dp(4.5f), dp(4.5f), paint);
+            paint.setColor(0x2EFFFFFF);
+            c.drawRoundRect(bx, by, bx + bw, by + dp(6f), dp(3f), dp(3f), paint);
+            if (f > 0.005f) {
+                paint.setColor(fillCol);
+                c.drawRoundRect(bx, by, bx + bw * f, by + dp(6f), dp(3f), dp(3f), paint);
+                paint.setColor(0x60FFFFFF);
+                c.drawRoundRect(bx + dp(1f), by + dp(0.8f), bx + Math.max(dp(2f), bw * f - dp(1f)), by + dp(2.4f),
+                        dp(1f), dp(1f), paint);
+                Fx.glow(c, bx + bw * f, by + dp(3f), dp(16f), 0x70000000 | (fillCol & 0x00FFFFFF));
+            }
             if (survivorAt > segStart && survivorAt < segStart + segLen) {
                 float sf = (float) ((survivorAt - segStart) / segLen);
+                paint.setColor(0xFF0B1017);
+                c.drawCircle(bx + bw * sf, by + dp(3f), dp(6.5f), paint);
                 paint.setColor(0xFF8FB4FF);
-                c.drawCircle(bx + bw * sf, by + dp(2.5f), dp(5f), paint);
+                c.drawCircle(bx + bw * sf, by + dp(3f), dp(5f), paint);
             }
             if (dropActive && dropAt > segStart && dropAt < segStart + segLen) {
                 float df = (float) ((dropAt - segStart) / segLen);
                 paint.setColor(WARN);
                 c.drawRect(bx + bw * df - dp(3f), by - dp(4f), bx + bw * df + dp(3f), by + dp(9f), paint);
             }
+            // The end of the leg: a little house, or the chopper's flag in the final chase.
+            float ex = bx + bw + dp(2f);
             paint.setColor(finalChase ? 0xFFFF7A4D : 0xFFFFD27A);
-            c.drawRect(bx + bw - dp(4f), by - dp(6f), bx + bw + dp(8f), by + dp(8f), paint);
+            if (finalChase) {
+                c.drawRect(ex - dp(1f), by - dp(10f), ex + dp(1f), by + dp(8f), paint);
+                path.rewind();
+                path.moveTo(ex + dp(1f), by - dp(10f));
+                path.lineTo(ex + dp(13f), by - dp(6f));
+                path.lineTo(ex + dp(1f), by - dp(2f));
+                path.close();
+                c.drawPath(path, paint);
+            } else {
+                c.drawRect(ex - dp(6f), by - dp(2f), ex + dp(6f), by + dp(8f), paint);
+                path.rewind();
+                path.moveTo(ex - dp(8.5f), by - dp(1.5f));
+                path.lineTo(ex, by - dp(9f));
+                path.lineTo(ex + dp(8.5f), by - dp(1.5f));
+                path.close();
+                c.drawPath(path, paint);
+                paint.setColor(0xFF0B1017);
+                c.drawRect(ex - dp(1.8f), by + dp(2.5f), ex + dp(1.8f), by + dp(8f), paint);
+            }
             // Wave pips: one per wave in this district, filled as they fall.
             for (int i = 0; i < WAVES_PER_DISTRICT; i++) {
-                float px = bx + bw / 2f - (WAVES_PER_DISTRICT - 1) * dp(9f) / 2f + i * dp(9f);
+                float px = bx + bw / 2f - (WAVES_PER_DISTRICT - 1) * dp(12f) / 2f + i * dp(12f);
                 boolean done = finalChase || i < wave - 1;
+                if (done) {
+                    Fx.glow(c, px, by - dp(10f), dp(9f), 0x8035D0BA);
+                }
                 paint.setColor(done ? ACCENT : 0x44FFFFFF);
-                c.drawCircle(px, by - dp(14f), dp(3f), paint);
+                c.drawCircle(px, by - dp(10f), dp(3.4f), paint);
             }
             label(c, finalChase ? "FINAL CHASE  ·  " + districtName()
                             : districtName() + "  ·  WAVE " + wave + " OF " + WAVES_PER_DISTRICT,
-                    bx + bw / 2f, by - dp(20f), 9f, finalChase ? 0xFFFF7A4D : DIM, Paint.Align.CENTER);
+                    bx + bw / 2f, by - dp(19f), 9f, finalChase ? 0xFFFF7A4D : DIM, Paint.Align.CENTER);
         }
 
         // The wound meter: how much leg you have back, and whether this rhythm is mending it.
         if (limp > 0 && phase == Phase.RUNNING) {
             float bw = w * 0.22f;
             float bx = w / 2f - bw / 2f;
-            float by = h * 0.17f + dp(52f);
+            float by = h * 0.17f + dp(82f);
+            paint.setColor(0x66000000);
+            c.drawRoundRect(bx - dp(1.5f), by - dp(1.5f), bx + bw + dp(1.5f), by + dp(10.5f), dp(6f), dp(6f), paint);
             paint.setColor(0x33FFFFFF);
             c.drawRoundRect(bx, by, bx + bw, by + dp(9f), dp(4.5f), dp(4.5f), paint);
-            paint.setColor(steadyState == 1 ? ACCENT : BAD);
-            c.drawRoundRect(bx, by, bx + bw * (float) (1 - limp), by + dp(9f), dp(4.5f), dp(4.5f), paint);
+            float lf = (float) (1 - limp);
+            if (lf > 0.01f) {
+                paint.setColor(steadyState == 1 ? ACCENT : BAD);
+                c.drawRoundRect(bx, by, bx + bw * lf, by + dp(9f), dp(4.5f), dp(4.5f), paint);
+                paint.setColor(0x55FFFFFF);
+                c.drawRoundRect(bx + dp(2f), by + dp(1.2f), bx + Math.max(dp(3f), bw * lf - dp(2f)), by + dp(3.4f),
+                        dp(1.2f), dp(1.2f), paint);
+            }
             if (steadyState == 1) {
                 float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6);
                 Fx.glow(c, bx + bw * (float) (1 - limp), by + dp(4.5f), dp(26f),
@@ -1773,6 +1795,12 @@ final class ZombieRunGame extends GameView {
 
         float fy = h - dp(12f);
         float col5 = w / 5f;
+        if (bottomShader != null) {
+            shade.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+            shade.setShader(bottomShader);
+            c.drawRect(0, h - dp(78f), w, h, shade);
+            shade.setShader(null);
+        }
         stat(c, col5 * 0.5f, fy, Math.round(runMeters()) + " m", "SURVIVED");
         stat(c, col5 * 1.5f, fy, wavesCleared + (finalChase ? "  (FINAL)" : ""),
                 bests.has(WAVE_KEY) ? "WAVES  ·  BEST " + Math.round(bests.get(WAVE_KEY, 0)) : "WAVES");
@@ -1793,13 +1821,16 @@ final class ZombieRunGame extends GameView {
         nightT = dp(10f);
         nightR = dp(128f);
         nightB = dp(44f);
-        paint.setColor(night ? 0xFF2A3B5E : 0x33FFFFFF);
-        c.drawRoundRect(nightL, nightT, nightR, nightB, dp(17f), dp(17f), paint);
+        int fill = night ? 0xFF22304E : 0xFF1A2230;
+        panel(c, nightL, nightT, nightR, nightB, dp(17f), fill, night ? 0xAA6F8CFF : 0xFF2A3A50);
         float mx = nightL + dp(20f);
         float my = (nightT + nightB) / 2f;
+        if (night) {
+            Fx.glow(c, mx, my, dp(16f), 0x60FFE9A8);
+        }
         paint.setColor(night ? 0xFFFFE9A8 : DIM);
         c.drawCircle(mx, my, dp(8f), paint);
-        paint.setColor(night ? 0xFF2A3B5E : 0xFF3A4252);
+        paint.setColor(fill);
         c.drawCircle(mx + dp(4f), my - dp(3f), dp(7f), paint);
         bold(c, night ? "NIGHT ON" : "NIGHT", nightL + dp(36f), my + dp(5f), 12f, night ? TEXT : DIM,
                 Paint.Align.LEFT);
@@ -1818,13 +1849,7 @@ final class ZombieRunGame extends GameView {
         float ph = dp(126f);
         float l = dp(16f);
         float t = h * 0.30f;
-        paint.setColor(0xCC0B1017);
-        c.drawRoundRect(l, t, l + pw, t + ph, dp(12f), dp(12f), paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2f));
-        paint.setColor(0x99D6A46A);
-        c.drawRoundRect(l, t, l + pw, t + ph, dp(12f), dp(12f), paint);
-        paint.setStyle(Paint.Style.FILL);
+        panel(c, l, t, l + pw, t + ph, dp(12f), 0xE00B1017, 0x99D6A46A);
         label(c, "BEHIND YOU", l + pw / 2f, t + dp(15f), 9f, 0xFFD6A46A, Paint.Align.CENTER);
 
         float floor = t + ph - dp(22f);
@@ -1839,17 +1864,14 @@ final class ZombieRunGame extends GameView {
             paint.setColor(i % 2 == 0 ? 0xFF9A7B4F : 0xFF876A42);
             c.drawRect(wallX - dp(22f) + jitter, py - dp(3f), wallX + dp(22f) + jitter, py, paint);
         }
-        // Three of them swinging at it.
-        for (int i = 0; i < 3; i++) {
-            float zx = wallX - dp(46f) - i * dp(26f);
-            float swing = (float) Math.sin(sessionSeconds * 9 + i * 1.7) * dp(9f);
-            paint.setColor(i % 2 == 0 ? BAD : 0xFF9A3B32);
-            c.drawRect(zx - dp(7f), floor - dp(30f), zx + dp(7f), floor, paint);
-            c.drawRect(zx + dp(5f), floor - dp(26f) + swing, zx + dp(22f), floor - dp(21f) + swing, paint);
-            paint.setColor(0xFF7FB37A);
-            c.drawCircle(zx, floor - dp(37f), dp(7f), paint);
-            paint.setColor(0xFFFF3B3B);
-            c.drawCircle(zx + dp(3f), floor - dp(38f), dp(1.6f), paint);
+        // Three of them pounding on it - the same figures as the chase, at a third of the size.
+        for (int i = 2; i >= 0; i--) {
+            float zx = wallX - dp(40f) - i * dp(26f);
+            c.save();
+            c.translate(zx, floor);
+            c.scale(0.3f, 0.3f);
+            drawFigure(c, 0, 0, i % 2 == 0 ? BAD : 0xFF9A3B32, 0f, i * 1.7f, K_WALKER, true);
+            c.restore();
         }
         // Splinters flying off on each blow.
         paint.setColor(0xFFD9C89A);
@@ -1870,14 +1892,14 @@ final class ZombieRunGame extends GameView {
         mapT = nightT;
         mapR = mapL + dp(104f);
         mapB = nightB;
-        paint.setColor(mapShown ? 0xFF2A4B3E : 0x33FFFFFF);
-        c.drawRoundRect(mapL, mapT, mapR, mapB, dp(17f), dp(17f), paint);
+        int mapFill = mapShown ? 0xFF1E3E34 : 0xFF1A2230;
+        panel(c, mapL, mapT, mapR, mapB, dp(17f), mapFill, mapShown ? 0xAA35D0BA : 0xFF2A3A50);
         float mx = mapL + dp(20f);
         float my = (mapT + mapB) / 2f;
         // A little folded map with a route on it.
         paint.setColor(mapShown ? 0xFFBFEADD : DIM);
         c.drawRect(mx - dp(9f), my - dp(7f), mx + dp(9f), my + dp(7f), paint);
-        paint.setColor(mapShown ? 0xFF2A4B3E : 0xFF3A4252);
+        paint.setColor(mapFill);
         c.drawRect(mx - dp(3f), my - dp(7f), mx - dp(1f), my + dp(7f), paint);
         c.drawRect(mx + dp(3f), my - dp(7f), mx + dp(5f), my + dp(7f), paint);
         paint.setColor(ACCENT);
@@ -1895,13 +1917,7 @@ final class ZombieRunGame extends GameView {
         float pad = dp(40f);
         float top = h * 0.24f;
         float bottom = h * 0.78f;
-        paint.setColor(0xE60B1017);
-        c.drawRoundRect(pad, top, w - pad, bottom, dp(18f), dp(18f), paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2f));
-        paint.setColor(0x5535D0BA);
-        c.drawRoundRect(pad, top, w - pad, bottom, dp(18f), dp(18f), paint);
-        paint.setStyle(Paint.Style.FILL);
+        panel(c, pad, top, w - pad, bottom, dp(18f), 0xF00B1017, 0x6635D0BA);
 
         // A searchlight sweeping across the paper, so the panel is never still.
         float sweep = (float) ((sessionSeconds * 0.28) % 1.0);
@@ -2008,27 +2024,34 @@ final class ZombieRunGame extends GameView {
             Fx.glow(c, (flareL + flareR) / 2f, (flareT + flareB) / 2f, dp(120f),
                     ((int) (60 + 60 * pulse) << 24) | 0xFF5A2A);
         }
-        paint.setColor(ready ? 0xFF7A2418 : 0x66202634);
-        c.drawRoundRect(flareL, flareT, flareR, flareB, dp(14f), dp(14f), paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2f));
-        paint.setColor(ready ? 0xFFFF7A4D : 0x55FFFFFF);
-        c.drawRoundRect(flareL, flareT, flareR, flareB, dp(14f), dp(14f), paint);
-        paint.setStyle(Paint.Style.FILL);
+        panel(c, flareL, flareT, flareR, flareB, dp(14f), ready ? 0xFF6E2016 : 0xE00D1420,
+                ready ? 0xFFFF7A4D : 0xFF2A3A50);
         bold(c, "FLARE", flareL + dp(14f), flareT + dp(26f), 18f, ready ? 0xFFFFE0C0 : DIM, Paint.Align.LEFT);
         // Flares held: little red sticks.
         for (int i = 0; i < MAX_FLARES; i++) {
             float sx = flareL + dp(100f) + i * dp(22f);
-            paint.setColor(i < flares ? 0xFFFF4A2A : 0x33FFFFFF);
-            c.drawRoundRect(sx, flareT + dp(8f), sx + dp(10f), flareT + dp(30f), dp(3f), dp(3f), paint);
             if (i < flares) {
+                paint.setColor(0xFFE8432A);
+                c.drawRoundRect(sx, flareT + dp(8f), sx + dp(10f), flareT + dp(30f), dp(3f), dp(3f), paint);
+                paint.setColor(0xFF8A1E12);
+                c.drawRect(sx, flareT + dp(17f), sx + dp(10f), flareT + dp(20f), paint);
+                paint.setColor(0x66FFFFFF);
+                c.drawRect(sx + dp(1.5f), flareT + dp(10f), sx + dp(3.5f), flareT + dp(28f), paint);
+                float sp = 0.7f + 0.3f * (float) Math.sin(sessionSeconds * 11 + i * 2);
+                Fx.glow(c, sx + dp(5f), flareT + dp(7f), dp(10f), ((int) (0xB0 * sp) << 24) | 0xFFC060);
                 paint.setColor(0xFFFFE0A0);
                 c.drawCircle(sx + dp(5f), flareT + dp(7f), dp(3f), paint);
+            } else {
+                paint.setColor(0x26FFFFFF);
+                c.drawRoundRect(sx, flareT + dp(8f), sx + dp(10f), flareT + dp(30f), dp(3f), dp(3f), paint);
             }
         }
         // Charge pips: three hard strokes make a flare.
         for (int i = 0; i < PIPS_PER_FLARE; i++) {
             float px = flareL + dp(20f) + i * dp(16f);
+            if (i < chargePips) {
+                Fx.glow(c, px, flareB - dp(15f), dp(11f), 0x80FF9A5A);
+            }
             paint.setColor(i < chargePips ? 0xFFFF9A5A : 0x33FFFFFF);
             c.drawCircle(px, flareB - dp(15f), dp(5f), paint);
         }
@@ -2039,24 +2062,26 @@ final class ZombieRunGame extends GameView {
     /** Pitch dark but for the torch, the lights of the living, and the flare. Zombies are their eyes. */
     private void drawNight(Canvas c, float w, float h, float youX, float groundY, float houseX, float survX,
                            double sinceFlare, float burstY) {
-        float headY = groundY - 40f * FIGURE_SCALE * dp(1f);
+        float lx = lampX >= 0 ? lampX : youX;
+        float ly = lampX >= 0 ? lampY : groundY - 40f * FIGURE_SCALE * dp(1f);
         darkPath.reset();
         darkPath.setFillType(Path.FillType.WINDING);
-        buildBeam(darkPath, youX, headY, dp(560f));
-        darkPath.addCircle(youX, groundY - dp(50f), dp(95f), Path.Direction.CW);
+        buildBeam(darkPath, lx, ly, beamLen);
+        darkPath.addCircle(youX, groundY - dp(60f), dp(105f), Path.Direction.CW);
+        // Light holes sized to the props, which are drawn at the figures' scale since 3.25.0.
         if (houseX >= 0) {
-            darkPath.addCircle(houseX, groundY - dp(30f), dp(120f), Path.Direction.CW);
+            darkPath.addCircle(houseX, groundY - dp(60f), dp(150f), Path.Direction.CW);
         }
         if (survX >= 0) {
-            darkPath.addCircle(survX, groundY - dp(90f), dp(80f), Path.Direction.CW);
+            darkPath.addCircle(survX, groundY - dp(150f), dp(140f), Path.Direction.CW);
         }
         if (nightDropX >= 0) {
             // The crate burns a beacon, and the parachute is white against the sky.
-            darkPath.addCircle(nightDropX, Math.min(groundY - dp(40f), nightDropY - dp(20f)),
-                    dp(110f), Path.Direction.CW);
+            darkPath.addCircle(nightDropX, Math.min(groundY - dp(50f), nightDropY - dp(30f)),
+                    dp(130f), Path.Direction.CW);
         }
         if (nightWallX >= 0) {
-            darkPath.addCircle(nightWallX, groundY - dp(30f), dp(95f), Path.Direction.CW);
+            darkPath.addCircle(nightWallX, groundY - dp(50f), dp(120f), Path.Direction.CW);
         }
         float flareLight = 0f;
         if (sinceFlare >= FLARE_FLIGHT && sinceFlare < FLARE_FLIGHT + 3.0) {
@@ -2072,25 +2097,15 @@ final class ZombieRunGame extends GameView {
         c.restore();
 
         // Warm light inside the beam, and a red wash from the flare.
-        beamPath.reset();
-        buildBeam(beamPath, youX, headY, dp(560f));
-        paint.setColor(0x1CFFE8B0);
-        c.drawPath(beamPath, paint);
+        drawBeamLight(c, groundY, 1.25f);
         if (flareLight > 0) {
             Fx.glow(c, flareToX, burstY, dp(300f), ((int) (130 * flareLight) << 24) | 0xFF3A1A);
         }
 
         // Fog, thicker at night, drifting through the light and the dark alike.
-        for (int i = 0; i < 7; i++) {
-            float fx = (float) (((i * 330) - sessionMeters * (w / 90f) * 0.5 - sessionSeconds * dp(18f))
-                    % (w + dp(600f)));
-            if (fx < -dp(300f)) {
-                fx += w + dp(600f);
-            }
-            float fy = groundY - dp(30f) - (i % 3) * dp(38f);
-            paint.setColor(i % 2 == 0 ? 0x26A9B6CC : 0x1C8F9CB4);
-            c.drawOval(fx - dp(280f), fy - dp(34f), fx + dp(280f), fy + dp(30f), paint);
-        }
+        float ppm = w / 90f;
+        fogPuffs(c, w, groundY - dp(20f), 7, dp(40f), 3.0f, 0.5f, 58, dp(18f), sessionMeters, ppm, 0.5f, 900);
+        fogPuffs(c, w, groundY - dp(95f), 5, dp(50f), 3.6f, 0.45f, 34, dp(12f), sessionMeters, ppm, 0.35f, 950);
 
         // Eyes in the dark.
         for (int i = 0; i < eyeCount; i++) {
@@ -2102,43 +2117,83 @@ final class ZombieRunGame extends GameView {
 
     /** The torch cone: forward along the ground, swinging back over your shoulder when something closes. */
     private void buildBeam(Path p, float x, float headY, float len) {
-        double forward = 0.20;
-        double back = Math.PI - 0.20;
-        double a = forward + (back - forward) * lookBack;
-        double spread = 0.26;
-        float ox = x + (float) Math.cos(a) * dp(10f);
+        double a = beamAngle();
+        double spread = BEAM_SPREAD;
+        float ox = x;
         p.moveTo(ox, headY);
         p.lineTo(ox + (float) Math.cos(a - spread) * len, headY + (float) Math.sin(a - spread) * len);
         p.lineTo(ox + (float) Math.cos(a + spread) * len, headY + (float) Math.sin(a + spread) * len);
         p.close();
     }
 
+    /**
+     * The safe house, at the figures' scale: weatherboarded walls with a moonlit corner, a roof with
+     * a lit ridge, warm flickering windows, a boarded door with light at the jamb and a porch lamp.
+     */
     private void drawSafeHouse(Canvas c, float houseX, float groundY, float dt) {
-        paint.setColor(safe() ? ACCENT : 0xFF3B4A5E);
-        c.drawRect(houseX - dp(22f), groundY - dp(46f), houseX + dp(22f), groundY, paint);
-        // Roof.
-        path.reset();
-        path.moveTo(houseX - dp(28f), groundY - dp(46f));
-        path.lineTo(houseX, groundY - dp(66f));
-        path.lineTo(houseX + dp(28f), groundY - dp(46f));
+        boolean in = safe();
+        float k = HOUSE_K;
+        Fx.glow(c, houseX + dp(10f), groundY - dp(40f), dp(180f), in ? 0x5035D0BA : 0x40FFB45A);
+        paint.setColor(0x70000000);
+        c.drawOval(houseX - dp(30f) * k, groundY - dp(4f), houseX + dp(36f) * k, groundY + dp(8f), paint);
+        c.save();
+        c.scale(k, k, houseX, groundY);
+        float x = houseX;
+        float g = groundY;
+        paint.setColor(in ? 0xFF24655C : 0xFF323D4F);
+        c.drawRect(x - dp(22f), g - dp(46f), x + dp(22f), g, paint);
+        paint.setColor(0x2A000000);
+        for (int i = 1; i < 9; i++) {
+            float ry = g - dp(46f) + i * dp(5f);
+            c.drawRect(x - dp(22f), ry, x + dp(22f), ry + dp(0.8f), paint);
+        }
+        paint.setColor(in ? 0x6035D0BA : 0x406F8CB8);
+        c.drawRect(x + dp(19.5f), g - dp(46f), x + dp(22f), g, paint);
+        paint.setColor(0xFF2A3342);
+        c.drawRect(x + dp(10f), g - dp(66f), x + dp(17f), g - dp(50f), paint);
+        paint.setColor(0xFF3A4558);
+        c.drawRect(x + dp(9f), g - dp(68f), x + dp(18f), g - dp(65f), paint);
+        path.rewind();
+        path.moveTo(x - dp(29f), g - dp(45f));
+        path.lineTo(x, g - dp(67f));
+        path.lineTo(x + dp(29f), g - dp(45f));
         path.close();
-        paint.setColor(0xFF2A3446);
+        paint.setColor(0xFF1C2330);
         c.drawPath(path, paint);
-        paint.setColor(0xFF0A0E14);
-        c.drawRect(houseX - dp(6f), groundY - dp(24f), houseX + dp(6f), groundY, paint);
-        label(c, "SAFE HOUSE", houseX, groundY - dp(74f), 8f, safe() ? ACCENT : FAINT, Paint.Align.CENTER);
-        // Warm windows and chimney smoke: somewhere worth reaching.
-        Fx.glow(c, houseX, groundY - dp(30f), dp(60f), safe() ? 0x6635D0BA : 0x44FFB45A);
+        paint.setColor(0x55000000);
+        c.drawRect(x - dp(22f), g - dp(46f), x + dp(22f), g - dp(43f), paint);
+        limb.setStrokeWidth(dp(1.6f));
+        limb.setColor(0xFF51627E);
+        c.drawLine(x, g - dp(67f), x + dp(29f), g - dp(45f), limb);
+        float fl = 0.85f + 0.15f * (float) Math.sin(sessionSeconds * 7.3);
+        int win = ((int) (0x90 * fl) << 24) | 0xFFC05A;
+        Fx.glow(c, x - dp(12.5f), g - dp(34f), dp(14f), win);
+        Fx.glow(c, x + dp(12.5f), g - dp(34f), dp(14f), win);
         paint.setColor(0xFFFFD27A);
-        c.drawRect(houseX - dp(16f), groundY - dp(40f), houseX - dp(9f), groundY - dp(33f), paint);
-        c.drawRect(houseX + dp(9f), groundY - dp(40f), houseX + dp(16f), groundY - dp(33f), paint);
-        paint.setColor(0xFF3B4A5E);
-        c.drawRect(houseX + dp(10f), groundY - dp(64f), houseX + dp(16f), groundY - dp(52f), paint);
+        c.drawRect(x - dp(16f), g - dp(38f), x - dp(9f), g - dp(30f), paint);
+        c.drawRect(x + dp(9f), g - dp(38f), x + dp(16f), g - dp(30f), paint);
+        paint.setColor(0xFF6A4A2A);
+        c.drawRect(x - dp(13f), g - dp(38f), x - dp(12f), g - dp(30f), paint);
+        c.drawRect(x - dp(16f), g - dp(34.5f), x - dp(9f), g - dp(33.5f), paint);
+        c.drawRect(x + dp(12f), g - dp(38f), x + dp(13f), g - dp(30f), paint);
+        c.drawRect(x + dp(9f), g - dp(34.5f), x + dp(16f), g - dp(33.5f), paint);
+        paint.setColor(0xFF140F0C);
+        c.drawRect(x - dp(6f), g - dp(24f), x + dp(6f), g, paint);
+        paint.setColor(in ? 0xFF7FE8D8 : 0xFFFFC870);
+        c.drawRect(x - dp(6f), g - dp(24f), x - dp(4.6f), g, paint);
+        paint.setColor(0xFF6B5636);
+        c.drawRect(x - dp(7f), g - dp(18f), x + dp(7f), g - dp(16f), paint);
+        c.drawRect(x - dp(7f), g - dp(9f), x + dp(7f), g - dp(7f), paint);
+        Fx.glow(c, x + dp(9f), g - dp(22f), dp(10f), 0xB0FFD27A);
+        paint.setColor(0xFFFFF0C0);
+        c.drawCircle(x + dp(9f), g - dp(22f), dp(1.6f), paint);
+        c.restore();
+        label(c, "SAFE HOUSE", houseX, groundY - dp(67f) * k - dp(10f), 8f, in ? ACCENT : DIM, Paint.Align.CENTER);
         smokeAccum += dt * 4f;
         while (smokeAccum >= 1f) {
             smokeAccum -= 1f;
-            smoke.spawn(houseX + dp(13f), groundY - dp(66f), dp(6f), -dp(20f) - (float) Math.random() * dp(10f),
-                    1.6f, dp(5f), 0x557A8494, false);
+            smoke.spawn(houseX + dp(13.5f) * k, groundY - dp(68f) * k, dp(6f), -dp(20f) - (float) Math.random() * dp(10f),
+                    1.8f, dp(8f), 0x557A8494, false);
         }
     }
 
@@ -2147,6 +2202,8 @@ final class ZombieRunGame extends GameView {
      * road, a rope ladder swinging. It sits low over a landing pad so it reads as somewhere to reach.
      */
     private void drawChopper(Canvas c, float x, float groundY, float dt) {
+        c.save();
+        c.scale(CHOPPER_K, CHOPPER_K, x, groundY);
         float hover = (float) Math.sin(sessionSeconds * 1.6) * dp(5f);
         float bodyY = groundY - dp(150f) + hover;
         // Spotlight down onto the road.
@@ -2171,8 +2228,14 @@ final class ZombieRunGame extends GameView {
         c.drawRect(x + dp(20f), bodyY - dp(6f), x + dp(78f), bodyY + dp(2f), paint);
         paint.setColor(0xFF2E4436);
         c.drawRect(x + dp(70f), bodyY - dp(26f), x + dp(76f), bodyY + dp(2f), paint);
+        paint.setColor(0xFF2E4436);
+        c.drawOval(x - dp(30f), bodyY + dp(2f), x + dp(24f), bodyY + dp(16f), paint);
+        paint.setColor(0x665E8A70);
+        c.drawOval(x - dp(26f), bodyY - dp(19f), x + dp(16f), bodyY - dp(12f), paint);
         paint.setColor(0xFF9FD8FF);
         c.drawOval(x - dp(36f), bodyY - dp(12f), x - dp(8f), bodyY + dp(8f), paint);
+        paint.setColor(0xCCFFFFFF);
+        c.drawOval(x - dp(31f), bodyY - dp(9f), x - dp(22f), bodyY - dp(4f), paint);
         paint.setColor(0xFF22303E);
         c.drawRect(x - dp(30f), bodyY + dp(20f), x + dp(18f), bodyY + dp(23f), paint);
         // Rotor: a blur that actually turns.
@@ -2204,10 +2267,11 @@ final class ZombieRunGame extends GameView {
         }
         label(c, safe() ? "EXTRACTION" : "EVAC  ·  " + Math.max(0, Math.round(evacAt - runMeters())) + " m",
                 x, bodyY - dp(44f), 11f, ACCENT, Paint.Align.CENTER);
+        c.restore();
         smokeAccum += dt * 3f;
         while (smokeAccum >= 1f) {
             smokeAccum -= 1f;
-            smoke.spawn(x, groundY - dp(4f), -dp(40f) - (float) Math.random() * dp(30f), -dp(8f),
+            smoke.spawn(x, groundY - dp(4f) * CHOPPER_K, -dp(40f) - (float) Math.random() * dp(30f), -dp(8f),
                     1.2f, dp(6f), 0x44B0BCCC, false);
         }
     }
@@ -2220,17 +2284,29 @@ final class ZombieRunGame extends GameView {
         int whole = (int) Math.ceil(planks);
         boolean smashing = wallHolding && barricadeHp > 0 && sessionSeconds - barricadeHitAt < 0.25;
         float jitter = smashing ? (float) Math.sin(sessionSeconds * 70) * dp(3f) : 0f;
-        // Posts.
+        paint.setColor(0x66000000);
+        c.drawOval(x - dp(34f) * WALL_K, groundY - dp(4f), x + dp(34f) * WALL_K, groundY + dp(6f), paint);
+        c.save();
+        c.scale(WALL_K, WALL_K, x, groundY);
+        // Posts, lit on the moon side.
         paint.setColor(0xFF5A452E);
         c.drawRect(x - dp(26f) + jitter, groundY - dp(62f), x - dp(19f) + jitter, groundY, paint);
         c.drawRect(x + dp(19f) + jitter, groundY - dp(62f), x + dp(26f) + jitter, groundY, paint);
+        paint.setColor(0xFF8A6E48);
+        c.drawRect(x - dp(21f) + jitter, groundY - dp(62f), x - dp(19f) + jitter, groundY, paint);
+        c.drawRect(x + dp(24f) + jitter, groundY - dp(62f), x + dp(26f) + jitter, groundY, paint);
         for (int i = 0; i < whole; i++) {
             float py = groundY - dp(6f) - i * dp(4.2f);
             float tilt = ((i * 7) % 5 - 2) * dp(1.2f);
+            float pl = x - dp(30f) + jitter + tilt;
+            float pr = x + dp(30f) + jitter + tilt;
             paint.setColor(i % 2 == 0 ? 0xFF9A7B4F : 0xFF876A42);
-            c.drawRect(x - dp(30f) + jitter + tilt, py - dp(4f), x + dp(30f) + jitter + tilt, py, paint);
-            paint.setColor(0x33000000);
-            c.drawRect(x - dp(30f) + jitter + tilt, py - dp(1.2f), x + dp(30f) + jitter + tilt, py, paint);
+            c.drawRect(pl, py - dp(4f), pr, py, paint);
+            paint.setColor(0x40FFE8C0);
+            c.drawRect(pl, py - dp(4f), pr, py - dp(3.3f), paint);
+            paint.setColor(0x40000000);
+            c.drawRect(pl, py - dp(1.2f), pr, py, paint);
+            c.drawRect(pl + dp(12f + (i * 5) % 9), py - dp(2.6f), pl + dp(22f + (i * 5) % 9), py - dp(2f), paint);
         }
         if (whole > 0) {
             // Nail heads catch what light there is.
@@ -2242,16 +2318,17 @@ final class ZombieRunGame extends GameView {
             c.drawRect(x - dp(30f), groundY - dp(6f), x + dp(30f), groundY - dp(2f), paint);
             c.drawRect(x - dp(14f), groundY - dp(12f), x + dp(20f), groundY - dp(8f), paint);
         }
+        c.restore();
         if (smashing) {
-            sparks.spawn(x - dp(26f), groundY - dp(20f) - (float) Math.random() * dp(30f),
+            sparks.spawn(x - dp(26f) * WALL_K, groundY - (dp(20f) + (float) Math.random() * dp(30f)) * WALL_K,
                     -dp(40f) - (float) Math.random() * dp(80f), -dp(60f) - (float) Math.random() * dp(60f),
                     0.7f, dp(2.4f), 0xFFB08A50, true);
         }
         if (wallHolding && barricadeHp > 0) {
             label(c, "HOLDING  " + PersonalBests.formatTime((float) (barricadeHp * SEC_PER_PLANK)),
-                    x, groundY - dp(74f), 10f, 0xFFD6A46A, Paint.Align.CENTER);
+                    x, groundY - dp(70f) * WALL_K, 10f, 0xFFD6A46A, Paint.Align.CENTER);
         } else if (whole > 0) {
-            label(c, whole + " PLANKS", x, groundY - dp(74f), 9f, 0xFFD6A46A, Paint.Align.CENTER);
+            label(c, whole + " PLANKS", x, groundY - dp(70f) * WALL_K, 9f, 0xFFD6A46A, Paint.Align.CENTER);
         }
     }
 
@@ -2285,6 +2362,12 @@ final class ZombieRunGame extends GameView {
         float left = (float) Math.max(0, dropDeadline - sessionSeconds);
         float frac = (float) Math.max(0, Math.min(1, left / DROP_WINDOW));
         int tint = dropLoot == LOOT_MEDKIT ? 0xFFE04A4A : dropLoot == LOOT_PLANKS ? 0xFFD6A46A : 0xFFFF7A4D;
+        if (fall >= 1f) {
+            paint.setColor(0x66000000);
+            c.drawOval(x - dp(30f) * CRATE_K, groundY - dp(4f), x + dp(32f) * CRATE_K, groundY + dp(6f), paint);
+        }
+        c.save();
+        c.scale(CRATE_K, CRATE_K, x, y);
         if (fall < 1f) {
             // Canopy.
             paint.setColor(0xFFE8EDF5);
@@ -2302,16 +2385,26 @@ final class ZombieRunGame extends GameView {
             dropSmokeAccum += dt * 8f;
             while (dropSmokeAccum >= 1f) {
                 dropSmokeAccum -= 1f;
-                smoke.spawn(x + dp(20f), groundY - dp(12f), dp(6f), -dp(26f), 1.4f, dp(5f),
+                smoke.spawn(x + dp(20f) * CRATE_K, groundY - dp(12f) * CRATE_K, dp(6f), -dp(26f), 1.6f, dp(7f),
                         0x55FF9A6A, false);
             }
         }
-        // Crate.
+        // Crate: planks, a lit top edge, iron corners.
         paint.setColor(0xFF7E6136);
         c.drawRect(x - dp(20f), y - dp(28f), x + dp(20f), y, paint);
+        paint.setColor(0x30000000);
+        c.drawRect(x - dp(20f), y - dp(21.5f), x + dp(20f), y - dp(21f), paint);
+        c.drawRect(x - dp(20f), y - dp(7f), x + dp(20f), y - dp(6.5f), paint);
+        paint.setColor(0xFFA88850);
+        c.drawRect(x - dp(20f), y - dp(28f), x + dp(20f), y - dp(26.5f), paint);
         paint.setColor(0xFF5E4726);
         c.drawRect(x - dp(20f), y - dp(16f), x + dp(20f), y - dp(12f), paint);
         c.drawRect(x - dp(3f), y - dp(28f), x + dp(3f), y, paint);
+        paint.setColor(0xFF3A3F48);
+        c.drawRect(x - dp(20f), y - dp(28f), x - dp(16f), y - dp(24f), paint);
+        c.drawRect(x + dp(16f), y - dp(28f), x + dp(20f), y - dp(24f), paint);
+        c.drawRect(x - dp(20f), y - dp(4f), x - dp(16f), y, paint);
+        c.drawRect(x + dp(16f), y - dp(4f), x + dp(20f), y, paint);
         paint.setColor(tint);
         c.drawRect(x - dp(12f), y - dp(24f), x - dp(6f), y - dp(18f), paint);
         if (dropLoot == LOOT_MEDKIT) {
@@ -2331,26 +2424,51 @@ final class ZombieRunGame extends GameView {
                 frac > 0.18f ? TEXT : BAD, Paint.Align.CENTER);
         label(c, dropLoot == LOOT_MEDKIT ? "MEDKIT" : dropLoot == LOOT_PLANKS ? "PLANKS" : "FLARES",
                 x, y - dp(70f), 9f, tint, Paint.Align.CENTER);
+        c.restore();
     }
 
     /** A wrecked car with a survivor on the roof, waving, a lighter held up in the dark. */
     private void drawWreck(Canvas c, float sx, float groundY, double threat) {
+        paint.setColor(0x70000000);
+        c.drawOval(sx - dp(50f) * CAR_K, groundY - dp(4f), sx + dp(52f) * CAR_K, groundY + dp(7f), paint);
+        c.save();
+        c.scale(CAR_K, CAR_K, sx, groundY);
+        // A rusted-out car: body, cabin, a moonlit roofline, rust, smashed glass and a flat.
         paint.setColor(0xFF4A3A34);
         c.drawRoundRect(sx - dp(46f), groundY - dp(28f), sx + dp(46f), groundY - dp(8f), dp(6f), dp(6f), paint);
         paint.setColor(0xFF3A2E2A);
         c.drawRoundRect(sx - dp(26f), groundY - dp(44f), sx + dp(20f), groundY - dp(26f), dp(6f), dp(6f), paint);
+        paint.setColor(0x60A9B8CC);
+        c.drawRect(sx - dp(22f), groundY - dp(44f), sx + dp(16f), groundY - dp(43f), paint);
+        c.drawRect(sx - dp(44f), groundY - dp(28f), sx + dp(44f), groundY - dp(27f), paint);
+        paint.setColor(0xFF6A3E26);
+        c.drawCircle(sx - dp(34f), groundY - dp(16f), dp(4f), paint);
+        c.drawCircle(sx + dp(12f), groundY - dp(13f), dp(3f), paint);
+        c.drawCircle(sx + dp(30f), groundY - dp(20f), dp(2.5f), paint);
+        paint.setColor(0x40000000);
+        c.drawRect(sx - dp(4f), groundY - dp(26f), sx - dp(3f), groundY - dp(9f), paint);
         paint.setColor(0xFF1C2230);
         c.drawRect(sx - dp(21f), groundY - dp(40f), sx - dp(4f), groundY - dp(29f), paint);
         c.drawRect(sx, groundY - dp(40f), sx + dp(15f), groundY - dp(29f), paint);
+        limb.setStrokeWidth(dp(0.8f));
+        limb.setColor(0x99A9C1E6);
+        c.drawLine(sx + dp(3f), groundY - dp(38f), sx + dp(9f), groundY - dp(32f), limb);
+        c.drawLine(sx + dp(9f), groundY - dp(32f), sx + dp(13f), groundY - dp(36f), limb);
+        c.drawLine(sx - dp(18f), groundY - dp(31f), sx - dp(10f), groundY - dp(38f), limb);
         paint.setColor(0xFF111111);
         c.drawCircle(sx - dp(28f), groundY - dp(7f), dp(8f), paint);
-        c.drawCircle(sx + dp(28f), groundY - dp(7f), dp(8f), paint);
-        // Hazard light blinking.
+        c.drawOval(sx + dp(19f), groundY - dp(13f), sx + dp(37f), groundY, paint);
+        paint.setColor(0xFF3A3A3A);
+        c.drawCircle(sx - dp(28f), groundY - dp(7f), dp(3.5f), paint);
+        c.drawCircle(sx + dp(28f), groundY - dp(6f), dp(3f), paint);
         if (((int) (sessionSeconds * 2)) % 2 == 0) {
             Fx.glow(c, sx + dp(44f), groundY - dp(22f), dp(22f), 0xAAFFB02A);
+            paint.setColor(0xFFFFD27A);
+            c.drawCircle(sx + dp(44f), groundY - dp(22f), dp(2f), paint);
         }
-        float roof = groundY - dp(44f);
-        drawFigure(c, sx - dp(4f), roof, survivorShirt, 0f, 0f, K_SURVIVOR, true);
+        c.restore();
+        float roof = groundY - dp(44f) * CAR_K;
+        drawFigure(c, sx - dp(4f) * CAR_K, roof, survivorShirt, 0f, 0f, K_SURVIVOR, true);
         boolean clear = threat >= RESCUE_CLEAR;
         label(c, NAMES[survivorName] + (clear ? " - COMING!" : " - TOO CLOSE, HIDING?"), sx,
                 roof - 50f * FIGURE_SCALE * 0.9f * dp(1f), 10f, clear ? 0xFF8FB4FF : WARN, Paint.Align.CENTER);
@@ -2363,144 +2481,1202 @@ final class ZombieRunGame extends GameView {
         }
     }
 
-    /** A torch beam thrown forward along the ground - the night ahead was flat black. */
-    private void drawTorch(Canvas c, float x, float groundY) {
-        float headY = groundY - 40f * FIGURE_SCALE * dp(1f);
-        float flicker = 1f + (float) Math.sin(sessionSeconds * 17) * 0.05f;
-        path.reset();
-        path.moveTo(x + dp(8f), headY);
-        path.lineTo(x + dp(300f) * flicker, groundY - dp(70f));
-        path.lineTo(x + dp(300f) * flicker, groundY + dp(26f));
-        path.close();
-        paint.setColor(0x18FFF3C4);
-        c.drawPath(path, paint);
-        Fx.glow(c, x + dp(120f), groundY - dp(14f), dp(120f), 0x20FFF3C4);
+    /* ---------- 3.25.0 graphics: the torch ---------- */
+
+    /** Beam direction: forward along the road, swinging back over your shoulder when something closes. */
+    private double beamAngle() {
+        return 0.20 + (Math.PI - 0.40) * lookBack;
     }
 
     /**
-     * A chunky figure with legs that swing with distance covered. Walkers reach forward, runners are
-     * lean and pitched almost flat, the brute is half as big again. {@code wave}: a survivor waving
-     * for help, or the brute roaring with its arms up.
+     * The headlamp's light, added to the scene rather than painted over it: a warm cone that fades
+     * with distance, a brighter core, dust motes drifting in it, and a pool where it meets the road.
+     * Anything inside it - a zombie, a gravestone, the fog - comes out brighter, which is what a
+     * torch does and what the flat grey wedge it replaces did not.
+     */
+    private void drawBeamLight(Canvas c, float groundY, float strength) {
+        if (lampX < 0 || beamShader == null) {
+            return;
+        }
+        double a = beamAngle();
+        float flicker = 0.9f + 0.06f * (float) Math.sin(sessionSeconds * 17) + 0.04f * (float) Math.sin(sessionSeconds * 5.3);
+        int alpha = (int) Math.min(255f, 255f * flicker * strength);
+        c.save();
+        // The road is seen side-on: the light stops at its near edge instead of spilling down the screen.
+        c.clipRect(-dp(80f), -dp(80f), sceneW + dp(80f), groundY + dp(34f));
+        c.translate(lampX, lampY);
+        c.rotate((float) Math.toDegrees(a));
+        light.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        light.setAlpha(alpha);
+        light.setShader(beamShader);
+        c.drawPath(beamCone, light);
+        light.setShader(beamCoreShader);
+        c.drawPath(beamCore, light);
+        light.setShader(null);
+        float spreadT = (float) Math.tan(BEAM_SPREAD);
+        light.setColor(0xFFFFF0C8);
+        for (int i = 0; i < 12; i++) {
+            float u = (float) ((hash(i * 17 + 3) + sessionSeconds * (0.05 + 0.04 * hash(i * 5 + 1))) % 1.0);
+            float mx = beamLen * (0.1f + 0.85f * u);
+            float my = mx * spreadT * (hash(i * 11 + 7) * 2f - 1f) * 0.85f
+                    + (float) Math.sin(sessionSeconds * 1.3 + i) * dp(6f);
+            light.setAlpha((int) (alpha * 0.55f * (1f - u)));
+            c.drawCircle(mx, my, dp(1.8f), light);
+        }
+        c.restore();
+        // The pool of light on the road, along the lower edge of the cone.
+        double r = a + (Math.cos(a) >= 0 ? 0.6 : -0.6) * BEAM_SPREAD;
+        double sinR = Math.sin(r);
+        if (sinR > 0.05) {
+            float dist = (float) Math.min(beamLen * 0.85, (groundY - lampY) / sinR);
+            float px = lampX + (float) Math.cos(r) * dist;
+            float k = 1f - 0.6f * dist / beamLen;
+            light.setColor(0xFFFFFFFF);
+            light.setAlpha((int) (alpha * 0.6f * k));
+            light.setShader(poolShader);
+            c.save();
+            c.translate(px, groundY + dp(8f));
+            c.scale(1.9f, 0.24f);
+            c.drawCircle(0, 0, poolR, light);
+            c.restore();
+            light.setShader(null);
+        }
+    }
+
+    /* ---------- 3.25.0 graphics: the scene cache ---------- */
+
+    /** Builds every cached shape and gradient for this view size. Runs once, not per frame. */
+    private void ensureScene(float w, float h) {
+        if (w == sceneW && h == sceneH) {
+            return;
+        }
+        sceneW = w;
+        sceneH = h;
+        float groundY = h * 0.70f;
+        Shader.TileMode clamp = Shader.TileMode.CLAMP;
+
+        // Stars, kept clear of the moon's halo.
+        float mx = w * 0.80f;
+        float my = h * 0.20f;
+        float keep = dp(160f);
+        int n = 0;
+        for (int k = 0; n < STARS && k < STARS * 4; k++) {
+            float sx = hash(k * 3 + 1) * w;
+            float sy = hash(k * 3 + 2) * groundY * 0.72f;
+            float dx = sx - mx;
+            float dy = sy - my;
+            if (dx * dx + dy * dy < keep * keep) {
+                continue;
+            }
+            float r = hash(k * 3 + 3);
+            starX[n] = sx;
+            starY[n] = sy;
+            starR[n] = dp(1.0f) + r * r * dp(1.8f);
+            starA[n] = 90 + (int) (hash(k * 7 + 5) * 150);
+            n++;
+        }
+        starCount = n;
+
+        fogR = dp(100f);
+        fogShader = new RadialGradient(0, 0, fogR, new int[] {0xFFC9D4E6, 0x8CC9D4E6, 0x00C9D4E6},
+                new float[] {0f, 0.45f, 1f}, clamp);
+        float mr = dp(30f);
+        moonShader = new RadialGradient(mr * 0.35f, -mr * 0.35f, mr * 1.5f,
+                new int[] {0xFFFFFFFF, 0xFFE6ECF4, 0xFFA2B0C4}, new float[] {0f, 0.5f, 1f}, clamp);
+        groundShader = new LinearGradient(0, groundY, 0, h, new int[] {0xFF1D2B20, 0xFF121B15, 0xFF060A08},
+                new float[] {0f, 0.35f, 1f}, clamp);
+        pathShader = new LinearGradient(0, groundY - dp(3f), 0, groundY + dp(32f), 0xFF3B3B37, 0xFF1D1F1C, clamp);
+        bottomShader = new LinearGradient(0, h - dp(78f), 0, h, 0x00060B12, 0xD0060B12, clamp);
+        glossShader = new LinearGradient(0, 0, 0, GLOSS_UNIT,
+                new int[] {0x30FFFFFF, 0x0AFFFFFF, 0x00000000, 0x2E000000},
+                new float[] {0f, 0.48f, 0.52f, 1f}, clamp);
+
+        beamLen = dp(560f);
+        float spreadT = (float) Math.tan(BEAM_SPREAD);
+        beamCone.rewind();
+        beamCone.moveTo(0, -dp(5f));
+        beamCone.lineTo(beamLen, -beamLen * spreadT);
+        beamCone.lineTo(beamLen, beamLen * spreadT);
+        beamCone.lineTo(0, dp(5f));
+        beamCone.close();
+        beamCore.rewind();
+        beamCore.moveTo(0, -dp(3f));
+        beamCore.lineTo(beamLen * 0.8f, -beamLen * 0.8f * spreadT * 0.42f);
+        beamCore.lineTo(beamLen * 0.8f, beamLen * 0.8f * spreadT * 0.42f);
+        beamCore.lineTo(0, dp(3f));
+        beamCore.close();
+        beamShader = new LinearGradient(0, 0, beamLen, 0, new int[] {0x5CFFEBB8, 0x26FFE2A6, 0x00FFE2A6},
+                new float[] {0f, 0.4f, 1f}, clamp);
+        beamCoreShader = new LinearGradient(0, 0, beamLen * 0.8f, 0, 0x5AFFF4D6, 0x00FFF0C8, clamp);
+        poolR = dp(110f);
+        poolShader = new RadialGradient(0, 0, poolR, new int[] {0x99FFE6B0, 0x40FFE6B0, 0x00FFE6B0},
+                new float[] {0f, 0.5f, 1f}, clamp);
+
+        buildTrees();
+        buildStones();
+        buildTorsos();
+        int[] skins = {0xFFF1C27D, 0xFFE8B98A, 0xFF8DB386, 0xFFB4C85A, 0xFF5E8F66};
+        for (int k = 0; k < 5; k++) {
+            float r = headUnits(k) * figureUnit(k);
+            headShader[k] = new RadialGradient(0.35f * r, -0.4f * r, 1.45f * r,
+                    new int[] {tone(skins[k], 1.35f), skins[k], tone(skins[k], 0.5f)},
+                    new float[] {0f, 0.45f, 1f}, clamp);
+        }
+    }
+
+    /** One figure unit in pixels: the brute is half as big again, survivors a little smaller. */
+    private float figureUnit(int kind) {
+        return dp(FIGURE_SCALE) * (kind == K_BRUTE ? 1.5f : kind == K_SURVIVOR ? 0.9f : 1f);
+    }
+
+    private static float headUnits(int kind) {
+        return kind == K_BRUTE ? 4.8f : kind == K_RUNNER ? 5.2f : kind == K_WALKER ? 5.8f : 5.6f;
+    }
+
+    private static float torsoUnits(int kind) {
+        return kind == K_BRUTE ? 17.8f : kind == K_WALKER ? 16.2f : kind == K_RUNNER ? 15.5f : 15.6f;
+    }
+
+    /** Dead trees: a tapered trunk that forks into gnarled branches, deterministic per variant. */
+    private void buildTrees() {
+        float tall = dp(150f);
+        for (int k = 0; k < 3; k++) {
+            Path p = new Path();
+            p.moveTo(-0.11f * tall, 0);
+            p.lineTo(-0.035f * tall, -0.10f * tall);
+            p.lineTo(0.035f * tall, -0.10f * tall);
+            p.lineTo(0.11f * tall, 0);
+            p.close();
+            branch(p, 0, 0, (hash(k * 31 + 1) - 0.5f) * 0.16f, tall * (0.36f + 0.08f * hash(k * 31 + 2)),
+                    0.085f * tall, 4, k * 97 + 11);
+            treeShape[k] = p;
+        }
+    }
+
+    /** One limb as a tapered quad, then two or three children off its tip. Same winding throughout. */
+    private void branch(Path p, float x, float y, float ang, float len, float wid, int depth, int seed) {
+        float ex = x + (float) Math.sin(ang) * len;
+        float ey = y - (float) Math.cos(ang) * len;
+        float nx = (float) Math.cos(ang);
+        float ny = (float) Math.sin(ang);
+        float w0 = wid * 0.5f;
+        float w1 = wid * 0.32f;
+        p.moveTo(x - nx * w0, y - ny * w0);
+        p.lineTo(ex - nx * w1, ey - ny * w1);
+        p.lineTo(ex + nx * w1, ey + ny * w1);
+        p.lineTo(x + nx * w0, y + ny * w0);
+        p.close();
+        if (depth == 0) {
+            return;
+        }
+        int kids = hash(seed) > 0.6f ? 3 : 2;
+        for (int i = 0; i < kids; i++) {
+            float spread = 0.42f + hash(seed * 5 + i) * 0.5f;
+            float a = ang + (i == 0 ? -spread : i == 1 ? spread : (hash(seed * 9 + i) - 0.5f) * 0.4f);
+            a = Math.max(-1.35f, Math.min(1.35f, a));   // never past horizontal: dead trees reach, they do not droop
+            branch(p, ex, ey, a, len * (0.55f + hash(seed * 7 + i) * 0.25f), wid * 0.62f, depth - 1,
+                    seed * 4 + i + 1);
+        }
+    }
+
+    /** Headstone, cross, obelisk and slab, base centred on the origin. */
+    private void buildStones() {
+        float u = dp(1f);
+        Path p0 = new Path();
+        p0.moveTo(-15 * u, 0);
+        p0.lineTo(-15 * u, -30 * u);
+        p0.quadTo(-15 * u, -45 * u, 0, -45 * u);
+        p0.quadTo(15 * u, -45 * u, 15 * u, -30 * u);
+        p0.lineTo(15 * u, 0);
+        p0.close();
+        Path p1 = new Path();
+        p1.addRect(-4 * u, -58 * u, 4 * u, -4 * u, Path.Direction.CW);
+        p1.addRect(-15 * u, -46 * u, 15 * u, -38 * u, Path.Direction.CW);
+        p1.addRect(-11 * u, -7 * u, 11 * u, 0, Path.Direction.CW);
+        Path p2 = new Path();
+        p2.moveTo(-9 * u, -6 * u);
+        p2.lineTo(-7 * u, -52 * u);
+        p2.lineTo(0, -63 * u);
+        p2.lineTo(7 * u, -52 * u);
+        p2.lineTo(9 * u, -6 * u);
+        p2.close();
+        p2.addRect(-13 * u, -7 * u, 13 * u, 0, Path.Direction.CW);
+        Path p3 = new Path();
+        p3.moveTo(-21 * u, 0);
+        p3.lineTo(-21 * u, -22 * u);
+        p3.quadTo(-21 * u, -29 * u, -13 * u, -29 * u);
+        p3.quadTo(0, -37 * u, 13 * u, -29 * u);
+        p3.quadTo(21 * u, -29 * u, 21 * u, -22 * u);
+        p3.lineTo(21 * u, 0);
+        p3.close();
+        stoneShape[0] = p0;
+        stoneShape[1] = p1;
+        stoneShape[2] = p2;
+        stoneShape[3] = p3;
+    }
+
+    /** Torsos in hip-local coordinates (up is -y, the direction of travel +x), per figure kind. */
+    private void buildTorsos() {
+        for (int k = 0; k < 5; k++) {
+            float s = figureUnit(k);
+            Path p = new Path();
+            if (k == K_YOU || k == K_SURVIVOR) {
+                p.moveTo(-4.4f * s, 0.5f * s);
+                p.lineTo(-5.0f * s, -12f * s);
+                p.quadTo(-5.2f * s, -15.5f * s, -1.5f * s, -15.6f * s);
+                p.lineTo(2.5f * s, -15.6f * s);
+                p.quadTo(5.8f * s, -15.4f * s, 5.4f * s, -12f * s);
+                p.lineTo(4.6f * s, 0.5f * s);
+            } else if (k == K_RUNNER) {
+                p.moveTo(-3.6f * s, 1f * s);
+                p.lineTo(-2f * s, -0.6f * s);
+                p.lineTo(-0.5f * s, 1.6f * s);
+                p.lineTo(1.2f * s, -0.4f * s);
+                p.lineTo(3.8f * s, 1.2f * s);
+                p.lineTo(4.4f * s, -12f * s);
+                p.quadTo(4.6f * s, -15.4f * s, 1.5f * s, -15.5f * s);
+                p.lineTo(-2f * s, -15.5f * s);
+                p.quadTo(-4.8f * s, -15f * s, -4.6f * s, -11.5f * s);
+            } else if (k == K_BRUTE) {
+                p.moveTo(-6.2f * s, 1.5f * s);
+                p.lineTo(-4f * s, -0.5f * s);
+                p.lineTo(-2f * s, 2f * s);
+                p.lineTo(0.5f * s, -0.2f * s);
+                p.lineTo(3f * s, 2.2f * s);
+                p.lineTo(5f * s, 0f);
+                p.lineTo(6.8f * s, 1.6f * s);
+                p.lineTo(9.6f * s, -11f * s);
+                p.quadTo(10.6f * s, -17.4f * s, 4.5f * s, -17.8f * s);
+                p.lineTo(-4f * s, -17.8f * s);
+                p.quadTo(-10.6f * s, -17.2f * s, -9f * s, -10.5f * s);
+            } else {
+                // Walker: a hunched back and a hem torn into rags.
+                p.moveTo(-5.4f * s, 1.2f * s);
+                p.lineTo(-3.4f * s, -0.8f * s);
+                p.lineTo(-1.8f * s, 2.2f * s);
+                p.lineTo(0.2f * s, -0.4f * s);
+                p.lineTo(2.2f * s, 2.4f * s);
+                p.lineTo(4f * s, -0.2f * s);
+                p.lineTo(5.6f * s, 1.6f * s);
+                p.lineTo(5.6f * s, -12f * s);
+                p.quadTo(5.2f * s, -16.2f * s, 1f * s, -16.2f * s);
+                p.lineTo(-2.5f * s, -16.2f * s);
+                p.quadTo(-7.4f * s, -15.6f * s, -6.6f * s, -10.5f * s);
+            }
+            p.close();
+            torsoShape[k] = p;
+        }
+    }
+
+    /* ---------- 3.25.0 graphics: sky and scenery ---------- */
+
+    /** Night sky: deep at the top, a moonlit haze at the horizon, stars, the moon and drifting cloud. */
+    private void drawSky(Canvas c, float w, float h, float groundY, float danger, float dq) {
+        int skyTop = blend(0xFF070D1A, 0xFF2E0709, dq);
+        if (skyShader == null || skyTop != skyShaderTop || h != skyShaderH) {
+            int mid = blend(0xFF111B30, 0xFF3A0F12, dq);
+            int horizon = blend(0xFF2B3C5E, 0xFF5E2220, dq);
+            skyShader = new LinearGradient(0, 0, 0, groundY, new int[] {skyTop, mid, horizon},
+                    new float[] {0f, 0.55f, 1f}, Shader.TileMode.CLAMP);
+            skyShaderTop = skyTop;
+            skyShaderH = h;
+        }
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(skyShader);
+        c.drawRect(0, 0, w, h, paint);
+        paint.setShader(null);
+
+        // Stars, fading as the sky reddens.
+        float t = (float) sessionSeconds;
+        float starFade = 1f - 0.7f * dq;
+        paint.setColor(0xFFDCE6F5);
+        for (int i = 0; i < starCount; i++) {
+            float tw = 0.55f + 0.45f * (float) Math.sin(t * (1.1f + (i % 5) * 0.37f) + i * 2.17f);
+            paint.setAlpha((int) (starA[i] * tw * starFade));
+            c.drawCircle(starX[i], starY[i], starR[i], paint);
+        }
+        paint.setAlpha(255);
+
+        // The moon: a wide halo, a shaded disc with craters, and a blood tint as the horde closes.
+        float mx = w * 0.80f;
+        float my = h * 0.20f;
+        float mr = dp(30f);
+        int halo = blend(0xFFAFC4E8, 0xFFFF6A4D, dq) & 0x00FFFFFF;
+        Fx.glow(c, mx, my, dp(230f), 0x20000000 | halo);
+        Fx.glow(c, mx, my, dp(95f), 0x50000000 | halo);
+        c.save();
+        c.translate(mx, my);
+        shade.setColor(0xFFFFFFFF);
+        shade.setShader(moonShader);
+        c.drawCircle(0, 0, mr, shade);
+        shade.setShader(null);
+        paint.setColor(0x2A304866);
+        c.drawCircle(-mr * 0.30f, -mr * 0.15f, mr * 0.22f, paint);
+        c.drawCircle(mr * 0.25f, mr * 0.30f, mr * 0.16f, paint);
+        c.drawCircle(-mr * 0.05f, mr * 0.47f, mr * 0.12f, paint);
+        c.drawCircle(mr * 0.38f, -mr * 0.38f, mr * 0.10f, paint);
+        if (danger > 0.02f) {
+            paint.setColor(0xFFFF5A3A);
+            paint.setAlpha((int) (danger * 130));
+            c.drawCircle(0, 0, mr, paint);
+            paint.setAlpha(255);
+        }
+        c.restore();
+
+        // Thin cloud drifting across, now and then over the moon itself.
+        shade.setColor(0xFFFFFFFF);
+        shade.setShader(fogShader);
+        float span = w + dp(900f);
+        for (int i = 0; i < 4; i++) {
+            float cx = span - (float) ((hash(i * 7 + 400) * span + sessionSeconds * dp(5f + i * 2.5f)) % span)
+                    - dp(450f);
+            float cy = h * (0.08f + 0.22f * hash(i * 5 + 401));
+            shade.setAlpha(40 + (int) (30 * hash(i * 3 + 402)));
+            c.save();
+            c.translate(cx, cy);
+            c.scale(3.6f + hash(i * 11 + 403) * 1.6f, 0.40f);
+            c.drawCircle(0, 0, fogR, shade);
+            c.restore();
+        }
+        shade.setShader(null);
+    }
+
+    private float ridgeY(float x, double scroll, float ppm, float groundY) {
+        float wx = (float) ((x + scroll * ppm * 0.06) / dp(260f));
+        return groundY - dp(100f) - (0.5f + 0.5f * (float) Math.sin(wx)) * dp(55f)
+                - (0.5f + 0.5f * (float) Math.sin(wx * 2.3f + 1.3f)) * dp(20f);
+    }
+
+    /**
+     * Everything between the sky and the road, back to front, each layer slower and hazier than the
+     * one in front of it: bats, a far ridge with a church, hills with eyes in them, a far wood, the
+     * graveyard, a fog bank, near trees, the cemetery railing, the road, and the field in front.
+     */
+    private void drawBackdrop(Canvas c, float w, float h, float groundY, float ppm, double scroll, float dt) {
+        float t = (float) sessionSeconds;
+
+        // Bats.
+        paint.setColor(0xFF04060B);
+        for (int i = 0; i < batX.length; i++) {
+            batX[i] -= batSpeed[i] * dt;
+            if (batX[i] < -0.05f) {
+                batX[i] = 1.05f;
+                batY[i] = 0.10f + (float) Math.random() * 0.3f;
+            }
+            float bx = batX[i] * w;
+            float by = batY[i] * h + (float) Math.sin(t * 2 + i) * dp(10f);
+            float flap = (float) Math.sin(t * 14 + i * 2) * dp(8f);
+            float sp = dp(15f);
+            batPath.rewind();
+            batPath.moveTo(bx, by - dp(2f));
+            batPath.quadTo(bx - sp * 0.5f, by - flap - dp(5f), bx - sp, by - flap);
+            batPath.lineTo(bx - sp * 0.72f, by - flap * 0.4f + dp(1f));
+            batPath.lineTo(bx - sp * 0.45f, by - flap * 0.25f + dp(3f));
+            batPath.lineTo(bx - sp * 0.2f, by + dp(1.5f));
+            batPath.lineTo(bx, by + dp(3f));
+            batPath.lineTo(bx + sp * 0.2f, by + dp(1.5f));
+            batPath.lineTo(bx + sp * 0.45f, by - flap * 0.25f + dp(3f));
+            batPath.lineTo(bx + sp * 0.72f, by - flap * 0.4f + dp(1f));
+            batPath.lineTo(bx + sp, by - flap);
+            batPath.quadTo(bx + sp * 0.5f, by - flap - dp(5f), bx, by - dp(2f));
+            batPath.close();
+            c.drawPath(batPath, paint);
+            c.drawCircle(bx, by, dp(3.2f), paint);
+        }
+
+        // Far ridge, palest: it sits deepest in the haze.
+        float step = dp(40f);
+        path.rewind();
+        path.moveTo(-step, groundY);
+        for (float x = -step; x <= w + step; x += step) {
+            path.lineTo(x, ridgeY(x, scroll, ppm, groundY));
+        }
+        path.lineTo(w + step, groundY);
+        path.close();
+        paint.setColor(0xFF19233A);
+        c.drawPath(path, paint);
+        float churchGap = dp(1900f);
+        float cOff = (float) ((scroll * ppm * 0.06) % churchGap);
+        for (float cx = dp(700f) - cOff; cx < w + dp(100f); cx += churchGap) {
+            if (cx > -dp(100f)) {
+                drawChurch(c, cx, ridgeY(cx, scroll, ppm, groundY) + dp(10f));
+            }
+        }
+
+        // Nearer hills.
+        path.rewind();
+        path.moveTo(-step, groundY);
+        for (float x = -step; x <= w + step; x += step) {
+            float wx = (float) ((x + scroll * ppm * 0.15) / dp(160f));
+            path.lineTo(x, groundY - dp(40f) - (float) Math.abs(Math.sin(wx) * dp(50f)));
+        }
+        path.lineTo(w + step, groundY);
+        path.close();
+        paint.setColor(0xFF111A2A);
+        c.drawPath(path, paint);
+
+        // Glowing eyes blinking in the dark between the hills.
+        for (int i = 0; i < 6; i++) {
+            float ex = (float) (((i * 311 + 90) - scroll * ppm * 0.25) % (w + dp(200f)));
+            if (ex < 0) {
+                ex += w + dp(200f);
+            }
+            boolean open = ((int) (t * 1.3 + i * 0.7)) % 4 != 0;
+            if (open) {
+                float ey = groundY - dp(28f) - (i % 3) * dp(12f);
+                int col = i % 2 == 0 ? 0xFFFFD23A : 0xFFFF4D4D;
+                Fx.glow(c, ex + dp(4f), ey, dp(12f), 0x60000000 | (col & 0x00FFFFFF));
+                paint.setColor(col);
+                c.drawCircle(ex, ey, dp(2.2f), paint);
+                c.drawCircle(ex + dp(8f), ey, dp(2.2f), paint);
+            }
+        }
+
+        // A far wood, hazy.
+        drawTreeRow(c, w, groundY - dp(2f), scroll * ppm * 0.25, dp(240f), 0.55f, 0xFF121A2A, 101, false);
+
+        // The graveyard: stones of four shapes, leaning, lit on the moon's side, a candle here and there.
+        float sGap = dp(118f);
+        double so = scroll * ppm * 0.3;
+        float sOff = (float) (so % sGap);
+        int s0 = (int) Math.floor(so / sGap);
+        for (int j = -1; ; j++) {
+            float x = j * sGap - sOff;
+            if (x > w + sGap) {
+                break;
+            }
+            int k = s0 + j;
+            float sx = x + (hash(k * 17 + 5) - 0.5f) * dp(50f);
+            float sc = 0.85f + 0.4f * hash(k * 19 + 3);
+            float tilt = (hash(k * 23 + 9) - 0.5f) * 12f;
+            int type = Math.min(3, (int) (hash(k * 29 + 1) * 4));
+            float base = groundY - dp(3f) + hash(k * 31) * dp(4f);
+            paint.setColor(0x55000000);
+            c.drawOval(sx - dp(20f) * sc, base - dp(3f), sx + dp(24f) * sc, base + dp(3f), paint);
+            c.save();
+            c.translate(sx, base);
+            c.rotate(tilt);
+            c.scale(sc, sc);
+            c.translate(dp(2.4f), -dp(1.4f));
+            paint.setColor(0xFF4E5B72);
+            c.drawPath(stoneShape[type], paint);
+            c.translate(-dp(2.4f), dp(1.4f));
+            paint.setColor(0xFF262F3E);
+            c.drawPath(stoneShape[type], paint);
+            c.restore();
+            if (hash(k * 37 + 2) < 0.16f) {
+                float fx = sx + dp(22f) * sc;
+                float flick = 0.7f + 0.3f * (float) Math.sin(t * 9 + k);
+                Fx.glow(c, fx, base - dp(12f), dp(24f), ((int) (0x70 * flick) << 24) | 0xFFB050);
+                paint.setColor(0xFFD8CFB0);
+                c.drawRect(fx - dp(1.6f), base - dp(9f), fx + dp(1.6f), base, paint);
+                paint.setColor(0xFFFFD27A);
+                c.drawCircle(fx, base - dp(11.5f) - flick * dp(0.8f), dp(1.8f), paint);
+            }
+        }
+
+        // A fog bank between the graves and the near trees.
+        fogPuffs(c, w, groundY - dp(26f), 6, dp(26f), 3.2f, 0.52f, 58, dp(10f), scroll, ppm, 0.35f, 300);
+
+        // Near trees, darkest, swaying a little.
+        drawTreeRow(c, w, groundY + dp(2f), scroll * ppm * 0.45, dp(380f), 1.05f, 0xFF070A11, 211, true);
+
+        // The cemetery railing: bars, two rails, posts with ball finials, a gap where it has fallen.
+        float bar = dp(15f);
+        double fo = scroll * ppm * 0.6;
+        float fOff = (float) (fo % bar);
+        int f0 = (int) Math.floor(fo / bar);
+        float fb = groundY - dp(1f);
+        float ft = groundY - dp(36f);
+        int nl = 0;
+        int j0 = 0;
+        for (float x = -fOff; x < w + bar && nl <= fenceLines.length - 4; x += bar, j0++) {
+            if (hash((f0 + j0) / 9 * 13 + 5) < 0.12f) {
+                continue;
+            }
+            fenceLines[nl++] = x;
+            fenceLines[nl++] = fb;
+            fenceLines[nl++] = x;
+            fenceLines[nl++] = ft;
+        }
+        limb.setStrokeWidth(dp(2.2f));
+        limb.setColor(0xFF0A0E16);
+        c.drawLines(fenceLines, 0, nl, limb);
+        paint.setColor(0xFF0A0E16);
+        c.drawRect(-dp(20f), ft + dp(5f), w + dp(20f), ft + dp(8f), paint);
+        c.drawRect(-dp(20f), fb - dp(9f), w + dp(20f), fb - dp(6f), paint);
+        paint.setColor(0x4A5A6E8E);
+        c.drawRect(-dp(20f), ft + dp(5f), w + dp(20f), ft + dp(6f), paint);
+        float pGap = bar * 7;
+        float pOff = (float) (fo % pGap);
+        for (float x = -pOff; x < w + pGap; x += pGap) {
+            paint.setColor(0xFF0A0E16);
+            c.drawRect(x - dp(3.5f), ft - dp(4f), x + dp(3.5f), fb, paint);
+            c.drawCircle(x, ft - dp(7f), dp(4.5f), paint);
+            paint.setColor(0x665A6E8E);
+            c.drawRect(x + dp(2f), ft - dp(4f), x + dp(3.5f), fb, paint);
+            c.drawCircle(x + dp(1.5f), ft - dp(8.5f), dp(1.6f), paint);
+        }
+
+        // The ground, receding into the dark, and the road you run on.
+        shade.setColor(0xFFFFFFFF);
+        shade.setShader(groundShader);
+        c.drawRect(-dp(20f), groundY, w + dp(20f), h + dp(20f), shade);
+        shade.setShader(pathShader);
+        c.drawRect(-dp(20f), groundY - dp(2f), w + dp(20f), groundY + dp(30f), shade);
+        shade.setShader(null);
+        paint.setColor(0x5A8FA6C8);
+        c.drawRect(-dp(20f), groundY - dp(2f), w + dp(20f), groundY - dp(0.5f), paint);
+        paint.setColor(0x66000000);
+        c.drawRect(-dp(20f), groundY + dp(30f), w + dp(20f), groundY + dp(33f), paint);
+
+        // Pebbles and tufts on the road at your own speed: the one layer that moves exactly with you.
+        float pg = dp(44f);
+        double po = scroll * ppm;
+        float poOff = (float) (po % pg);
+        int p0 = (int) Math.floor(po / pg);
+        limb.setStrokeWidth(dp(2f));
+        limb.setColor(0xFF33452F);
+        for (int j = -1; ; j++) {
+            float x = j * pg - poOff;
+            if (x > w + pg) {
+                break;
+            }
+            int k = p0 + j;
+            float hx = hash(k * 41 + 7);
+            float px = x + hx * pg * 0.8f;
+            float py = groundY + dp(5f) + hash(k * 43 + 1) * dp(22f);
+            if (hx < 0.55f) {
+                float r = dp(2.5f) + hash(k * 47) * dp(4f);
+                paint.setColor(0xFF242522);
+                c.drawOval(px - r * 1.4f, py - r * 0.8f, px + r * 1.4f, py + r * 0.6f, paint);
+                paint.setColor(0xFF575A5C);
+                c.drawOval(px - r * 0.5f, py - r * 0.8f, px + r * 1.1f, py - r * 0.15f, paint);
+            } else {
+                c.drawLine(px, py, px - dp(5f), py - dp(10f), limb);
+                c.drawLine(px, py, px + dp(1f), py - dp(13f), limb);
+                c.drawLine(px, py, px + dp(6f), py - dp(9f), limb);
+            }
+        }
+
+        // The field in front of the road, fastest of all: grass clumps, the odd grave, a moonlit puddle.
+        float fg = dp(170f);
+        double fgo = scroll * ppm * 1.5;
+        float fgOff = (float) (fgo % fg);
+        int g0 = (int) Math.floor(fgo / fg);
+        for (int j = -1; ; j++) {
+            float x = j * fg - fgOff;
+            if (x > w + fg) {
+                break;
+            }
+            int k = g0 + j;
+            float hk = hash(k * 53 + 11);
+            float gx = x + hash(k * 59 + 3) * fg * 0.7f;
+            float gy = groundY + dp(62f) + hash(k * 61 + 5) * dp(55f);
+            if (hk < 0.22f) {
+                int type = Math.min(3, (int) (hash(k * 67) * 4));
+                float sc = 1.4f + 0.3f * hash(k * 71);
+                c.save();
+                c.translate(gx, gy);
+                c.rotate((hash(k * 73) - 0.5f) * 16f);
+                c.scale(sc, sc);
+                c.translate(dp(1.6f), -dp(1f));
+                paint.setColor(0xFF1E2A2C);
+                c.drawPath(stoneShape[type], paint);
+                c.translate(-dp(1.6f), dp(1f));
+                paint.setColor(0xFF0A100D);
+                c.drawPath(stoneShape[type], paint);
+                c.restore();
+            } else if (hk < 0.34f) {
+                paint.setColor(0x26A9C1E6);
+                c.drawOval(gx - dp(46f), gy - dp(6f), gx + dp(46f), gy + dp(6f), paint);
+                paint.setColor(0x40DCE6F5);
+                c.drawOval(gx - dp(14f), gy - dp(1.5f), gx + dp(22f), gy + dp(1.5f), paint);
+            } else {
+                float sway = (float) Math.sin(t * 1.2 + k) * dp(4f);
+                limb.setStrokeWidth(dp(3f));
+                limb.setColor(0xFF0C150F);
+                for (int b = 0; b < 6; b++) {
+                    float bxo = (b - 2.5f) * dp(5f);
+                    float len = dp(22f) + hash(k * 7 + b) * dp(24f);
+                    c.drawLine(gx + bxo, gy, gx + bxo * 1.8f + sway, gy - len, limb);
+                }
+            }
+        }
+    }
+
+    /** A row of dead trees from the cached shapes, mirrored and scaled per tree, with gaps. */
+    private void drawTreeRow(Canvas c, float w, float base, double offsetPx, float gap, float scale, int colour,
+                             int seed, boolean sway) {
+        float off = (float) (offsetPx % gap);
+        int k0 = (int) Math.floor(offsetPx / gap);
+        paint.setColor(colour);
+        for (int j = -1; ; j++) {
+            float x = j * gap - off;
+            if (x > w + gap) {
+                break;
+            }
+            int k = k0 + j;
+            if (hash(k * 7 + seed) < 0.25f) {
+                continue;
+            }
+            float jx = x + (hash(k * 13 + seed) - 0.5f) * gap * 0.6f;
+            float sc = scale * (0.8f + 0.45f * hash(k * 5 + seed));
+            Path shape = treeShape[Math.min(2, (int) (hash(k * 3 + seed) * 3))];
+            c.save();
+            c.translate(jx, base);
+            if (sway) {
+                c.rotate((float) Math.sin(sessionSeconds * 0.7 + k) * 0.8f);
+            }
+            c.scale(hash(k * 11 + seed) < 0.5f ? -sc : sc, sc);
+            c.drawPath(shape, paint);
+            c.restore();
+        }
+    }
+
+    /** A ruined church on the far ridge, one window still lit. */
+    private void drawChurch(Canvas c, float x, float base) {
+        paint.setColor(0xFF19233A);
+        c.drawRect(x - dp(34f), base - dp(30f), x + dp(20f), base, paint);
+        path.rewind();
+        path.moveTo(x - dp(37f), base - dp(30f));
+        path.lineTo(x - dp(8f), base - dp(45f));
+        path.lineTo(x + dp(22f), base - dp(30f));
+        path.close();
+        c.drawPath(path, paint);
+        c.drawRect(x + dp(14f), base - dp(62f), x + dp(30f), base, paint);
+        path.rewind();
+        path.moveTo(x + dp(12f), base - dp(62f));
+        path.lineTo(x + dp(22f), base - dp(94f));
+        path.lineTo(x + dp(32f), base - dp(62f));
+        path.close();
+        c.drawPath(path, paint);
+        c.drawRect(x + dp(21f), base - dp(106f), x + dp(23f), base - dp(93f), paint);
+        c.drawRect(x + dp(17.5f), base - dp(102f), x + dp(26.5f), base - dp(100f), paint);
+        float flick = 0.75f + 0.25f * (float) Math.sin(sessionSeconds * 3.1 + x * 0.01);
+        Fx.glow(c, x + dp(22f), base - dp(48f), dp(18f), ((int) (0x90 * flick) << 24) | 0xFFC060);
+        paint.setColor(0xFFE8B060);
+        c.drawRect(x + dp(20f), base - dp(53f), x + dp(24f), base - dp(44f), paint);
+    }
+
+    /**
+     * Soft fog: one cached radial gradient drawn as stretched ellipses, drifting with the wind and
+     * scrolling with the ground at {@code par}. Breathes in and out so the bank is never still.
+     */
+    private void fogPuffs(Canvas c, float w, float baseY, int count, float spanY, float sx, float sy, int alpha,
+                          float drift, double scroll, float ppm, float par, int seed) {
+        if (fogShader == null) {
+            return;
+        }
+        float wrap = w + fogR * sx * 2.4f;
+        shade.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        shade.setShader(fogShader);
+        for (int i = 0; i < count; i++) {
+            float x = (float) ((hash(seed + i * 13) * wrap + scroll * ppm * par
+                    + sessionSeconds * drift * (0.7 + 0.6 * hash(seed + i * 7))) % wrap);
+            x = wrap - x - fogR * sx * 1.2f;
+            float y = baseY + (hash(seed + i * 5) - 0.5f) * spanY + (float) Math.sin(sessionSeconds * 0.4 + i) * dp(4f);
+            float k = 0.75f + 0.5f * hash(seed + i * 3);
+            shade.setAlpha((int) (alpha * (0.7f + 0.3f * (float) Math.sin(sessionSeconds * 0.3 + i * 1.7))));
+            c.save();
+            c.translate(x, y);
+            c.scale(sx * k, sy * k);
+            c.drawCircle(0, 0, fogR, shade);
+            c.restore();
+        }
+        shade.setShader(null);
+    }
+
+    /* ---------- 3.25.0 graphics: helpers ---------- */
+
+    /** Deterministic 0..1 from an integer: scenery detail that never changes and never allocates. */
+    private static float hash(int k) {
+        int x = k * 0x27D4EB2D + 0x165667B1;
+        x ^= x >>> 15;
+        x *= 0x85EBCA6B;
+        x ^= x >>> 13;
+        x *= 0xC2B2AE35;
+        x ^= x >>> 16;
+        return (x & 0xFFFFFF) / 16777216f;
+    }
+
+    /** Darker below 1, toward white above it; keeps the alpha. */
+    private static int tone(int col, float f) {
+        int a = col >>> 24;
+        int r = (col >> 16) & 0xFF;
+        int g = (col >> 8) & 0xFF;
+        int b = col & 0xFF;
+        if (f <= 1f) {
+            r = (int) (r * f);
+            g = (int) (g * f);
+            b = (int) (b * f);
+        } else {
+            float k = Math.min(1f, f - 1f);
+            r = (int) (r + (255 - r) * k);
+            g = (int) (g + (255 - g) * k);
+            b = (int) (b + (255 - b) * k);
+        }
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    /**
+     * A HUD panel: rounded fill, a vertical gloss (one cached gradient, stretched to the panel by the
+     * canvas so the corners stay round), a lighter top edge and an optional border.
+     */
+    private void panel(Canvas c, float l, float t, float r, float b, float rad, int fill, int edge) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(fill);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        float hgt = b - t;
+        if (hgt > 1f && glossShader != null) {
+            float k = hgt / GLOSS_UNIT;
+            c.save();
+            c.translate(0, t);
+            c.scale(1f, k);
+            shade.setColor(0xFFFFFFFF);
+            shade.setShader(glossShader);
+            c.drawRoundRect(l, 0, r, GLOSS_UNIT, rad, rad / k, shade);
+            shade.setShader(null);
+            c.restore();
+        }
+        if (r - l > rad * 2f) {
+            paint.setColor(0x40FFFFFF);
+            c.drawRect(l + rad, t + dp(1f), r - rad, t + dp(2f), paint);
+        }
+        if (edge != 0) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(edge);
+            c.drawRoundRect(l, t, r, b, rad, rad, paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+
+    /**
+     * A jointed figure: thighs, shins, upper arms and forearms as round-capped strokes, a cached torso
+     * silhouette, a shaded head. The legs are a real gait - each thigh swings on {@code phaseIn}, the
+     * knee folds through the swing and straightens through the stance - and the hip is set so the
+     * lower foot is on the road, which gives the run its bounce for free.
+     *
+     * <p>Walkers shamble: stiff knees, a dragged far leg, a hunched lurch and both arms out in front.
+     * Runners are pitched almost flat with their arms flailing. The brute is half as big again, with
+     * arms that hang to its knees, fists overhead when it winds up and swept back when it charges.
+     * {@code wave}: a survivor waving for help, the brute roaring, or a walker pounding on the wall.
+     * Far limbs are drawn darker than near ones; the moon side of the torso carries a highlight.
      */
     private void drawFigure(Canvas c, float x, float groundY, int color, float speed, float phaseIn,
                             int kind, boolean wave) {
-        float mul = kind == K_BRUTE ? 1.5f : kind == K_SURVIVOR ? 0.9f : 1f;
-        float s = dp(FIGURE_SCALE) * mul;
+        float s = figureUnit(kind);
         boolean zombie = kind >= K_WALKER;
-        float legSwing = speed > 0.2f ? (float) Math.sin(phaseIn) * 8f * s * (kind == K_RUNNER ? 1.3f : 1f) : 0f;
-        // The limp: the bad leg stops swinging and you drop onto it every second step. Feet stay on
-        // the road, so only the body and head bob - which is what a limp actually looks like.
+        boolean moving = speed > 0.2f;
+        boolean charge = kind == K_BRUTE && bruteState == 2;
+        float t = (float) sessionSeconds;
         float lam = kind == K_YOU ? (float) limp : 0f;
-        float bad = legSwing * (1f - 0.85f * lam);
-        // Gated on movement exactly as legSwing is: phaseIn comes from distance covered, so a rower
-        // who stops would otherwise freeze the body mid-drop, hanging off the road at a random height.
-        float hop = lam > 0 && speed > 0.2f ? Math.max(0f, (float) Math.sin(phaseIn)) * 4f * s * lam : 0f;
-        float bodyY = groundY + hop;
-        // Legs: dark trousers on the living, so the figure reads as a person, not a block.
-        paint.setColor(zombie ? color : kind == K_SURVIVOR ? 0xFF3A3F55 : 0xFF2A2F3A);
-        c.drawRect(x - 5 * s + legSwing, bodyY - 14 * s, x - 1 * s + legSwing, groundY, paint);
-        c.drawRect(x + 1 * s - bad, bodyY - 14 * s, x + 5 * s - bad, groundY, paint);
+        final float pi = (float) Math.PI;
+
+        // Gait, in figure units; angles in radians from straight down, forward positive.
+        float l1;
+        float l2;
+        float legW;
+        float thighA;
+        float flexBase;
+        float flexSwing;
+        float lean;
+        float armA;
+        float upper;
+        float fore;
+        float armW;
+        float farAmp;
+        if (kind == K_WALKER) {
+            l1 = 10f;
+            l2 = 10f;
+            legW = 4.4f;
+            thighA = moving ? 0.34f : 0.05f;
+            flexBase = 0.08f;
+            flexSwing = moving ? 0.35f : 0f;
+            lean = 0.42f + 0.07f * (float) Math.sin(moving ? phaseIn : t * 1.5f + phaseIn);
+            armA = 0f;
+            upper = 8.5f;
+            fore = 8f;
+            armW = 3.4f;
+            farAmp = 0.5f;      // the leg it drags
+        } else if (kind == K_RUNNER) {
+            l1 = 10.5f;
+            l2 = 10.5f;
+            legW = 3.8f;
+            thighA = moving ? 0.85f : 0.05f;
+            flexBase = 0.2f;
+            flexSwing = moving ? 1.6f : 0f;
+            lean = moving ? 0.72f : 0.3f;
+            armA = moving ? 1.1f : 0.1f;
+            upper = 8f;
+            fore = 7.5f;
+            armW = 3f;
+            farAmp = 1f;
+        } else if (kind == K_BRUTE) {
+            l1 = 8.5f;
+            l2 = 8.5f;
+            legW = 5.6f;
+            thighA = moving ? (charge ? 0.5f : 0.28f) : 0.05f;
+            flexBase = 0.15f;
+            flexSwing = moving ? (charge ? 0.9f : 0.4f) : 0f;
+            lean = wave ? 0.02f : charge ? 0.5f : 0.22f + 0.04f * (float) Math.sin(t * 1.3f);
+            armA = 0f;
+            upper = 10f;
+            fore = 10.5f;
+            armW = 5.2f;
+            farAmp = 1f;
+        } else {
+            float amp = moving ? Math.max(0.35f, Math.min(1f, 0.35f + speed / 5f)) : 0f;
+            l1 = 10.5f;
+            l2 = 10.5f;
+            legW = 4.2f;
+            thighA = moving ? 0.62f * amp : 0.05f;
+            flexBase = 0.12f;
+            flexSwing = 1.5f * amp;
+            lean = 0.05f + 0.26f * amp;
+            armA = 0.85f * amp;
+            upper = 8f;
+            fore = 7.5f;
+            armW = 3.3f;
+            farAmp = 1f;
+        }
+
+        // Legs. The near leg carries the bite: it barely swings, and you drop onto it every step.
+        float pA = phaseIn;
+        float pB = phaseIn + pi;
+        float nearAmp = 1f - 0.85f * lam;
+        float tA;
+        float tB;
+        float fA;
+        float fB;
+        if (moving) {
+            tA = thighA * nearAmp * (float) Math.sin(pA);
+            fA = flexBase + flexSwing * nearAmp * Math.max(0f, (float) Math.cos(pA));
+            tB = thighA * farAmp * (float) Math.sin(pB);
+            fB = flexBase + flexSwing * farAmp * Math.max(0f, (float) Math.cos(pB));
+        } else {
+            tA = thighA;
+            tB = -thighA;
+            fA = flexBase;
+            fB = flexBase;
+        }
+        float kAx = l1 * (float) Math.sin(tA);
+        float kAy = l1 * (float) Math.cos(tA);
+        float ftAx = kAx + l2 * (float) Math.sin(tA - fA);
+        float ftAy = kAy + l2 * (float) Math.cos(tA - fA);
+        float kBx = l1 * (float) Math.sin(tB);
+        float kBy = l1 * (float) Math.cos(tB);
+        float ftBx = kBx + l2 * (float) Math.sin(tB - fB);
+        float ftBy = kBy + l2 * (float) Math.cos(tB - fB);
+        // Gated on movement: phaseIn comes from distance, so a stopped rower would freeze mid-drop.
+        float hop = lam > 0 && moving ? Math.max(0f, (float) Math.sin(phaseIn)) * 4f * lam : 0f;
+        float breathe = moving ? 0f : (float) Math.sin(t * 2.2f + phaseIn) * 0.25f;
+        float hipY = groundY - (Math.max(ftAy, ftBy) - hop - breathe) * s;
+
+        int cloth;
+        int skin;
+        int legCol;
+        int hair;
+        if (kind == K_YOU) {
+            cloth = color;
+            skin = 0xFFF1C27D;
+            legCol = 0xFF343B4C;
+            hair = 0xFF3A2A1A;
+        } else if (kind == K_SURVIVOR) {
+            cloth = color;
+            skin = 0xFFE8B98A;
+            legCol = 0xFF3A3F55;
+            hair = 0xFF6A3A1A;
+        } else if (kind == K_WALKER) {
+            cloth = tone(color, 0.62f);
+            skin = 0xFF8DB386;
+            legCol = 0xFF2E2B36;
+            hair = 0xFF3E4A36;
+        } else if (kind == K_RUNNER) {
+            cloth = tone(color, 0.8f);
+            skin = 0xFFB4C85A;
+            legCol = 0xFF3A3424;
+            hair = 0xFF3A3A2A;
+        } else {
+            cloth = color;
+            skin = 0xFF5E8F66;
+            legCol = 0xFF2A2430;
+            hair = 0xFF223322;
+        }
+
+        // Contact shadow.
+        float shW = (kind == K_BRUTE ? 9f : 7f) * s;
+        paint.setColor(0x5A000000);
+        c.drawOval(x - shW, groundY - 1.3f * s, x + shW * 1.15f, groundY + 1.3f * s, paint);
+
+        // Torso frame.
+        float tu = torsoUnits(kind);
+        float sinL = (float) Math.sin(lean);
+        float cosL = (float) Math.cos(lean);
+        float shX = x + sinL * (tu - 2.2f) * s;
+        float shY = hipY - cosL * (tu - 2.2f) * s;
+        float topX = x + sinL * tu * s;
+        float topY = hipY - cosL * tu * s;
+
+        // Arm angles: near (N) and far (F), upper arm then forearm.
+        float uN;
+        float fN;
+        float uF;
+        float fF;
+        if (kind == K_WALKER) {
+            if (wave) {
+                uN = 1.3f + 1.3f * (0.5f + 0.5f * (float) Math.sin(t * 9 + phaseIn));
+                uF = 1.2f + 1.3f * (0.5f + 0.5f * (float) Math.sin(t * 9 + phaseIn + 1.6f));
+                fN = uN + 0.35f;
+                fF = uF + 0.35f;
+            } else {
+                uN = 1.42f + 0.10f * (float) Math.sin(t * 2f + phaseIn);
+                fN = uN - 0.12f + 0.08f * (float) Math.sin(t * 2.6f + phaseIn);
+                uF = 1.30f + 0.10f * (float) Math.sin(t * 2.2f + phaseIn + 1f);
+                fF = uF - 0.05f;
+            }
+        } else if (kind == K_BRUTE) {
+            if (wave) {
+                float jolt = (float) Math.sin(t * 30) * 0.08f;
+                uN = pi - 0.3f + jolt;
+                fN = uN + 0.25f;
+                uF = pi - 0.45f - jolt;
+                fF = uF + 0.3f;
+            } else if (charge) {
+                uN = -0.45f;
+                fN = -0.2f;
+                uF = -0.35f;
+                fF = -0.1f;
+            } else {
+                uN = 0.35f + 0.18f * (float) Math.sin(phaseIn);
+                fN = uN + 0.15f;
+                uF = 0.25f + 0.18f * (float) Math.sin(phaseIn + pi);
+                fF = uF + 0.12f;
+            }
+        } else if (kind == K_SURVIVOR && wave) {
+            uN = pi - 0.35f + 0.3f * (float) Math.sin(t * 9);
+            fN = uN + 0.25f * (float) Math.sin(t * 9 + 1);
+            uF = 0.5f;
+            fF = 2.4f;
+        } else {
+            // Running: each arm swings against its own leg.
+            uN = -armA * (float) Math.sin(pA) + lean * 0.4f;
+            uF = -armA * (float) Math.sin(pB) + lean * 0.4f;
+            fN = uN + (moving ? 1.5f : 0.3f);
+            fF = uF + (moving ? 1.5f : 0.3f);
+        }
+
+        // Far arm, far leg: in shadow.
+        int sleeve = kind == K_BRUTE ? skin : cloth;
+        arm(c, shX, shY, uF, fF, upper * s, fore * s, armW * s, tone(sleeve, 0.66f), tone(skin, 0.66f), zombie);
+        if (kind == K_SURVIVOR && wave) {
+            // The lighter they hold up.
+            Fx.glow(c, handX, handY - dp(4f), dp(22f), 0xAAFFC45A);
+            paint.setColor(0xFFFFE08A);
+            c.drawCircle(handX, handY - dp(5f) - (float) Math.abs(Math.sin(t * 13)) * dp(1.5f), dp(2.4f), paint);
+        }
+        leg(c, x, hipY, kBx * s, kBy * s, ftBx * s, ftBy * s, legW * s, tone(legCol, 0.68f));
+
+        // Torso, in its own leaning frame.
+        c.save();
+        c.translate(x, hipY);
+        c.rotate((float) Math.toDegrees(lean));
+        paint.setColor(cloth);
+        c.drawPath(torsoShape[kind], paint);
+        float frontU = kind == K_BRUTE ? 9.2f : kind == K_WALKER ? 5.3f : kind == K_RUNNER ? 4.2f : 5.0f;
+        float backU = kind == K_BRUTE ? 8.8f : kind == K_WALKER ? 6.2f : kind == K_RUNNER ? 4.4f : 4.8f;
+        limb.setStrokeWidth(1.4f * s);
+        limb.setColor(tone(cloth, 1.35f));
+        limb.setAlpha(160);
+        c.drawLine((frontU - 1.1f) * s, -1.5f * s, (frontU - 1.4f) * s, -(tu - 2.6f) * s, limb);
+        limb.setColor(tone(cloth, 0.55f));
+        limb.setAlpha(170);
+        c.drawLine(-(backU - 1.1f) * s, -1.5f * s, -(backU - 1.3f) * s, -(tu - 3f) * s, limb);
+        if (kind == K_YOU || kind == K_SURVIVOR) {
+            paint.setColor(0x55000000);
+            c.drawRect(-4.6f * s, -1.8f * s, 4.8f * s, 0.4f * s, paint);
+            if (kind == K_YOU) {
+                // A racing stripe on the vest.
+                paint.setColor(tone(cloth, 1.5f));
+                c.drawRect(-5.0f * s, -11.2f * s, 5.4f * s, -9.8f * s, paint);
+            }
+        } else if (kind == K_WALKER) {
+            paint.setColor(0xAA5A1414);
+            c.drawCircle(1.2f * s, -8f * s, 1.6f * s, paint);
+            c.drawCircle(-2.6f * s, -12f * s, 1.1f * s, paint);
+            limb.setStrokeWidth(0.7f * s);
+            limb.setColor(0x99000000);
+            c.drawLine(-3f * s, -5f * s, 0.5f * s, -3.5f * s, limb);
+        } else if (kind == K_BRUTE) {
+            limb.setStrokeWidth(1.8f * s);
+            limb.setColor(0xFF2A2018);
+            c.drawLine(-7f * s, -16f * s, 8.5f * s, -2f * s, limb);
+            paint.setColor(0xAA4A1414);
+            c.drawCircle(-2f * s, -7f * s, 2f * s, paint);
+        } else {
+            limb.setStrokeWidth(0.9f * s);
+            limb.setColor(0x88FFFFFF);
+            c.drawLine(3.3f * s, -1f * s, 3.4f * s, -14f * s, limb);
+        }
+        c.restore();
+
+        leg(c, x, hipY, kAx * s, kAy * s, ftAx * s, ftAy * s, legW * s, legCol);
         if (lam > 0) {
-            // Bandage and a stain on the bitten leg.
-            paint.setColor(0xFFE6E0CE);
-            c.drawRect(x + 1 * s - bad, bodyY - 11 * s, x + 5 * s - bad, bodyY - 7 * s, paint);
+            // Bandage and a stain on the bitten shin.
+            float bx = x + (kAx + (ftAx - kAx) * 0.4f) * s;
+            float by = hipY + (kAy + (ftAy - kAy) * 0.4f) * s;
+            limb.setStrokeWidth(legW * s * 1.08f);
+            limb.setColor(0xFFE6E0CE);
+            c.drawLine(bx, by - 1.2f * s, bx, by + 1.2f * s, limb);
             paint.setColor(0xFF9E1B2E);
             paint.setAlpha((int) (120 + 135 * Math.min(1f, lam)));
-            c.drawRect(x + 2 * s - bad, bodyY - 10 * s, x + 4.4f * s - bad, bodyY - 8 * s, paint);
+            c.drawCircle(bx + 0.4f * s, by, 1.1f * s, paint);
             paint.setAlpha(255);
         }
-        // Everything above the knees is drawn off the bobbing line, not the road.
-        groundY = bodyY;
-        // Body, leaning into the run.
-        paint.setColor(color);
-        float half = kind == K_BRUTE ? 8 * s : kind == K_RUNNER ? 4.5f * s : 6 * s;
-        float lean;
-        if (kind == K_RUNNER) {
-            lean = 8 * s;
-        } else if (kind == K_BRUTE) {
-            lean = wave ? 0 : 3 * s;
-        } else if (zombie) {
-            lean = 4 * s;
-        } else {
-            lean = Math.min(1f, speed / 4f) * 5 * s;
-        }
-        c.drawRect(x - half + lean * 0.5f, groundY - 34 * s, x + half + lean, groundY - 14 * s, paint);
-        // Arms.
-        if (kind == K_BRUTE && wave) {
-            float shake = (float) Math.sin(sessionSeconds * 30) * s;
-            c.drawRect(x - half - 4 * s, groundY - 48 * s + shake, x - half, groundY - 30 * s, paint);
-            c.drawRect(x + half, groundY - 48 * s - shake, x + half + 4 * s, groundY - 30 * s, paint);
-        } else if (kind == K_BRUTE) {
-            c.drawRect(x + half + lean - 2 * s, groundY - 31 * s, x + half + lean + 12 * s, groundY - 25 * s, paint);
-        } else if (kind == K_RUNNER) {
-            float arm = (float) Math.sin(phaseIn) * 7f * s;
-            c.drawRect(x + half + lean, groundY - 31 * s + arm, x + half + lean + 13 * s, groundY - 28 * s + arm, paint);
-        } else if (zombie) {
-            c.drawRect(x + 6 * s + lean, groundY - 30 * s, x + 18 * s + lean, groundY - 26 * s, paint);
-        } else if (wave) {
-            float sway = (float) Math.sin(sessionSeconds * 9) * 4 * s;
-            c.drawRect(x + 5 * s, groundY - 50 * s, x + 8 * s, groundY - 30 * s, paint);
-            c.drawCircle(x + 6.5f * s + sway, groundY - 51 * s, 2.5f * s, paint);
-            // The lighter they hold up.
-            Fx.glow(c, x - 8 * s, groundY - 36 * s, dp(18f), 0xAAFFC45A);
-        } else {
-            float arm = (float) Math.sin(phaseIn) * 6f * s;
-            c.drawRect(x + 6 * s + lean, groundY - 30 * s + arm, x + 12 * s + lean, groundY - 26 * s + arm, paint);
-        }
-        // Head: round with a face (3.19.5 - on the emulator it was a plain white square).
-        float hx = x + lean;
-        float hy = groundY - 41 * s;
-        int skin;
-        if (kind == K_RUNNER) {
-            skin = 0xFFB4C85A;
-        } else if (kind == K_BRUTE) {
-            skin = 0xFF5E8F66;
-        } else if (zombie) {
-            skin = 0xFF7FB37A;
-        } else if (kind == K_SURVIVOR) {
-            skin = 0xFFE8B98A;
-        } else {
-            skin = 0xFFF1C27D;
-        }
-        paint.setColor(skin);
-        c.drawCircle(hx, hy, 6 * s, paint);
+
+        // Neck and head.
+        float hr = headUnits(kind) * s;
+        float tilt = zombie ? lean * 1.25f + 0.12f : lean * 0.7f;
+        float neck = (kind == K_BRUTE ? 2.4f : 3.4f) * s + hr * 0.55f;
+        float hcx = topX + (float) Math.sin(tilt) * neck;
+        float hcy = topY - (float) Math.cos(tilt) * neck;
+        limb.setStrokeWidth((kind == K_BRUTE ? 4.4f : 2.6f) * s);
+        limb.setColor(tone(skin, 0.8f));
+        c.drawLine(topX, topY + 1f * s, hcx, hcy, limb);
+        c.save();
+        c.translate(hcx, hcy);
         if (zombie) {
+            shade.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+            shade.setShader(headShader[kind]);
+            c.drawCircle(0, 0, hr, shade);
+            shade.setShader(null);
+            if (kind == K_WALKER) {
+                limb.setStrokeWidth(0.18f * hr);
+                limb.setColor(hair);
+                c.drawLine(-0.3f * hr, -0.9f * hr, -0.65f * hr, -1.35f * hr, limb);
+                c.drawLine(0.05f * hr, -0.96f * hr, 0.12f * hr, -1.42f * hr, limb);
+                limb.setStrokeWidth(0.1f * hr);
+                limb.setColor(0xAA1A2418);
+                c.drawLine(-0.55f * hr, -0.35f * hr, 0.15f * hr, -0.62f * hr, limb);
+            } else if (kind == K_RUNNER) {
+                float flut = (float) Math.sin(t * 16) * 0.2f * hr;
+                limb.setStrokeWidth(0.28f * hr);
+                limb.setColor(hair);
+                c.drawLine(-0.2f * hr, -0.85f * hr, -1.7f * hr, -0.75f * hr + flut, limb);
+                c.drawLine(-0.5f * hr, -0.6f * hr, -1.9f * hr, -0.25f * hr - flut, limb);
+                c.drawLine(-0.7f * hr, -0.2f * hr, -1.6f * hr, 0.25f * hr + flut, limb);
+            } else {
+                limb.setStrokeWidth(0.34f * hr);
+                limb.setColor(hair);
+                c.drawLine(0.05f * hr, -0.48f * hr, 0.95f * hr, -0.32f * hr, limb);
+            }
+            // A sunken socket with the eye a hot red point in it, the far eye dimmer.
+            paint.setColor(0xD0141A12);
+            c.drawOval(0.2f * hr, -0.4f * hr, 0.88f * hr, 0.1f * hr, paint);
             paint.setColor(0xFFFF3B3B);
-            c.drawCircle(hx + 2.5f * s, hy - 1 * s, 1.3f * s, paint);
-            c.drawCircle(hx - 1.5f * s, hy - 1 * s, 1.1f * s, paint);
+            c.drawCircle(0.56f * hr, -0.15f * hr, 0.17f * hr, paint);
+            paint.setColor(0xAAB02020);
+            c.drawCircle(0.04f * hr, -0.17f * hr, 0.1f * hr, paint);
+            // The jaw hanging open.
+            paint.setColor(0xFF2A1414);
+            c.drawOval(0.34f * hr, 0.3f * hr, 0.98f * hr, 0.74f * hr, paint);
+            paint.setColor(0xFFEDE6C8);
+            c.drawRect(0.46f * hr, 0.3f * hr, 0.6f * hr, 0.44f * hr, paint);
+            if (kind == K_BRUTE) {
+                c.drawRect(0.72f * hr, 0.3f * hr, 0.86f * hr, 0.44f * hr, paint);
+            }
+        } else {
+            paint.setColor(hair);
+            c.drawCircle(-0.2f * hr, -0.22f * hr, hr, paint);
+            shade.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+            shade.setShader(headShader[kind]);
+            c.drawCircle(0.12f * hr, 0.1f * hr, hr * 0.9f, shade);
+            shade.setShader(null);
+            paint.setColor(tone(skin, 0.78f));
+            c.drawCircle(-0.12f * hr, 0.2f * hr, 0.2f * hr, paint);
+            paint.setColor(0xFF1A1A1A);
+            c.drawCircle(0.6f * hr, -0.02f * hr, 0.13f * hr, paint);
+            paint.setColor(skin);
+            c.drawCircle(0.98f * hr, 0.16f * hr, 0.15f * hr, paint);
+            if (kind == K_YOU) {
+                // Headband, its tails streaming, and the headlamp on the front of it.
+                float flut = (float) Math.sin(t * 14) * 0.25f * hr * (moving ? 1f : 0.3f);
+                limb.setColor(ACCENT);
+                limb.setStrokeWidth(0.3f * hr);
+                c.drawLine(-0.95f * hr, -0.3f * hr, 0.9f * hr, -0.44f * hr, limb);
+                limb.setStrokeWidth(0.2f * hr);
+                c.drawLine(-0.95f * hr, -0.3f * hr, -1.8f * hr, -0.12f * hr + flut, limb);
+                c.drawLine(-0.95f * hr, -0.3f * hr, -1.62f * hr, 0.16f * hr - flut, limb);
+                paint.setColor(0xFF2A3038);
+                c.drawCircle(0.9f * hr, -0.44f * hr, 0.3f * hr, paint);
+                paint.setColor(0xFFFFF6D8);
+                c.drawCircle(0.98f * hr, -0.44f * hr, 0.18f * hr, paint);
+            }
+        }
+        c.restore();
+        if (kind == K_YOU) {
+            lampX = hcx + 0.98f * hr;
+            lampY = hcy - 0.44f * hr;
+            Fx.glow(c, lampX, lampY, dp(18f), 0xC0FFF0C0);
+        }
+        if (zombie) {
+            float ex = hcx + 0.56f * hr;
+            float ey = hcy - 0.15f * hr;
+            Fx.glow(c, ex, ey, dp(12f), 0x70FF2A2A);
             if (eyeCount < eyeX.length) {
-                eyeX[eyeCount] = hx + 1.8f * s;
-                eyeY[eyeCount] = hy - 1 * s;
+                eyeX[eyeCount] = ex;
+                eyeY[eyeCount] = ey;
                 eyeCount++;
             }
-            paint.setColor(0xFF2A1A1A);
-            c.drawRect(hx - 1 * s, hy + 2.5f * s, hx + 4 * s, hy + 4.5f * s, paint);
-            if (kind == K_BRUTE) {
-                // Teeth, and a scowl.
-                paint.setColor(0xFFEDE6C8);
-                c.drawRect(hx, hy + 2.5f * s, hx + 1 * s, hy + 3.5f * s, paint);
-                c.drawRect(hx + 2 * s, hy + 2.5f * s, hx + 3 * s, hy + 3.5f * s, paint);
-                paint.setColor(0xFF2A1A1A);
-                c.drawRect(hx - 3 * s, hy - 3.5f * s, hx + 4 * s, hy - 2.5f * s, paint);
-            } else if (kind == K_RUNNER) {
-                // Wild hair streaming back.
-                paint.setColor(0xFF3A3A2A);
-                c.drawRect(hx - 9 * s, hy - 6 * s, hx + 2 * s, hy - 4 * s, paint);
-            } else {
-                paint.setColor(0xFF5E8A5A);
-                c.drawRect(hx - 6 * s, hy - 6 * s, hx - 2 * s, hy - 4.5f * s, paint);
-            }
-        } else {
-            paint.setColor(kind == K_SURVIVOR ? 0xFF6A3A1A : 0xFF3A2A1A);
-            c.drawArc(hx - 6 * s, hy - 7 * s, hx + 6 * s, hy + 3 * s, 180, 180, true, paint);
-            if (kind == K_YOU) {
-                paint.setColor(ACCENT);
-                c.drawRect(hx - 6.2f * s, hy - 3.2f * s, hx + 6.2f * s, hy - 1.6f * s, paint);
-                c.drawRect(hx - 9 * s, hy - 3.2f * s, hx - 6 * s, hy - 2.2f * s, paint);
-            }
-            paint.setColor(0xFF1A1A1A);
-            c.drawCircle(hx + 3 * s, hy + 0.5f * s, 1.1f * s, paint);
         }
+
+        // Near arm last, over everything.
+        arm(c, shX, shY, uN, fN, upper * s, fore * s, armW * s, sleeve, skin, zombie);
+    }
+
+    /* Where the last arm() put its hand. */
+    private float handX;
+    private float handY;
+
+    /** Upper arm in the sleeve colour, forearm and hand in skin; zombies get two clawed fingers. */
+    private void arm(Canvas c, float sx, float sy, float u, float f, float upper, float fore, float w,
+                     int sleeve, int skin, boolean claws) {
+        float ex = sx + (float) Math.sin(u) * upper;
+        float ey = sy + (float) Math.cos(u) * upper;
+        float hx = ex + (float) Math.sin(f) * fore;
+        float hy = ey + (float) Math.cos(f) * fore;
+        limb.setStrokeWidth(w * 0.9f);
+        limb.setColor(skin);
+        c.drawLine(ex, ey, hx, hy, limb);
+        limb.setStrokeWidth(w);
+        limb.setColor(sleeve);
+        c.drawLine(sx, sy, ex, ey, limb);
+        paint.setColor(skin);
+        c.drawCircle(hx, hy, w * 0.62f, paint);
+        if (claws) {
+            limb.setStrokeWidth(w * 0.28f);
+            limb.setColor(skin);
+            for (int i = -1; i <= 1; i += 2) {
+                float a = f + i * 0.45f;
+                c.drawLine(hx, hy, hx + (float) Math.sin(a) * w * 1.3f, hy + (float) Math.cos(a) * w * 1.3f, limb);
+            }
+        }
+        handX = hx;
+        handY = hy;
+    }
+
+    /** Thigh and shin from the hip, with a shoe at the end. */
+    private void leg(Canvas c, float hx, float hy, float kx, float ky, float fx, float fy, float w, int col) {
+        limb.setStrokeWidth(w);
+        limb.setColor(col);
+        c.drawLine(hx, hy, hx + kx, hy + ky, limb);
+        limb.setStrokeWidth(w * 0.9f);
+        c.drawLine(hx + kx, hy + ky, hx + fx, hy + fy, limb);
+        limb.setStrokeWidth(w * 0.8f);
+        limb.setColor(tone(col, 0.55f));
+        c.drawLine(hx + fx - w * 0.15f, hy + fy, hx + fx + w * 0.75f, hy + fy + w * 0.05f, limb);
     }
 
     /**

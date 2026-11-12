@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.view.MotionEvent;
@@ -279,9 +280,159 @@ final class WaveRiderGame extends GameView {
     private float gradH = -1;
     private int gradSpot = -1;
 
+    /*
+     * 3.25 graphics pass. Everything below is how the wave LOOKS - the face curve (faceY), the
+     * crest height, the set lift and every position the ride uses are untouched.
+     *
+     * Gradients that must follow the crest as a set lifts it (lip, whitewater) are built at the
+     * resting crest and drawn under a canvas translate, so a set never rebuilds a shader.
+     */
+    private LinearGradient horizonGlowGrad;
+    private LinearGradient hazeGrad;
+    private LinearGradient sunColumnGrad;
+    private LinearGradient lipGrad;
+    private LinearGradient soupGrad;
+    /** Unit-height panel fill (0..1), drawn under a vertical scale: one shader for every panel. */
+    private final LinearGradient panelGrad =
+            new LinearGradient(0, 0, 0, 1, 0xFF17253B, 0xFF0A111B, Shader.TileMode.CLAMP);
+    /** Vignettes cached per tint; strength goes on the paint's alpha, not into a new shader. */
+    private RadialGradient vigDanger;
+    private RadialGradient vigShoulder;
+    private RadialGradient vigBarrel;
+    private final Paint vigPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** Translucent backlit water near the crest, per spot. */
+    private int glassColor;
+    private int glassLight;
+    private int cavityColor;
+    private int farLandColor;
+    private int nearLandColor;
+    private int cloudBody;
+    private int cloudRim;
+    private final Path facePath = new Path();
+    private final Path crestPath = new Path();
+    private final Path lacePath = new Path();
+    private final Path lipPath = new Path();
+    private final Path rimPath = new Path();
+    private final Path cavityPath = new Path();
+    private final Path soupPath = new Path();
+    private final Path headlandPath = new Path();
+    private final Path islandPath = new Path();
+    /** Unit-scale silhouettes, built once and drawn under translate/rotate/scale. */
+    private final Path boardPath = new Path();
+    private final Path dolphinPath = new Path();
+    private final Path finPath = new Path();
+    /** Spindrift blown back off the crest. */
+    private final Fx.Particles mist = new Fx.Particles();
+    private float mistAccum;
+    private float curtainAccum;
+    /** The lip's throw, eased for display only - inBarrel() still switches on the instant. */
+    private float throwShown = -1f;
+    private float cloudDrift;
+
+    /* Stroke widths (dp) and alphas of the backlit band along the crest, widest first. */
+    private static final float[] GLASS_W = {300f, 190f, 112f, 56f, 20f};
+    private static final int[] GLASS_A = {0x1A, 0x22, 0x2E, 0x3A, 0x50};
+    /* Low sunset cloud banks: x and y as fractions of the width and the sky, width in dp. */
+    private static final float[] CLOUD_X = {0.06f, 0.30f, 0.47f, 0.66f, 0.88f};
+    private static final float[] CLOUD_Y = {0.70f, 0.82f, 0.62f, 0.76f, 0.66f};
+    private static final float[] CLOUD_W = {170f, 120f, 210f, 140f, 180f};
+
     WaveRiderGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        buildSilhouettes();
+    }
+
+    /** Board and dolphin outlines in dp units, nose to the right. Built once, never per frame. */
+    private void buildSilhouettes() {
+        // Surfboard: round tail at -20, pointed nose at +22, thickest just behind the middle.
+        boardPath.moveTo(22f, -0.4f);
+        boardPath.quadTo(12f, -4.2f, -4f, -4.0f);
+        boardPath.quadTo(-17f, -3.8f, -20f, -1.6f);
+        boardPath.quadTo(-21.5f, 0f, -20f, 1.6f);
+        boardPath.quadTo(-17f, 3.8f, -4f, 4.0f);
+        boardPath.quadTo(12f, 4.2f, 22f, 0.4f);
+        boardPath.close();
+        // Dolphin, 52 long: beak, rounded melon, tapering stock and a two-lobed fluke.
+        dolphinPath.moveTo(26f, 0.5f);
+        dolphinPath.quadTo(20f, -2.5f, 16f, -5f);
+        dolphinPath.quadTo(6f, -9f, -6f, -7f);
+        dolphinPath.quadTo(-15f, -5f, -20f, -1.5f);
+        dolphinPath.lineTo(-26f, -8f);
+        dolphinPath.quadTo(-24f, -2f, -23.5f, 0f);
+        dolphinPath.quadTo(-24f, 2f, -27f, 6.5f);
+        dolphinPath.lineTo(-20f, 1.8f);
+        dolphinPath.quadTo(-8f, 8f, 6f, 6.5f);
+        dolphinPath.quadTo(17f, 5f, 26f, 1.5f);
+        dolphinPath.close();
+        finPath.moveTo(-1f, -7.5f);
+        finPath.quadTo(3f, -13f, 9f, -18f);
+        finPath.quadTo(7.5f, -12f, 9.5f, -7f);
+        finPath.close();
+    }
+
+    private static int mix(int a, int b, float t) {
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+        return 0xFF000000 | (Math.round(ar + (br - ar) * t) << 16)
+                | (Math.round(ag + (bg - ag) * t) << 8) | Math.round(ab + (bb - ab) * t);
+    }
+
+    private static int alpha(int rgb, float a) {
+        int ai = Math.max(0, Math.min(255, Math.round(a)));
+        return (ai << 24) | (rgb & 0x00FFFFFF);
+    }
+
+    /**
+     * One HUD panel: soft drop shadow, a vertical gradient fill, a 1px rim and a lit top edge.
+     * The gradient is a single unit-height shader drawn under a vertical scale, so panels of any
+     * size share it and nothing is allocated.
+     */
+    private void panel(Canvas c, float l, float t, float r, float b, float rad, int alphaByte) {
+        float ph = b - t;
+        if (ph <= 1f || r <= l) {
+            return;
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(alpha(0x000000, alphaByte * 0.35f));
+        c.drawRoundRect(l, t + dp(3f), r, b + dp(3f), rad, rad, paint);
+        c.save();
+        c.translate(l, t);
+        c.scale(1f, ph);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setAlpha(alphaByte);
+        paint.setShader(panelGrad);
+        c.drawRoundRect(0, 0, r - l, 1f, rad, rad / ph, paint);
+        paint.setShader(null);
+        c.restore();
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(alpha(0x2A3A50, alphaByte * 0.8f));
+        c.drawRoundRect(l + 0.5f, t + 0.5f, r - 0.5f, b - 0.5f, rad, rad, paint);
+        paint.setColor(alpha(0xFFFFFF, alphaByte * 0.22f));
+        c.drawLine(l + rad, t + dp(1f), r - rad, t + dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** Glossy highlight along the top third of a filled bar. */
+    private void gloss(Canvas c, float l, float t, float r, float b) {
+        if (r - l < dp(2f)) {
+            return;
+        }
+        paint.setColor(0x40FFFFFF);
+        float hh = Math.max(dp(1.5f), (b - t) * 0.38f);
+        c.drawRoundRect(l + dp(1f), t + dp(0.5f), r - dp(1f), t + hh, hh / 2f, hh / 2f, paint);
+    }
+
+    private void vignette(Canvas c, float w, float h, float strength, RadialGradient g) {
+        if (strength <= 0.01f || g == null) {
+            return;
+        }
+        vigPaint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        vigPaint.setAlpha(Math.round(Math.min(1f, strength) * 255f));
+        vigPaint.setShader(g);
+        c.drawRect(0, 0, w, h, vigPaint);
+        vigPaint.setShader(null);
     }
 
     @Override
@@ -1000,54 +1151,58 @@ final class WaveRiderGame extends GameView {
 
         c.save();
         c.translate(shake.dx, shake.dy);
-        // Sky, coloured by the spot.
-        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
-        paint.setShader(skyGrad);
-        c.drawRect(0, 0, w, horizon + dp(2f), paint);
-        paint.setShader(null);
-        Fx.glow(c, w * 0.22f, horizon - dp(6f), dp(70f), 0x77FFD9A0);
-        paint.setColor(0xFFFFE0A8);
-        c.drawCircle(w * 0.22f, horizon - dp(6f), dp(24f), paint);
+        float sunX = w * 0.22f;
+        drawSky(c, w, horizon, dt);
 
-        // Seagulls gliding over, wings flexing.
-        paint.setColor(0xFF2A2F3A);
-        paint.setStrokeWidth(dp(2.2f));
-        for (int i = 0; i < gullX.length; i++) {
-            gullX[i] += dt * (0.018f + i * 0.006f);
-            if (gullX[i] > 1.08f) {
-                gullX[i] = -0.08f;
-            }
-            float gx = gullX[i] * w;
-            float gy = horizon * (0.35f + i * 0.17f) + (float) Math.sin(sessionSeconds + i) * dp(8f);
-            float flex = (float) Math.sin(sessionSeconds * 5 + i) * dp(4f);
-            c.drawLine(gx - dp(12f), gy - flex, gx, gy, paint);
-            c.drawLine(gx, gy, gx + dp(12f), gy - flex, paint);
-        }
-
-        // Open ocean beyond the wave.
+        // Open ocean beyond the wave: darker toward the viewer, hazed into the sky at the horizon.
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(seaGrad);
         c.drawRect(0, horizon, w, h, paint);
+        paint.setShader(hazeGrad);
+        c.drawRect(0, horizon, w, seaBottom, paint);
         paint.setShader(null);
+        // The sun's road on the water: narrow at the horizon, widening and fading toward the viewer.
+        c.save();
+        c.clipRect(0, horizon, w, h);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(sunColumnGrad);
+        float roadEnd = seaBottom + h * 0.08f;
+        c.drawOval(sunX - dp(84f), horizon - dp(4f), sunX + dp(84f), horizon + (roadEnd - horizon) * 2f, paint);
+        paint.setShader(null);
+        c.restore();
         // Sailboats on the horizon, and the sun glinting on the water.
         for (int i = 0; i < 2; i++) {
             float sx = (float) ((w * (0.35f + i * 0.3f) + sessionSeconds * dp(4f) * (i + 1)) % w);
             paint.setColor(0xFFF2EAD8);
-            path.reset();
-            path.moveTo(sx, horizon - dp(18f));
-            path.lineTo(sx + dp(10f), horizon - dp(2f));
-            path.lineTo(sx, horizon - dp(2f));
+            path.rewind();
+            path.moveTo(sx, horizon - dp(19f));
+            path.lineTo(sx + dp(10f), horizon - dp(3f));
+            path.lineTo(sx, horizon - dp(3f));
             path.close();
             c.drawPath(path, paint);
-            paint.setColor(0xFF3A3F4A);
-            c.drawRect(sx - dp(8f), horizon - dp(2f), sx + dp(12f), horizon + dp(1f), paint);
+            paint.setColor(0xFFC9BBA0);                    // jib, on the shadow side
+            path.rewind();
+            path.moveTo(sx - dp(1f), horizon - dp(16f));
+            path.lineTo(sx - dp(1f), horizon - dp(3f));
+            path.lineTo(sx - dp(8f), horizon - dp(3f));
+            path.close();
+            c.drawPath(path, paint);
+            paint.setColor(0xFF2E3440);
+            path.rewind();
+            path.moveTo(sx - dp(10f), horizon - dp(2.5f));
+            path.lineTo(sx + dp(13f), horizon - dp(2.5f));
+            path.lineTo(sx + dp(9f), horizon + dp(1.5f));
+            path.lineTo(sx - dp(7f), horizon + dp(1.5f));
+            path.close();
+            c.drawPath(path, paint);
         }
         paint.setColor(0xFFFFF1C8);
         for (int i = 0; i < 26; i++) {
-            float gx = w * 0.22f + (float) Math.sin(i * 12.9898) * w * 0.18f;
+            float gx = sunX + (float) Math.sin(i * 12.9898) * w * 0.18f * (0.35f + (i % 7) / 9f);
             float gy = horizon + dp(8f) + (i % 7) * dp(9f);
             if (Math.sin(sessionSeconds * 3 + i * 1.7) > 0.4) {
-                c.drawRect(gx - dp(5f), gy, gx + dp(5f), gy + dp(1.6f), paint);
+                float half = dp(3f) + (i % 7) * dp(0.9f);    // glints widen toward the viewer
+                c.drawRect(gx - half, gy, gx + half, gy + dp(1.6f), paint);
             }
         }
 
@@ -1055,26 +1210,78 @@ final class WaveRiderGame extends GameView {
         drawIncomingSet(c, w, horizon, seaBottom, toSet);
         drawLineup(c, w, horizon, seaBottom);
 
-        // The wave face: a curve from the lip down-left into the trough.
-        path.reset();
-        path.moveTo(lipX + w * 0.3f, crestY);
-        path.lineTo(lipX, crestY);
-        for (float px = lipX; px >= lipX - faceRun; px -= dp(10f)) {
-            path.lineTo(px, faceY(px, lipX, crestY, troughY, faceRun));
+        // ---------- the wave ----------
+        // Lip: the curl, thrown further over during a barrel and taller in a big set. The throw is
+        // eased for display only; inBarrel() and the scoring still switch on the instant.
+        float throwOver = (inBarrel() ? w * 0.30f : w * 0.10f) + setLift * w * 0.05f
+                + (sizeMul - 1f) * w * 0.12f;
+        if (throwShown < 0f) {
+            throwShown = throwOver;
         }
-        path.lineTo(lipX - faceRun, h);
-        path.lineTo(w, h);
-        path.close();
+        throwShown += (throwOver - throwShown) * Math.min(1f, dt * 3.5f);
+        float tipX = lipX - throwShown;
+        // 0 = the ordinary curl, 1 = a fully open barrel with its curtain down.
+        float open = Math.max(0f, Math.min(1f, (throwShown - w * 0.13f) / (w * 0.15f)));
+        float lift = crestY - baseCrest;
+
+        // The crest line the surfer rides, from the lip down to the shoulder.
+        crestPath.rewind();
+        // Starts off the right edge so the wide glow strokes have no butt end inside the face.
+        crestPath.moveTo(w + dp(60f), crestY);
+        crestPath.lineTo(lipX, crestY);
+        for (float px = lipX - dp(10f); px >= lipX - faceRun; px -= dp(10f)) {
+            crestPath.lineTo(px, faceY(px, lipX, crestY, troughY, faceRun));
+        }
+        // The wave face: a curve from the lip down-left into the trough.
+        facePath.rewind();
+        facePath.moveTo(lipX + w * 0.3f, crestY);
+        facePath.lineTo(lipX, crestY);
+        for (float px = lipX; px >= lipX - faceRun; px -= dp(10f)) {
+            facePath.lineTo(px, faceY(px, lipX, crestY, troughY, faceRun));
+        }
+        facePath.lineTo(lipX - faceRun, h);
+        facePath.lineTo(w, h);
+        facePath.close();
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(faceGrad);
-        c.drawPath(path, paint);
+        c.drawPath(facePath, paint);
         paint.setShader(null);
-        // 3.19.6: the face was one flat triangle on the tablet. Chop lines run down it, sun glitter
-        // rides the upper face, and the base churns - so the wave is visibly moving under the board.
         c.save();
-        c.clipPath(path);
-        // Short chop that follows the face rather than long streaks across it.
+        c.clipPath(facePath);
+        // Backlit water: the top of the face is thin enough for the low sun to shine through, so
+        // it glows green-blue along the crest and deepens away from it. Strokes of the crest
+        // line, widest and faintest first, clipped to the face so only the inside half shows.
         paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        for (int k = 0; k < GLASS_W.length; k++) {
+            paint.setStrokeWidth(dp(GLASS_W[k]));
+            paint.setColor(alpha(glassColor, GLASS_A[k]));
+            c.drawPath(crestPath, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        // The thinnest, brightest water is under the peak, where the face stands tallest.
+        Fx.glow(c, lipX - faceRun * 0.16f, crestY + dp(46f), dp(230f), alpha(glassLight, 0x50));
+        Fx.glow(c, lipX - dp(40f), crestY + dp(20f), dp(110f), 0x44FFE9C0);
+        paint.setStyle(Paint.Style.STROKE);
+        // Lit edge right along the crest.
+        paint.setStrokeWidth(dp(6f));
+        paint.setColor(alpha(glassLight, 0xA0));
+        c.drawPath(crestPath, paint);
+        // Flow lines: the face's contour, drawn up toward the crest as the wave stands up.
+        paint.setStrokeWidth(dp(2.2f));
+        float flowSpan = (troughY - crestY) * 0.6f;
+        float flowPhase = (float) ((sessionSeconds * 0.16) % 1.0);
+        for (int k = 0; k < 6; k++) {
+            float f = ((k + 1f - flowPhase) % 6f) / 6f;     // 0 at the crest .. 1 deep on the face
+            float off = dp(20f) + f * flowSpan;
+            float a = 54f * (1f - f) * Math.min(1f, f * 5f);   // fades out at both ends: no pop on wrap
+            paint.setColor(alpha(glassLight, a));
+            c.save();
+            c.translate(-off * 0.3f, off);
+            c.drawPath(crestPath, paint);
+            c.restore();
+        }
+        // Short chop that follows the face rather than long streaks across it.
         paint.setStrokeCap(Paint.Cap.ROUND);
         for (int i = 0; i < 40; i++) {
             float phase = (float) ((i * 0.061 + sessionSeconds * 0.30) % 1.0);
@@ -1083,51 +1290,236 @@ final class WaveRiderGame extends GameView {
             float py0 = faceY(px0, lipX, crestY, troughY, faceRun) + down;
             float len = dp(12f) + (i % 3) * dp(8f);
             paint.setStrokeWidth(dp(1.4f) + (i % 3) * dp(0.5f));
-            int a = 30 + (int) (35 * (1 + Math.sin(i * 1.7 + sessionSeconds * 3)));
+            int a = 22 + (int) (28 * (1 + Math.sin(i * 1.7 + sessionSeconds * 3)));
             paint.setColor((a << 24) | 0xFFFFFF);
             float py1 = faceY(px0 - len, lipX, crestY, troughY, faceRun) + down + dp(2f);
             c.drawLine(px0, py0, px0 - len, py1, paint);
         }
-        paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
         for (int i = 0; i < 18; i++) {
             float phase = (float) ((i * 0.09 + sessionSeconds * 0.5) % 1.0);
             float gx0 = lipX - faceRun * phase;
             float gy0 = faceY(gx0, lipX, crestY, troughY, faceRun) + dp(16f) + (i % 5) * dp(12f);
             float tw = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 6 + i * 1.3);
-            paint.setColor(((int) (70 * tw) << 24) | 0xFFF1C8);
+            paint.setColor(((int) (80 * tw) << 24) | 0xFFF1C8);
             c.drawOval(gx0 - dp(14f), gy0 - dp(2f), gx0 + dp(14f), gy0 + dp(2f), paint);
         }
-        // Churn where the face meets the trough: it rides the face itself, not open water.
-        paint.setColor(0x55FFFFFF);
-        for (int i = 0; i < 26; i++) {
-            float phase = (float) ((i * 0.038 + sessionSeconds * 0.22) % 1.0);
-            float bx0 = lipX - faceRun * (0.55f + 0.45f * phase);
-            float by0 = faceY(bx0, lipX, crestY, troughY, faceRun) + dp(26f)
-                    + (float) Math.sin(i * 2.1 + sessionSeconds * 7) * dp(5f);
-            c.drawCircle(bx0, by0, dp(4f) + (i % 3) * dp(3f), paint);
+        // Foam lace on the shoulder, where the face runs out: two wavering threads that ride the
+        // face, plus a scatter of bubbles - not a row of beads.
+        paint.setStyle(Paint.Style.STROKE);
+        for (int k = 0; k < 2; k++) {
+            lacePath.rewind();
+            boolean first = true;
+            for (float px = lipX - faceRun * 0.4f; px >= lipX - faceRun; px -= dp(14f)) {
+                float py = faceY(px, lipX, crestY, troughY, faceRun) + dp(20f + k * 17f)
+                        + (float) Math.sin(px / dp(38f) + sessionSeconds * (2.4 + k) + k * 2.0) * dp(5f);
+                if (first) {
+                    lacePath.moveTo(px, py);
+                    first = false;
+                } else {
+                    lacePath.lineTo(px, py);
+                }
+            }
+            paint.setStrokeWidth(dp(k == 0 ? 3.4f : 2.2f));
+            paint.setColor(k == 0 ? 0x70FFFFFF : 0x40FFFFFF);
+            c.drawPath(lacePath, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 16; i++) {
+            float phase = (float) ((i * 0.061 + sessionSeconds * 0.22) % 1.0);
+            float bx0 = lipX - faceRun * (0.5f + 0.5f * phase);
+            float by0 = faceY(bx0, lipX, crestY, troughY, faceRun) + dp(28f) + (i % 4) * dp(9f)
+                    + (float) Math.sin(i * 2.1 + sessionSeconds * 7) * dp(4f);
+            paint.setColor(0x48FFFFFF);
+            c.drawCircle(bx0, by0, dp(2.5f) + (i % 3) * dp(1.5f), paint);
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        c.restore();
+
+        // Whitewater: the section to the right of the curl has already broken, so it is a churning
+        // pile of foam that thins out down the face. Built at the resting crest, drawn lifted.
+        c.save();
+        c.translate(0, lift);
+        float cb = baseCrest;
+        float soupLeft = lipX - dp(12f);
+        soupPath.rewind();
+        soupPath.moveTo(soupLeft, cb + dp(24f));
+        for (float px = soupLeft; px <= w + dp(24f); px += dp(16f)) {
+            float grow = Math.min(1f, (px - soupLeft) / dp(46f));
+            float bump = (float) (Math.sin(px / dp(29f) + sessionSeconds * 3.1) * 0.55
+                    + Math.sin(px / dp(13f) - sessionSeconds * 4.7) * 0.45);
+            soupPath.lineTo(px, cb + dp(24f) * (1f - grow) + grow * (-dp(5f) - bump * dp(7f)));
+        }
+        soupPath.lineTo(w + dp(24f), cb + h * 0.17f);
+        soupPath.lineTo(lipX + dp(50f), cb + h * 0.17f);
+        soupPath.close();
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(soupGrad);
+        c.drawPath(soupPath, paint);
+        paint.setShader(null);
+        // Bubble holes in the foam, sliding down and fading as it thins.
+        for (int i = 0; i < 10; i++) {
+            float f = (float) ((i * 0.13 + sessionSeconds * 0.18) % 1.0);
+            float hx = lipX + dp(30f) + (w - lipX) * ((i * 0.37f) % 1f);
+            float hy = cb + dp(8f) + f * h * 0.11f;
+            paint.setColor(alpha(SPOT_FACE[spot][0], 70 * (1f - f)));
+            c.drawOval(hx - dp(9f), hy - dp(2.5f), hx + dp(9f), hy + dp(2.5f), paint);
+        }
+        // The crest of the foam pile: shaded blobs, lit from the upper left, churning.
+        for (int i = 0; i < 13; i++) {
+            float fx = lipX + dp(8f) + (w - lipX) * ((i + 0.3f) / 13f)
+                    + (float) Math.sin(i * 3.1 + sessionSeconds * 1.3) * dp(6f);
+            float fy = cb - dp(3f) + (float) Math.sin(i * 1.9 + sessionSeconds * 5.0) * dp(5f);
+            float r = dp(9f) + (i % 3) * dp(4f);
+            paint.setColor(0x669DB8CC);
+            c.drawCircle(fx + r * 0.22f, fy + r * 0.3f, r, paint);
+            paint.setColor(0xF4FFFFFF);
+            c.drawCircle(fx - r * 0.05f, fy - r * 0.05f, r * 0.86f, paint);
         }
         c.restore();
 
-        // Lip: the curl, thrown further over during a barrel and taller in a big set.
-        float throwOver = (inBarrel() ? w * 0.30f : w * 0.10f) + setLift * w * 0.05f
-                + (sizeMul - 1f) * w * 0.12f;
-        paint.setColor(SPOT_LIP[spot]);
-        path.reset();
-        path.moveTo(lipX, crestY);
-        path.cubicTo(lipX + dp(10f), crestY - dp(46f), lipX - throwOver * 0.5f, crestY - dp(54f),
-                lipX - throwOver, crestY + dp(18f));
-        path.cubicTo(lipX - throwOver * 0.6f, crestY - dp(16f), lipX - dp(6f), crestY + dp(12f),
-                lipX, crestY + dp(30f));
-        path.close();
-        c.drawPath(path, paint);
-        // Whitewater under the curl.
-        paint.setColor(0xEEFFFFFF);
-        for (int i = 0; i < 16; i++) {
-            float fx0 = lipX - throwOver * (i / 16f);
-            float fy0 = crestY + dp(20f) + (float) Math.sin(i * 1.7 + sessionSeconds * 8) * dp(7f);
-            c.drawCircle(fx0, fy0, dp(7f) + (i % 3) * dp(3f), paint);
+        // The tube: the hollow under the lip, dark, with its wall spinning.
+        float tipY = crestY + dp(18f);
+        float landX = tipX - open * dp(40f);
+        float landY = faceY(landX, lipX, crestY, troughY, faceRun);
+        cavityPath.rewind();
+        cavityPath.moveTo(lipX, crestY);
+        for (float px = lipX - dp(10f); px > landX; px -= dp(10f)) {
+            cavityPath.lineTo(px, faceY(px, lipX, crestY, troughY, faceRun));
         }
+        cavityPath.lineTo(landX, landY);
+        cavityPath.quadTo(tipX - dp(10f) * open, (tipY + landY) / 2f, tipX, tipY + dp(3f));
+        cavityPath.cubicTo(lipX - throwShown * 0.6f, crestY - dp(16f), lipX - dp(6f), crestY + dp(12f),
+                lipX, crestY + dp(30f));
+        cavityPath.close();
+        paint.setColor(alpha(cavityColor, 0xF2));
+        c.drawPath(cavityPath, paint);
+        c.save();
+        c.clipPath(cavityPath);
+        // Light through the thin back wall of the tube, brightest near the opening.
+        Fx.glow(c, tipX + dp(30f), (tipY + landY) / 2f, dp(150f), alpha(glassColor, 0x70));
+        Fx.glow(c, lipX - throwShown * 0.4f, crestY + dp(10f), dp(120f), alpha(glassColor, 0x40));
+        // The wall spinning round the tube: arcs parallel to the lip, moving down and in.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        rimPath.rewind();
+        rimPath.moveTo(lipX, crestY);
+        rimPath.cubicTo(lipX + dp(10f), crestY - dp(46f), lipX - throwShown * 0.5f, crestY - dp(54f),
+                tipX, crestY + dp(18f));
+        float spin = (float) ((sessionSeconds * (0.9 + open * 0.8)) % 1.0);
+        for (int k = 0; k < 4; k++) {
+            float f = (k + spin) / 4f;
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(alpha(glassLight, 70 * (1f - f)));
+            c.save();
+            c.translate(-f * dp(10f), dp(22f) + f * (landY - crestY) * 0.55f);
+            c.drawPath(rimPath, paint);
+            c.restore();
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+
+        // The curtain: in a barrel the lip pours down in a translucent sheet and explodes on the
+        // face ahead of you.
+        if (open > 0.02f) {
+            lacePath.rewind();
+            lacePath.moveTo(tipX + dp(12f), tipY - dp(8f));
+            lacePath.quadTo(tipX - dp(22f) * open, (tipY + landY) / 2f, landX - dp(16f) * open, landY);
+            lacePath.lineTo(landX + dp(8f), landY);
+            lacePath.quadTo(tipX - dp(10f) * open, (tipY + landY) / 2f, tipX, tipY + dp(3f));
+            lacePath.close();
+            paint.setColor(alpha(glassColor, 0xA8 * open));
+            c.drawPath(lacePath, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2.5f));
+            paint.setColor(alpha(0xFFFFFF, 0x90 * open));
+            c.drawPath(lacePath, paint);
+            paint.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < 7; i++) {
+                float fx = landX - dp(26f) + i * dp(9f) + (float) Math.sin(i * 2.3 + sessionSeconds * 9) * dp(4f);
+                float fy = landY - dp(4f) + (float) Math.sin(i * 1.4 + sessionSeconds * 11) * dp(5f);
+                float r = (dp(6f) + (i % 3) * dp(3f)) * open;
+                paint.setColor(0x669DB8CC);
+                c.drawCircle(fx + r * 0.25f, fy + r * 0.3f, r, paint);
+                paint.setColor(0xF0FFFFFF);
+                c.drawCircle(fx, fy, r * 0.85f, paint);
+            }
+            curtainAccum += dt * 34f * open;
+            while (curtainAccum >= 1f) {
+                curtainAccum -= 1f;
+                spray.spawn(landX + (float) (Math.random() - 0.5) * dp(30f), landY,
+                        (float) (Math.random() - 0.6) * dp(160f), -dp(60f) - (float) Math.random() * dp(120f),
+                        0.6f, dp(2.6f), 0xCCEAF6FF, true);
+            }
+        }
+
+        // The lip itself: glassy and lit from behind at its thin top, deeper in the throat.
+        c.save();
+        c.translate(0, lift);
+        lipPath.rewind();
+        lipPath.moveTo(lipX, cb);
+        lipPath.cubicTo(lipX + dp(10f), cb - dp(46f), lipX - throwShown * 0.5f, cb - dp(54f),
+                tipX, cb + dp(18f));
+        lipPath.cubicTo(lipX - throwShown * 0.6f, cb - dp(16f), lipX - dp(6f), cb + dp(12f),
+                lipX, cb + dp(30f));
+        lipPath.close();
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(lipGrad);
+        c.drawPath(lipPath, paint);
+        paint.setShader(null);
+        c.save();
+        c.clipPath(lipPath);
+        Fx.glow(c, lipX - throwShown * 0.28f, cb - dp(34f), dp(70f), 0x66FFE9C0);
+        c.restore();
+        // Feathering foam along the lip's leading edge.
+        rimPath.rewind();
+        rimPath.moveTo(lipX, cb);
+        rimPath.cubicTo(lipX + dp(10f), cb - dp(46f), lipX - throwShown * 0.5f, cb - dp(54f),
+                tipX, cb + dp(18f));
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(10f));
+        paint.setColor(alpha(glassLight, 0x70));
+        c.drawPath(rimPath, paint);
+        paint.setStrokeWidth(dp(4f));
+        paint.setColor(0xE8FFFFFF);
+        c.drawPath(rimPath, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+        // Whitewater under the curl, gathered at its root once the barrel opens.
+        for (int i = 0; i < 16; i++) {
+            float along = (i / 16f) * (1f - 0.65f * open);
+            float fx0 = lipX - throwShown * along;
+            float fy0 = crestY + dp(20f) + (float) Math.sin(i * 1.7 + sessionSeconds * 8) * dp(7f);
+            float r = dp(7f) + (i % 3) * dp(3f);
+            paint.setColor(0x669DB8CC);
+            c.drawCircle(fx0 + r * 0.22f, fy0 + r * 0.3f, r, paint);
+            paint.setColor(0xEEFFFFFF);
+            c.drawCircle(fx0 - r * 0.05f, fy0 - r * 0.05f, r * 0.86f, paint);
+        }
+        // Spindrift: the offshore breeze tears spray back off the top of the curl and the pile.
+        // A little more of it when you are moving well and when a set stands the wave up.
+        mistAccum += dt * (10f + speed * 5f + setLift * 16f);
+        while (mistAccum >= 1f) {
+            mistAccum -= 1f;
+            float u = (float) Math.random();
+            float mx;
+            float my;
+            if (Math.random() < 0.7) {
+                mx = lipX + dp(8f) - throwShown * 0.5f * u;
+                my = crestY - dp(40f) - (float) Math.random() * dp(10f);
+            } else {
+                mx = lipX + (w - lipX) * u;
+                my = crestY - dp(8f);
+            }
+            mist.spawn(mx, my, dp(50f) + (float) Math.random() * dp(110f),
+                    -dp(22f) - (float) Math.random() * dp(55f), 0.7f + (float) Math.random() * 0.6f,
+                    dp(2f) + (float) Math.random() * dp(2.8f), 0x99F4FBFF, false);
+        }
+        mist.step(dt, 0f);
+        mist.draw(c);
 
         // Spray thrown off the board's rail, and a wake up the face behind it.
         drawBoardWash(c, lipX, crestY, troughY, faceRun, dt);
@@ -1144,7 +1536,7 @@ final class WaveRiderGame extends GameView {
             float ny = faceY(nx, lipX, crestY, troughY, faceRun);
             float hop = f > 0.45f && f < 0.6f ? (float) Math.sin((f - 0.45f) / 0.15f * Math.PI) * dp(40f) : 0f;
             drawRider(c, nx, ny - hop, 0.85f, NPC_COLORS[npcRider], 0x22FFFFFF, false);
-            label(c, NPC_NAMES[npcRider], nx, ny - hop - dp(38f), 9f, NPC_COLORS[npcRider], Paint.Align.CENTER);
+            label(c, NPC_NAMES[npcRider], nx, ny - hop - dp(42f), 9f, NPC_COLORS[npcRider], Paint.Align.CENTER);
         }
 
         // Surfer: position maps along the face, pocket sitting just left of the curl.
@@ -1179,17 +1571,7 @@ final class WaveRiderGame extends GameView {
             float f = (float) (sinceDolphin / 1.4);
             float dx = w * (0.15f + 0.3f * f);
             float dy = h * 0.92f - (float) Math.sin(Math.PI * f) * h * 0.16f;
-            c.save();
-            c.rotate(-60 + 120 * f, dx, dy);
-            paint.setColor(0xFF6E8FA8);
-            c.drawOval(dx - dp(26f), dy - dp(8f), dx + dp(26f), dy + dp(8f), paint);
-            path.reset();
-            path.moveTo(dx - dp(2f), dy - dp(7f));
-            path.lineTo(dx + dp(8f), dy - dp(18f));
-            path.lineTo(dx + dp(10f), dy - dp(6f));
-            path.close();
-            c.drawPath(path, paint);
-            c.restore();
+            drawDolphin(c, dx, dy, -60 + 120 * f, 1f, 0xFF6E8FA8);
             if (f < 0.08f || f > 0.92f) {
                 spray.burst(dx, h * 0.92f, 6, dp(90f), 0.5f, dp(2.5f), 0xCCEAF6FF, true);
             }
@@ -1207,17 +1589,38 @@ final class WaveRiderGame extends GameView {
         }
         c.restore();
 
-        // Barrel framing: the lip arcs right over the top of the view.
+        // Barrel framing: the lip arcs right over the top of the view, its lit underside dripping.
         if (inBarrel() && phase == Phase.RIDING) {
-            paint.setColor(0xCC0A1A26);
-            path.reset();
+            paint.setColor(alpha(cavityColor, 0xD8));
+            path.rewind();
             path.moveTo(0, 0);
             path.lineTo(w, 0);
             path.lineTo(w, h * 0.16f);
             path.cubicTo(w * 0.6f, h * 0.34f, w * 0.3f, h * 0.10f, 0, h * 0.22f);
             path.close();
             c.drawPath(path, paint);
-            Fx.vignette(c, w, h, 0.55f, 0x08243A);
+            lacePath.rewind();
+            lacePath.moveTo(w, h * 0.16f);
+            lacePath.cubicTo(w * 0.6f, h * 0.34f, w * 0.3f, h * 0.10f, 0, h * 0.22f);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(14f));
+            paint.setColor(alpha(glassColor, 0x70));
+            c.drawPath(lacePath, paint);
+            paint.setStrokeWidth(dp(3.5f));
+            paint.setColor(0xC0FFFFFF);
+            c.drawPath(lacePath, paint);
+            paint.setStyle(Paint.Style.FILL);
+            if (Math.random() < dt * 14f) {
+                // A drip off the overhead lip, at a point on that same curve.
+                float u = (float) Math.random();
+                float v = 1f - u;
+                float ex = v * v * v * w + 3 * v * v * u * w * 0.6f + 3 * v * u * u * w * 0.3f;
+                float ey = v * v * v * h * 0.16f + 3 * v * v * u * h * 0.34f + 3 * v * u * u * h * 0.10f
+                        + u * u * u * h * 0.22f;
+                spray.spawn(ex, ey, (float) (Math.random() - 0.5) * dp(20f), dp(30f), 0.9f, dp(2.6f),
+                        0xCCEAF6FF, true);
+            }
+            vignette(c, w, h, 0.55f, vigBarrel);
         }
         // Pops: entering the pocket, and every 25 points.
         if (phase == Phase.RIDING) {
@@ -1239,28 +1642,35 @@ final class WaveRiderGame extends GameView {
             bold(c, popup, w * 0.45f, h * 0.42f - rise, 26f, popupColor, Paint.Align.CENTER);
         }
         if (!inPocket() && phase == Phase.RIDING) {
-            Fx.vignette(c, w, h, 0.25f + Math.abs(position) * 0.5f,
-                    position < 0 ? 0x8A1010 : 0x1A3A5A);
+            vignette(c, w, h, 0.25f + Math.abs(position) * 0.5f,
+                    position < 0 ? vigDanger : vigShoulder);
         }
 
         // ---------- HUD ----------
         // The band: where you are on the face, with the pocket and the trick zone marked.
         float bandW = w * 0.52f;
         float bx = w * 0.5f - bandW / 2f;
-        float by = h - dp(52f);
-        paint.setColor(0x44000000);
+        // 3.25: raised, with its labels above the track. They used to sit on the footer's value
+        // line, so LIP ran into POINTS and SHOULDER into MEDALS.
+        float by = h - dp(64f);
+        panel(c, bx - dp(16f), by - dp(26f), bx + bandW + dp(16f), by + dp(20f), dp(12f), 0x99);
+        paint.setColor(0x66000000);
         c.drawRoundRect(bx, by, bx + bandW, by + dp(14f), dp(7f), dp(7f), paint);
-        paint.setColor(0x3335D0BA);
+        paint.setColor(0x4435D0BA);
         c.drawRect(bx + bandW * 0.325f, by, bx + bandW * 0.675f, by + dp(14f), paint);
         paint.setColor(0x66F5C518);
         c.drawRect(bx + bandW * 0.05f, by + dp(10f), bx + bandW * 0.45f, by + dp(14f), paint);
+        gloss(c, bx, by, bx + bandW, by + dp(14f));
         float px = bx + bandW * ((position + 1f) / 2f);
-        paint.setColor(inPocket() ? ACCENT : position < 0 ? BAD : WARN);
+        int markCol = inPocket() ? ACCENT : position < 0 ? BAD : WARN;
+        Fx.glow(c, px, by + dp(7f), dp(22f), alpha(markCol, 0x60));
+        paint.setColor(markCol);
         c.drawRoundRect(px - dp(4f), by - dp(4f), px + dp(4f), by + dp(18f), dp(3f), dp(3f), paint);
-        label(c, "LIP", bx, by + dp(28f), 8.5f, BAD, Paint.Align.LEFT);
-        label(c, "TRICK ZONE", bx + bandW * 0.25f, by + dp(28f), 8.5f, 0xFFF5C518, Paint.Align.CENTER);
-        label(c, "POCKET", w * 0.5f, by + dp(28f), 8.5f, ACCENT, Paint.Align.CENTER);
-        label(c, "SHOULDER", bx + bandW, by + dp(28f), 8.5f, WARN, Paint.Align.RIGHT);
+        gloss(c, px - dp(4f), by - dp(4f), px + dp(4f), by + dp(18f));
+        label(c, "LIP", bx, by - dp(8f), 8.5f, BAD, Paint.Align.LEFT);
+        label(c, "TRICK ZONE", bx + bandW * 0.25f, by - dp(8f), 8.5f, 0xFFF5C518, Paint.Align.CENTER);
+        label(c, "POCKET", w * 0.5f, by - dp(8f), 8.5f, ACCENT, Paint.Align.CENTER);
+        label(c, "SHOULDER", bx + bandW, by - dp(8f), 8.5f, WARN, Paint.Align.RIGHT);
 
         // Sweet-spot bar up the right edge: where you are on the face, the pocket in green, and an
         // arrow for which way you are drifting - up when you are faster than the wave, down when
@@ -1270,27 +1680,35 @@ final class WaveRiderGame extends GameView {
         float sBottom = h * 0.70f;
         float sMid = (sTop + sBottom) / 2f;
         float half = (sBottom - sTop) / 2f;
+        // Backed by a panel now: the whitewater behind it is bright.
+        panel(c, sx - dp(78f), sTop - dp(28f), w - dp(4f), sBottom + dp(26f), dp(12f), 0xA0);
         paint.setColor(0x66000000);
         c.drawRoundRect(sx - dp(10f), sTop, sx + dp(10f), sBottom, dp(10f), dp(10f), paint);
-        paint.setColor(0x6635D0BA);
+        paint.setColor(0x7735D0BA);
         c.drawRect(sx - dp(10f), sMid - half * 0.35f, sx + dp(10f), sMid + half * 0.35f, paint);
         paint.setColor(0x88F5C518);
         c.drawRect(sx - dp(10f), sMid + half * 0.1f, sx - dp(6f), sMid + half * 0.9f, paint);
+        paint.setColor(0x26FFFFFF);
+        c.drawRoundRect(sx - dp(9f), sTop + dp(2f), sx - dp(3f), sBottom - dp(2f), dp(3f), dp(3f), paint);
         float marker = sMid - half * Math.max(-1f, Math.min(1f, position));
-        paint.setColor(inPocket() ? ACCENT : position < 0 ? BAD : WARN);
+        Fx.glow(c, sx, marker, dp(30f), alpha(markCol, 0x60));
+        paint.setColor(markCol);
         c.drawRoundRect(sx - dp(16f), marker - dp(5f), sx + dp(16f), marker + dp(5f), dp(4f), dp(4f), paint);
+        gloss(c, sx - dp(16f), marker - dp(5f), sx + dp(16f), marker + dp(5f));
+        paint.setColor(markCol);
         if (phase == Phase.RIDING && Math.abs(speed - wave) > 0.08f) {
             boolean up = speed > wave;
             float ay = marker + (up ? -dp(14f) : dp(14f));
-            path.reset();
+            path.rewind();
             path.moveTo(sx - dp(8f), ay + (up ? dp(6f) : -dp(6f)));
             path.lineTo(sx + dp(8f), ay + (up ? dp(6f) : -dp(6f)));
             path.lineTo(sx, ay - (up ? dp(6f) : -dp(6f)));
             path.close();
             c.drawPath(path, paint);
         }
-        label(c, "SHOULDER", sx, sTop - dp(8f), 8f, WARN, Paint.Align.CENTER);
-        label(c, "LIP", sx, sBottom + dp(16f), 8f, BAD, Paint.Align.CENTER);
+        // Right-aligned inside the panel: centred on the bar, SHOULDER ran off the screen edge.
+        label(c, "SHOULDER", w - dp(10f), sTop - dp(9f), 8f, WARN, Paint.Align.RIGHT);
+        label(c, "LIP", sx, sBottom + dp(18f), 8f, BAD, Paint.Align.CENTER);
         label(c, "POCKET", sx - dp(18f), sMid + dp(3f), 8f, ACCENT, Paint.Align.RIGHT);
         label(c, "TRICK", sx - dp(18f), sMid + half * 0.62f, 8f, 0xFFF5C518, Paint.Align.RIGHT);
 
@@ -1329,7 +1747,7 @@ final class WaveRiderGame extends GameView {
                     cap = inPocket() ? "IN THE BARREL - TRIPLE SCORE" : "BARREL - GET IN THE POCKET";
                     col = inPocket() ? ACCENT : WARN;
                 } else if (position <= -0.6f) {
-                    cap = String.format(java.util.Locale.US, "PULL HARDER - WAVE IS DOING %.1f m/s", wave);
+                    cap = "PULL HARDER - WAVE IS DOING " + score1(wave) + " m/s";
                     col = BAD;
                 } else if (inTrickZone() && rideSeconds > 3
                         && sessionSeconds - trickStart > TRICK_LEN + TRICK_COOLDOWN) {
@@ -1339,10 +1757,10 @@ final class WaveRiderGame extends GameView {
                     cap = "IN THE POCKET - DOUBLE SCORE";
                     col = ACCENT;
                 } else if (position < 0) {
-                    cap = String.format(java.util.Locale.US, "PULL HARDER - WAVE IS DOING %.1f m/s", wave);
+                    cap = "PULL HARDER - WAVE IS DOING " + score1(wave) + " m/s";
                     col = BAD;
                 } else {
-                    cap = String.format(java.util.Locale.US, "EASE OFF - WAVE IS DOING %.1f m/s", wave);
+                    cap = "EASE OFF - WAVE IS DOING " + score1(wave) + " m/s";
                     col = WARN;
                 }
         }
@@ -1418,12 +1836,79 @@ final class WaveRiderGame extends GameView {
         gradW = w;
         gradH = h;
         gradSpot = spot;
-        skyGrad = new LinearGradient(0, 0, 0, horizon, SPOT_SKY[spot][0], SPOT_SKY[spot][1],
+        int skyTop = SPOT_SKY[spot][0];
+        int skyLow = SPOT_SKY[spot][1];
+        int seaTop = SPOT_SEA[spot][0];
+        int seaLow = SPOT_SEA[spot][1];
+        int faceHi = SPOT_FACE[spot][0];
+        int faceLo = SPOT_FACE[spot][1];
+        float seaBottom = h * 0.62f;
+        skyGrad = new LinearGradient(0, 0, 0, horizon,
+                new int[] {mix(skyTop, 0xFF000000, 0.25f), skyTop, mix(skyTop, skyLow, 0.55f), skyLow},
+                new float[] {0f, 0.35f, 0.72f, 1f}, Shader.TileMode.CLAMP);
+        horizonGlowGrad = new LinearGradient(0, horizon * 0.45f, 0, horizon,
+                alpha(mix(skyLow, 0xFFFFF4E0, 0.35f), 0), alpha(mix(skyLow, 0xFFFFF4E0, 0.35f), 0x80),
                 Shader.TileMode.CLAMP);
-        seaGrad = new LinearGradient(0, horizon, 0, h, SPOT_SEA[spot][0], SPOT_SEA[spot][1],
+        // The sea darkens toward the viewer, and the far water takes the sky's colour (haze).
+        seaGrad = new LinearGradient(0, horizon, 0, h,
+                new int[] {mix(seaTop, skyLow, 0.18f), seaTop, seaLow, mix(seaLow, 0xFF000000, 0.3f)},
+                new float[] {0f, 0.12f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+        hazeGrad = new LinearGradient(0, horizon, 0, horizon + (seaBottom - horizon) * 0.55f,
+                alpha(mix(skyLow, seaTop, 0.45f), 0x78), alpha(mix(skyLow, seaTop, 0.45f), 0),
                 Shader.TileMode.CLAMP);
-        faceGrad = new LinearGradient(lipX - faceRun, crestY, lipX, troughY,
-                SPOT_FACE[spot][0], SPOT_FACE[spot][1], Shader.TileMode.CLAMP);
+        sunColumnGrad = new LinearGradient(0, horizon, 0, seaBottom + h * 0.08f,
+                0x88FFE3B0, 0x00FFE3B0, Shader.TileMode.CLAMP);
+        // The face: lit near the crest, deep at the base, nearly black where it meets the frame.
+        faceGrad = new LinearGradient(0, crestY, 0, h,
+                new int[] {mix(faceHi, 0xFFFFFFFF, 0.06f), faceHi, faceLo, mix(faceLo, 0xFF000000, 0.35f)},
+                new float[] {0f, 0.22f, 0.7f, 1f}, Shader.TileMode.CLAMP);
+        glassColor = mix(SPOT_LIP[spot], 0xFF3FE6C0, 0.42f);
+        glassLight = mix(glassColor, 0xFFFFFFFF, 0.55f);
+        cavityColor = mix(faceLo, 0xFF000000, 0.45f);
+        // Thin water at the top of the lip glows; the throat of the curl is deeper.
+        lipGrad = new LinearGradient(0, crestY - dp(58f), 0, crestY + dp(34f),
+                new int[] {glassLight, glassColor, SPOT_LIP[spot], faceHi},
+                new float[] {0f, 0.3f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+        soupGrad = new LinearGradient(0, crestY - dp(14f), 0, crestY + h * 0.17f,
+                new int[] {0xF8FFFFFF, 0xD8EAF6FF, 0x70D8ECF8, 0x00D8ECF8},
+                new float[] {0f, 0.3f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+        float vr = Math.max(w, h) * 0.75f;
+        float[] vStops = {0f, 0.55f, 1f};
+        vigDanger = new RadialGradient(w / 2f, h / 2f, vr, new int[] {0, 0, 0xC88A1010}, vStops,
+                Shader.TileMode.CLAMP);
+        vigShoulder = new RadialGradient(w / 2f, h / 2f, vr, new int[] {0, 0, 0xC81A3A5A}, vStops,
+                Shader.TileMode.CLAMP);
+        vigBarrel = new RadialGradient(w / 2f, h / 2f, vr, new int[] {0, 0, 0xC808243A}, vStops,
+                Shader.TileMode.CLAMP);
+        // Land on the horizon: a nearer headland and a paler island beyond it (aerial perspective).
+        nearLandColor = mix(skyLow, seaLow, 0.62f);
+        farLandColor = mix(skyLow, seaTop, 0.32f);
+        cloudBody = mix(mix(skyTop, skyLow, 0.6f), 0xFFFFFFFF, 0.12f);
+        cloudRim = mix(skyLow, 0xFFFFF0D8, 0.45f);
+        headlandPath.rewind();
+        float hx0 = w * 0.29f;
+        float hx1 = w * 0.52f;
+        headlandPath.moveTo(hx0, horizon + dp(2f));
+        for (int i = 0; i <= 28; i++) {
+            float f = i / 28f;
+            float env = (float) Math.sin(Math.PI * Math.pow(f, 0.62));
+            float ridge = 0.78f + 0.14f * (float) Math.sin(i * 2.3) + 0.08f * (float) Math.sin(i * 5.1);
+            headlandPath.lineTo(hx0 + (hx1 - hx0) * f, horizon - dp(30f) * env * ridge);
+        }
+        headlandPath.lineTo(hx1, horizon + dp(2f));
+        headlandPath.close();
+        islandPath.rewind();
+        float ix0 = w * 0.50f;
+        float ix1 = w * 0.63f;
+        islandPath.moveTo(ix0, horizon + dp(2f));
+        for (int i = 0; i <= 16; i++) {
+            float f = i / 16f;
+            float env = (float) Math.sin(Math.PI * f);
+            float ridge = 0.8f + 0.2f * (float) Math.sin(i * 3.7);
+            islandPath.lineTo(ix0 + (ix1 - ix0) * f, horizon - dp(14f) * env * ridge);
+        }
+        islandPath.lineTo(ix1, horizon + dp(2f));
+        islandPath.close();
     }
 
     /**
@@ -1476,21 +1961,43 @@ final class WaveRiderGame extends GameView {
 
     private void drawSitter(Canvas c, float x, float y, int color, boolean armsUp) {
         float s = dp(1f);
-        paint.setColor(0xFFF2EAD8);
-        c.drawOval(x - 18 * s, y - 2 * s, x + 18 * s, y + 4 * s, paint);          // board
         paint.setColor(0x44E8F4FF);
-        c.drawOval(x - 22 * s, y + 2 * s, x + 22 * s, y + 7 * s, paint);          // ripple
-        paint.setColor(color);
-        c.drawRect(x - 4 * s, y - 16 * s, x + 4 * s, y - 1 * s, paint);          // torso
-        if (armsUp) {
-            c.drawRect(x - 9 * s, y - 28 * s, x - 5 * s, y - 13 * s, paint);
-            c.drawRect(x + 5 * s, y - 28 * s, x + 9 * s, y - 13 * s, paint);
-        } else {
-            c.drawRect(x - 9 * s, y - 13 * s, x - 5 * s, y - 3 * s, paint);
-            c.drawRect(x + 5 * s, y - 13 * s, x + 9 * s, y - 3 * s, paint);
+        c.drawOval(x - 24 * s, y + 2 * s, x + 24 * s, y + 8 * s, paint);          // ripple
+        paint.setColor(0x26E8F4FF);
+        c.drawOval(x - 31 * s, y + 5 * s, x + 31 * s, y + 11 * s, paint);
+        drawSurfboard(c, x, y + 1 * s, 0f, 0.95f, 0xFFF2EAD8, true);
+        // Sitting astride the board: thigh, torso, arms - round-capped limbs over a dark outline.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        for (int pass = 0; pass < 2; pass++) {
+            float extra = pass == 0 ? 2.4f * s : 0f;
+            paint.setColor(pass == 0 ? 0xC0061420 : color);
+            paint.setStrokeWidth(4.2f * s + extra);
+            c.drawLine(x - 1 * s, y - 3 * s, x + 7 * s, y + 1 * s, paint);       // thigh
+            paint.setStrokeWidth(6.2f * s + extra);
+            c.drawLine(x - 1 * s, y - 3 * s, x, y - 14 * s, paint);              // torso
+            paint.setStrokeWidth(3.2f * s + extra);
+            path.rewind();
+            if (armsUp) {
+                path.moveTo(x - 7 * s, y - 28 * s);
+                path.lineTo(x - 5 * s, y - 20 * s);
+                path.lineTo(x, y - 13 * s);
+                path.lineTo(x + 5 * s, y - 20 * s);
+                path.lineTo(x + 7 * s, y - 28 * s);
+            } else {
+                path.moveTo(x - 6 * s, y - 2 * s);
+                path.lineTo(x - 5 * s, y - 8 * s);
+                path.lineTo(x, y - 13 * s);
+                path.lineTo(x + 5 * s, y - 8 * s);
+                path.lineTo(x + 6 * s, y - 2 * s);
+            }
+            c.drawPath(path, paint);
         }
-        paint.setColor(0xFFF1C27D);
-        c.drawCircle(x, y - 20 * s, 4 * s, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStrokeJoin(Paint.Join.MITER);
+        paint.setStyle(Paint.Style.FILL);
+        drawHead(c, x, y - 19 * s, 4 * s);
     }
 
     /** The player mid-air: launched off the lip, spinning for everything but a straight air. */
@@ -1533,6 +2040,7 @@ final class WaveRiderGame extends GameView {
         if (next >= MEDAL_AT.length) {
             paint.setColor(MEDAL_COLORS[2]);
             c.drawRoundRect(x0, y, x0 + barW, y + dp(6f), dp(3f), dp(3f), paint);
+            gloss(c, x0, y, x0 + barW, y + dp(6f));
             label(c, "GOLD - KEEP RIDING", cx, y + dp(18f), 8.5f, MEDAL_COLORS[2], Paint.Align.CENTER);
             return;
         }
@@ -1540,6 +2048,7 @@ final class WaveRiderGame extends GameView {
         float frac = (float) Math.max(0, Math.min(1, (rideSeconds - from) / (MEDAL_AT[next] - from)));
         paint.setColor(MEDAL_COLORS[next]);
         c.drawRoundRect(x0, y, x0 + barW * frac, y + dp(6f), dp(3f), dp(3f), paint);
+        gloss(c, x0, y, x0 + barW * frac, y + dp(6f));
         if (rideMedal >= 0) {
             drawMedal(c, x0 - dp(14f), y + dp(3f), dp(7f), MEDAL_COLORS[rideMedal]);
         }
@@ -1550,10 +2059,12 @@ final class WaveRiderGame extends GameView {
     private void drawMedal(Canvas c, float x, float y, float r, int color) {
         paint.setColor(0xFF2E6FD8);
         c.drawRect(x - r * 0.5f, y - r * 2.1f, x + r * 0.5f, y - r * 0.6f, paint);   // ribbon
-        paint.setColor(color);
+        paint.setColor(mix(color, 0xFF000000, 0.3f));
         c.drawCircle(x, y, r, paint);
-        paint.setColor(0x55FFFFFF);
-        c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.35f, paint);
+        paint.setColor(color);
+        c.drawCircle(x - r * 0.08f, y - r * 0.08f, r * 0.8f, paint);
+        paint.setColor(0x66FFFFFF);
+        c.drawCircle(x - r * 0.3f, y - r * 0.3f, r * 0.32f, paint);
     }
 
     private void drawMedalTally(Canvas c, float x, float y) {
@@ -1577,8 +2088,7 @@ final class WaveRiderGame extends GameView {
         spotTop = dp(10f);
         spotRight = spotLeft + dp(210f);
         spotBottom = spotTop + dp(52f);
-        paint.setColor(live ? 0xAA0A1A26 : 0x660A1A26);
-        c.drawRoundRect(spotLeft, spotTop, spotRight, spotBottom, dp(10f), dp(10f), paint);
+        panel(c, spotLeft, spotTop, spotRight, spotBottom, dp(10f), live ? 0xC8 : 0x80);
         if (live) {
             paint.setColor(0x6635D0BA);
             paint.setStyle(Paint.Style.STROKE);
@@ -1613,6 +2123,7 @@ final class WaveRiderGame extends GameView {
         paint.setColor(0xFF9FE3F0);
         c.drawRoundRect(spotLeft + dp(10f), barTop, spotLeft + dp(10f) + barW * frac,
                 barTop + dp(4f), dp(2f), dp(2f), paint);
+        gloss(c, spotLeft + dp(10f), barTop, spotLeft + dp(10f) + barW * frac, barTop + dp(4f));
         label(c, "LOCKED: " + SPOT_NAMES[next] + "  ·  " + lifetimeTricks + " / "
                         + SPOT_UNLOCK[next] + " TRICKS",
                 spotLeft + dp(10f), barTop + dp(12f), 7.5f, 0xCC9FE3F0, Paint.Align.LEFT);
@@ -1624,9 +2135,7 @@ final class WaveRiderGame extends GameView {
         float x = dp(10f);
         float y = dp(80f);
         float boardW = dp(210f);
-        paint.setColor(0x880A1A26);
-        c.drawRoundRect(x, y - dp(14f), x + boardW, y + dp(16f) * board.length + dp(6f),
-                dp(8f), dp(8f), paint);
+        panel(c, x, y - dp(14f), x + boardW, y + dp(16f) * board.length + dp(6f), dp(10f), 0xB0);
         label(c, "HEAT " + heatNumber + " - BEST 3 WAVES", x + dp(8f), y - dp(2f), 7.5f, FAINT,
                 Paint.Align.LEFT);
         for (int i = 0; i < board.length; i++) {
@@ -1656,6 +2165,7 @@ final class WaveRiderGame extends GameView {
                 paint.setColor(color);
                 float f = Math.max(0f, Math.min(1f, top[k] / 10f));
                 c.drawRoundRect(bx0, ry - dp(8f), bx0 + dp(18f) * f, ry, dp(2f), dp(2f), paint);
+                gloss(c, bx0, ry - dp(8f), bx0 + dp(18f) * f, ry);
             }
             label(c, score1(boardHeat(who)), x + boardW - dp(8f), ry, 9.5f, you ? ACCENT : TEXT,
                     Paint.Align.RIGHT);
@@ -1690,22 +2200,25 @@ final class WaveRiderGame extends GameView {
      * you have to add the next one. This is the ten-second stake while a ride is going well.
      */
     private void drawStack(Canvas c, float w) {
-        float cx = w - dp(112f);
+        // 3.25: moved 28dp left and spread out - the STACK caption and the TRICK pip sat on the
+        // ring, and TRICK and BARREL ran together into one word.
+        float cx = w - dp(140f);
         float cy = dp(40f);
         float r = dp(26f);
         boolean live = stack > 1;
         float left = live ? (float) Math.max(0, Math.min(1, (stackUntil - sessionSeconds)
                 / STACK_WINDOW)) : 0f;
-        paint.setColor(live ? 0xAA0A1A26 : 0x550A1A26);
-        c.drawRoundRect(cx - dp(34f), cy - dp(30f), cx + dp(92f), cy + dp(30f), dp(10f), dp(10f), paint);
+        panel(c, cx - dp(34f), cy - dp(30f), cx + dp(116f), cy + dp(30f), dp(10f), live ? 0xC8 : 0x80);
         ring.set(cx - r, cy - r, cx + r, cy + r);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(5f));
         paint.setColor(0x33FFFFFF);
         c.drawArc(ring, -90f, 360f, false, paint);
         if (live) {
+            paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setColor(0xFFF5C518);
             c.drawArc(ring, -90f, 360f * left, false, paint);
+            paint.setStrokeCap(Paint.Cap.BUTT);
         }
         paint.setStyle(Paint.Style.FILL);
         if (live && sessionSeconds < comboUntil) {
@@ -1715,15 +2228,23 @@ final class WaveRiderGame extends GameView {
         float pulse = live ? 1f + 0.12f * (float) Math.sin(sessionSeconds * 7) : 1f;
         bold(c, "x" + stack, cx, cy + dp(7f), 22f * pulse, live ? 0xFFF5C518 : FAINT,
                 Paint.Align.CENTER);
-        label(c, "STACK", cx + dp(40f), cy - dp(8f), 8.5f, live ? TEXT : FAINT, Paint.Align.CENTER);
+        label(c, "STACK", cx + dp(72f), cy - dp(10f), 8.5f, live ? TEXT : FAINT, Paint.Align.CENTER);
         // Two pips: which halves of the combo you are holding.
+        float pipT = cx + dp(52f);
+        float pipB = cx + dp(92f);
+        if (stackHasTrick) {
+            Fx.glow(c, pipT, cy + dp(6f), dp(12f), 0x66F5C518);
+        }
+        if (stackHasBarrel) {
+            Fx.glow(c, pipB, cy + dp(6f), dp(12f), 0x669FE3F0);
+        }
         paint.setColor(stackHasTrick ? 0xFFF5C518 : 0x44FFFFFF);
-        c.drawCircle(cx + dp(28f), cy + dp(6f), dp(4f), paint);
+        c.drawCircle(pipT, cy + dp(6f), dp(4.5f), paint);
         paint.setColor(stackHasBarrel ? 0xFF9FE3F0 : 0x44FFFFFF);
-        c.drawCircle(cx + dp(52f), cy + dp(6f), dp(4f), paint);
-        label(c, "TRICK", cx + dp(28f), cy + dp(20f), 7f, stackHasTrick ? 0xFFF5C518 : FAINT,
+        c.drawCircle(pipB, cy + dp(6f), dp(4.5f), paint);
+        label(c, "TRICK", pipT, cy + dp(22f), 7f, stackHasTrick ? 0xFFF5C518 : FAINT,
                 Paint.Align.CENTER);
-        label(c, "BARREL", cx + dp(52f), cy + dp(20f), 7f, stackHasBarrel ? 0xFF9FE3F0 : FAINT,
+        label(c, "BARREL", pipB, cy + dp(22f), 7f, stackHasBarrel ? 0xFF9FE3F0 : FAINT,
                 Paint.Align.CENTER);
     }
 
@@ -1734,30 +2255,42 @@ final class WaveRiderGame extends GameView {
         float r = dp(52f);
         double left = priorityAt - sessionSeconds;
         boolean yours = left <= 0;
-        paint.setColor(0xAA061726);
+        paint.setColor(0x55000000);
+        c.drawCircle(cx, cy + dp(3f), r + dp(13f), paint);
+        paint.setColor(0xCC0A111B);
+        c.drawCircle(cx, cy, r + dp(12f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x802A3A50);
         c.drawCircle(cx, cy, r + dp(12f), paint);
         ring.set(cx - r, cy - r, cx + r, cy + r);
-        paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(8f));
         paint.setColor(0x33FFFFFF);
         c.drawArc(ring, -90f, 360f, false, paint);
-        paint.setColor(yours ? ACCENT : WARN);
+        int ringCol = yours ? ACCENT : WARN;
+        paint.setColor(ringCol);
+        paint.setStrokeCap(Paint.Cap.ROUND);
         float sweep = yours ? 360f
                 : 360f * (float) Math.max(0, Math.min(1, 1 - left / PRIORITY_WAIT));
         c.drawArc(ring, -90f, sweep, false, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
+        // 3.25: the captions sit in a pill under the ring. Inside it they were wider than the
+        // ring's hole and ran across the stroke.
+        float capTop = cy + r + dp(16f);
+        panel(c, cx - dp(150f), capTop, cx + dp(150f), capTop + dp(44f), dp(12f), 0xC0);
         if (yours) {
             Fx.glow(c, cx, cy, dp(74f), 0x5535D0BA);
             bold(c, "GO", cx, cy + dp(10f), 30f, ACCENT, Paint.Align.CENTER);
-            label(c, "PRIORITY IS YOURS", cx, cy + dp(34f), 9f, ACCENT, Paint.Align.CENTER);
-            label(c, "clean take-off  +1.0  ·  8 s of extra grip", cx, cy + dp(48f), 8.5f,
+            label(c, "PRIORITY IS YOURS", cx, capTop + dp(18f), 9f, ACCENT, Paint.Align.CENTER);
+            label(c, "clean take-off  +1.0  ·  8 s of extra grip", cx, capTop + dp(35f), 8.5f,
                     0xCC35D0BA, Paint.Align.CENTER);
         } else {
             bold(c, String.valueOf((int) Math.ceil(left)), cx, cy + dp(12f), 34f, WARN,
                     Paint.Align.CENTER);
-            label(c, "PADDLING BACK OUT", cx, cy + dp(34f), 9f, WARN, Paint.Align.CENTER);
+            label(c, "PADDLING BACK OUT", cx, capTop + dp(18f), 9f, WARN, Paint.Align.CENTER);
             label(c, npcRider >= 0 ? NPC_NAMES[npcRider] + " has this one"
-                    : "the lineup has this one", cx, cy + dp(48f), 8.5f, DIM, Paint.Align.CENTER);
+                    : "the lineup has this one", cx, capTop + dp(35f), 8.5f, DIM, Paint.Align.CENTER);
         }
     }
 
@@ -1768,22 +2301,38 @@ final class WaveRiderGame extends GameView {
         float s = dp(1f);
         float stroke = (float) Math.sin(sessionSeconds * 3.4);
         paint.setColor(0x44E8F4FF);
-        c.drawOval(x - 30 * s, y + 2 * s, x + 30 * s, y + 10 * s, paint);
-        paint.setColor(0xFFF5C518);
-        c.drawOval(x - 26 * s, y - 4 * s, x + 26 * s, y + 5 * s, paint);            // board
-        paint.setColor(ACCENT);
-        c.drawRect(x - 8 * s, y - 12 * s, x + 6 * s, y - 4 * s, paint);             // body, prone
-        // Arms alternate over the rail - the paddle stroke.
-        c.drawRect(x + 4 * s, y - 16 * s + stroke * 5 * s, x + 16 * s,
-                y - 12 * s + stroke * 5 * s, paint);
-        c.drawRect(x + 4 * s, y - 10 * s - stroke * 5 * s, x + 14 * s,
-                y - 6 * s - stroke * 5 * s, paint);
-        paint.setColor(0xFFF1C27D);
-        c.drawCircle(x + 10 * s, y - 14 * s, 4 * s, paint);
+        c.drawOval(x - 32 * s, y + 2 * s, x + 32 * s, y + 10 * s, paint);
+        // A V of wake behind the tail.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x50E8F4FF);
+        c.drawLine(x - 26 * s, y + 2 * s, x - 52 * s, y - 3 * s, paint);
+        c.drawLine(x - 26 * s, y + 4 * s, x - 52 * s, y + 10 * s, paint);
+        paint.setStyle(Paint.Style.FILL);
+        drawSurfboard(c, x, y, 0f, 1.25f, 0xFFF5C518, true);
+        // Prone on the board, arms windmilling over the rail - the paddle stroke.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        for (int pass = 0; pass < 2; pass++) {
+            float extra = pass == 0 ? 2.4f * s : 0f;
+            paint.setColor(pass == 0 ? 0xC0061420 : ACCENT);
+            paint.setStrokeWidth(4.2f * s + extra);
+            c.drawLine(x - 12 * s, y - 6 * s, x - 24 * s, y - 5 * s, paint);       // legs
+            paint.setStrokeWidth(6.4f * s + extra);
+            c.drawLine(x - 12 * s, y - 6 * s, x + 5 * s, y - 8 * s, paint);        // body
+            paint.setStrokeWidth(3.2f * s + extra);
+            c.drawLine(x + 5 * s, y - 9 * s, x + 15 * s, y - 9 * s + stroke * 6 * s, paint);
+            c.drawLine(x + 4 * s, y - 7 * s, x + 13 * s, y - 5 * s - stroke * 6 * s, paint);
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStrokeJoin(Paint.Join.MITER);
+        paint.setStyle(Paint.Style.FILL);
+        drawHead(c, x + 10 * s, y - 13 * s, 4 * s);
         if (stroke > 0.9f) {
             spray.spawn(x + 16 * s, y - 6 * s, dp(30f), -dp(30f), 0.4f, dp(2f), 0x99EAF6FF, true);
         }
-        label(c, "YOU", x, y - dp(26f), 8f, ACCENT, Paint.Align.CENTER);
+        label(c, "YOU", x, y - dp(28f), 8f, ACCENT, Paint.Align.CENTER);
     }
 
     /** Hung in the lip: the prompt that says the ride is still savable, and for how long. */
@@ -1793,15 +2342,14 @@ final class WaveRiderGame extends GameView {
         float barW = dp(200f);
         float bx = w * 0.5f - barW / 2f;
         float by = h * 0.30f;
-        paint.setColor(0xAA000000);
-        c.drawRoundRect(bx - dp(8f), by - dp(26f), bx + barW + dp(8f), by + dp(16f),
-                dp(8f), dp(8f), paint);
+        panel(c, bx - dp(12f), by - dp(30f), bx + barW + dp(12f), by + dp(32f), dp(10f), 0xD0);
         bold(c, "PULL HARD - SAVE IT!", w * 0.5f, by - dp(8f), 17f,
                 (Math.sin(sessionSeconds * 14) > 0 ? 0xFFF0655D : 0xFFFFFFFF), Paint.Align.CENTER);
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(bx, by, bx + barW, by + dp(8f), dp(4f), dp(4f), paint);
         paint.setColor(BAD);
         c.drawRoundRect(bx, by, bx + barW * left, by + dp(8f), dp(4f), dp(4f), paint);
+        gloss(c, bx, by, bx + barW * left, by + dp(8f));
         label(c, (SAVES_PER_RIDE - rideSaves) + " SAVE" + (SAVES_PER_RIDE - rideSaves == 1 ? "" : "S")
                 + " LEFT THIS RIDE", w * 0.5f, by + dp(24f), 8.5f, DIM, Paint.Align.CENTER);
     }
@@ -1814,9 +2362,8 @@ final class WaveRiderGame extends GameView {
         float cardW = dp(78f);
         float gap = dp(12f);
         float total = judge.length * cardW + (judge.length - 1) * gap;
-        paint.setColor(0xCC061726);
-        c.drawRoundRect(cx - total / 2f - dp(16f), cy - dp(70f), cx + total / 2f + dp(16f),
-                cy + dp(56f), dp(12f), dp(12f), paint);
+        panel(c, cx - total / 2f - dp(16f), cy - dp(70f), cx + total / 2f + dp(16f),
+                cy + dp(56f), dp(12f), 0xD8);
         label(c, "THE JUDGES", cx, cy - dp(52f), 9f, FAINT, Paint.Align.CENTER);
         for (int i = 0; i < judge.length; i++) {
             double at = JUDGE_CARD * (i + 1);
@@ -1826,9 +2373,17 @@ final class WaveRiderGame extends GameView {
             float f = (float) Math.min(1.0, (since - at) / 0.28);
             float x0 = cx - total / 2f + i * (cardW + gap);
             float rise = (1f - f) * dp(26f);
-            paint.setColor(0xFFF2EAD8);
+            paint.setColor(0x66000000);                    // card shadow
+            c.drawRoundRect(x0 + dp(2f), cy - dp(37f) + rise, x0 + cardW + dp(2f), cy + dp(19f) + rise,
+                    dp(6f), dp(6f), paint);
+            paint.setColor(0xFFD9CFBB);
             c.drawRoundRect(x0, cy - dp(40f) + rise, x0 + cardW, cy + dp(16f) + rise,
                     dp(6f), dp(6f), paint);
+            paint.setColor(0xFFF2EAD8);
+            c.drawRoundRect(x0, cy - dp(40f) + rise, x0 + cardW, cy + dp(13f) + rise,
+                    dp(6f), dp(6f), paint);
+            paint.setColor(0xB0FFFFFF);
+            c.drawRect(x0 + dp(6f), cy - dp(39f) + rise, x0 + cardW - dp(6f), cy - dp(38f) + rise, paint);
             bold(c, score1(judge[i]), x0 + cardW / 2f, cy + rise, 26f * (0.7f + 0.3f * f),
                     0xFF11212E, Paint.Align.CENTER);
             label(c, "JUDGE " + (i + 1), x0 + cardW / 2f, cy + dp(11f) + rise, 7.5f,
@@ -1855,9 +2410,7 @@ final class WaveRiderGame extends GameView {
         float panelW = Math.min(w * 0.6f, dp(420f));
         float cx = w * 0.5f;
         float top = h * 0.24f;
-        paint.setColor(0xEE061726);
-        c.drawRoundRect(cx - panelW / 2f, top, cx + panelW / 2f, top + dp(196f), dp(14f), dp(14f),
-                paint);
+        panel(c, cx - panelW / 2f, top, cx + panelW / 2f, top + dp(196f), dp(14f), 0xF0);
         int col = heatPlace == 0 ? 0xFFF5C518 : heatPlace <= 2 ? ACCENT : WARN;
         bold(c, heatPlace == 0 ? "HEAT WON" : "HEAT RESULT  ·  " + PLACES[Math.max(0, heatPlace)],
                 cx, top + dp(30f), 24f * (0.8f + 0.2f * f), col, Paint.Align.CENTER);
@@ -1962,23 +2515,7 @@ final class WaveRiderGame extends GameView {
             float arc = (float) Math.sin(p * Math.PI);
             float dx = w * 0.16f + p * w * 0.12f;
             float dy = top + span * 0.78f - arc * dp(30f);
-            c.save();
-            c.rotate((p - 0.5f) * 44f, dx, dy);
-            paint.setColor(0xFF1B3E5E);
-            c.drawOval(dx - dp(15f), dy - dp(5f), dx + dp(15f), dy + dp(5f), paint);
-            path.reset();
-            path.moveTo(dx - dp(13f), dy);
-            path.lineTo(dx - dp(24f), dy - dp(8f));
-            path.lineTo(dx - dp(21f), dy + dp(2f));
-            path.close();
-            c.drawPath(path, paint);
-            path.reset();
-            path.moveTo(dx - dp(2f), dy - dp(4f));
-            path.lineTo(dx + dp(2f), dy - dp(13f));
-            path.lineTo(dx + dp(6f), dy - dp(3f));
-            path.close();
-            c.drawPath(path, paint);
-            c.restore();
+            drawDolphin(c, dx, dy, (p - 0.5f) * 44f, 30f / 52f, 0xFF1B3E5E);
             paint.setColor(0x55E8F4FF);
             c.drawOval(dx - dp(18f), dy + dp(5f), dx + dp(18f), dy + dp(10f), paint);
         }
@@ -2004,9 +2541,9 @@ final class WaveRiderGame extends GameView {
         }
         wash.draw(c);
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(3f));
-        paint.setColor(0x66FFFFFF);
-        path.reset();
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        path.rewind();
         path.moveTo(sx0, sy0 + dp(8f));
         for (int i = 1; i <= 8; i++) {
             float px0 = sx0 + i * dp(22f);
@@ -2014,8 +2551,130 @@ final class WaveRiderGame extends GameView {
                     + (float) Math.sin(i * 0.9 + sessionSeconds * 4) * dp(4f);
             path.lineTo(px0, py0);
         }
+        // A soft foam wake under a bright carve line.
+        paint.setStrokeWidth(dp(9f));
+        paint.setColor(0x2AFFFFFF);
         c.drawPath(path, paint);
+        paint.setStrokeWidth(dp(3f));
+        paint.setColor(0x80FFFFFF);
+        c.drawPath(path, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setStyle(Paint.Style.FILL);
+    }
+
+    /**
+     * Sky: a deepening gradient, a warm band at the horizon, the low sun with a two-layer halo,
+     * sunset cloud banks lit from beneath, land on the horizon and the gulls.
+     */
+    private void drawSky(Canvas c, float w, float horizon, float dt) {
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(skyGrad);
+        c.drawRect(0, 0, w, horizon + dp(2f), paint);
+        paint.setShader(horizonGlowGrad);
+        c.drawRect(0, horizon * 0.45f, w, horizon + dp(2f), paint);
+        paint.setShader(null);
+        float sunX = w * 0.22f;
+        float sunY = horizon - dp(6f);
+        Fx.glow(c, sunX, sunY, dp(170f), 0x40FFC890);
+        Fx.glow(c, sunX, sunY, dp(70f), 0x88FFD9A0);
+        paint.setColor(0xFFFFE0A8);
+        c.drawCircle(sunX, sunY, dp(24f), paint);
+        paint.setColor(0xFFFFF4DC);
+        c.drawCircle(sunX - dp(2f), sunY - dp(2f), dp(17f), paint);
+        // Cloud banks drift slowly; each is a flat base and three puffs, a warm underside showing
+        // below a cooler body.
+        cloudDrift += dt * dp(5f);
+        for (int i = 0; i < CLOUD_X.length; i++) {
+            float cw = dp(CLOUD_W[i]);
+            float span = w + cw * 2f;
+            float cx = ((CLOUD_X[i] * span + cloudDrift * (0.6f + i * 0.18f)) % span) - cw;
+            float cy = horizon * CLOUD_Y[i];
+            for (int pass = 0; pass < 2; pass++) {
+                float dy = pass == 0 ? dp(3f) : 0f;
+                paint.setColor(pass == 0 ? alpha(cloudRim, 0xA0) : alpha(cloudBody, 0xB4));
+                c.drawOval(cx - cw * 0.5f, cy - cw * 0.05f + dy, cx + cw * 0.5f, cy + cw * 0.05f + dy, paint);
+                c.drawCircle(cx - cw * 0.22f, cy - cw * 0.04f + dy, cw * 0.11f, paint);
+                c.drawCircle(cx + cw * 0.02f, cy - cw * 0.07f + dy, cw * 0.15f, paint);
+                c.drawCircle(cx + cw * 0.25f, cy - cw * 0.03f + dy, cw * 0.10f, paint);
+            }
+        }
+        // Land on the horizon, the far island paler than the headland.
+        paint.setColor(farLandColor);
+        c.drawPath(islandPath, paint);
+        paint.setColor(nearLandColor);
+        c.drawPath(headlandPath, paint);
+        // Seagulls gliding over, wings flexing.
+        paint.setColor(0xFF2A2F3A);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(2.4f));
+        for (int i = 0; i < gullX.length; i++) {
+            gullX[i] += dt * (0.018f + i * 0.006f);
+            if (gullX[i] > 1.08f) {
+                gullX[i] = -0.08f;
+            }
+            float gx = gullX[i] * w;
+            float gy = horizon * (0.35f + i * 0.17f) + (float) Math.sin(sessionSeconds + i) * dp(8f);
+            float flex = (float) Math.sin(sessionSeconds * 5 + i) * dp(4f);
+            path.rewind();
+            path.moveTo(gx - dp(13f), gy - flex);
+            path.quadTo(gx - dp(6f), gy - dp(5f) - flex * 0.5f, gx, gy);
+            path.quadTo(gx + dp(6f), gy - dp(5f) - flex * 0.5f, gx + dp(13f), gy - flex);
+            c.drawPath(path, paint);
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A dolphin silhouette with a pale belly; {@code size} 1 is 52dp long. */
+    private void drawDolphin(Canvas c, float x, float y, float degrees, float size, int color) {
+        float s = dp(1f) * size;
+        c.save();
+        c.translate(x, y);
+        c.rotate(degrees);
+        c.scale(s, s);
+        paint.setColor(color);
+        c.drawPath(dolphinPath, paint);
+        c.drawPath(finPath, paint);
+        paint.setColor(alpha(mix(color, 0xFFFFFFFF, 0.45f), 0xB0));
+        c.drawOval(-12f, 1.5f, 18f, 5f, paint);
+        paint.setColor(0x55FFFFFF);                     // wet highlight along the back
+        c.drawOval(-8f, -7.5f, 14f, -5f, paint);
+        c.restore();
+    }
+
+    /** Head with a contact outline and a dark hair cap; the light is from the upper left. */
+    private void drawHead(Canvas c, float x, float y, float r) {
+        paint.setColor(0xD0061420);
+        c.drawCircle(x, y, r + dp(1.3f), paint);
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(x, y, r, paint);
+        paint.setColor(0xFF3A2416);
+        ring.set(x - r, y - r, x + r, y + r);
+        c.drawArc(ring, 160f, 220f, false, paint);
+    }
+
+    /** A surfboard along +x, rotated, with a darker rail, a stringer and a soft contact shadow. */
+    private void drawSurfboard(Canvas c, float x, float y, float degrees, float size, int deck, boolean shadow) {
+        float s = dp(1f) * size;
+        c.save();
+        c.translate(x, y);
+        c.rotate(degrees);
+        c.scale(s, s);
+        if (shadow) {
+            paint.setColor(0x40031018);
+            c.drawOval(-24f, 2f, 24f, 8f, paint);
+        }
+        paint.setColor(mix(deck, 0xFF000000, 0.35f));
+        c.save();
+        c.translate(0f, 1.3f);
+        c.drawPath(boardPath, paint);
+        c.restore();
+        paint.setColor(deck);
+        c.drawPath(boardPath, paint);
+        paint.setColor(0x90FFFFFF);
+        c.drawRect(-17f, -0.45f, 19f, 0.45f, paint);
+        c.restore();
     }
 
     /** Height of the wave face at a given x. Exponent shapes the concave face. */
@@ -2037,28 +2696,59 @@ final class WaveRiderGame extends GameView {
         if (glow != 0) {
             Fx.glow(c, x, y, dp(34f), glow);
         }
-        // Board, angled along the face.
-        paint.setColor(0xFFF5C518);
-        c.save();
-        c.rotate(24f, x, y);
-        c.drawRoundRect(x - 20 * s, y - 3 * s, x + 20 * s, y + 3 * s, 3 * s, 3 * s, paint);
-        c.restore();
-        paint.setColor(body);
-        if (superman) {
-            // Hands on the rail, body flying out behind.
-            c.drawRect(x - 26 * s, y - 16 * s, x - 2 * s, y - 10 * s, paint);  // body
-            c.drawRect(x - 4 * s, y - 12 * s, x + 2 * s, y - 2 * s, paint);    // arms to board
-            paint.setColor(0xFFF1C27D);
-            c.drawCircle(x + 3 * s, y - 15 * s, 4.5f * s, paint);
-            return;
+        // Board, angled along the face, with its shadow on the water.
+        drawSurfboard(c, x, y, 24f, scale, 0xFFF5C518, true);
+        // The figure: round-capped limbs over a dark outline, so it holds against bright foam and
+        // dark water alike. Feet sit on the deck, knees bent, leaning into the face.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        for (int pass = 0; pass < 2; pass++) {
+            float extra = pass == 0 ? 2.6f * s : 0f;
+            paint.setColor(pass == 0 ? 0xD0061420 : body);
+            if (superman) {
+                // Hands on the rail, body flying out flat behind.
+                paint.setStrokeWidth(4.4f * s + extra);
+                c.drawLine(x - 16 * s, y - 14 * s, x - 30 * s, y - 17 * s, paint); // legs
+                paint.setStrokeWidth(6.4f * s + extra);
+                c.drawLine(x - 2 * s, y - 12 * s, x - 16 * s, y - 14 * s, paint);  // body
+                paint.setStrokeWidth(3.2f * s + extra);
+                c.drawLine(x - 1 * s, y - 12 * s, x + 2 * s, y - 3 * s, paint);    // arms to board
+                continue;
+            }
+            paint.setStrokeWidth(4.6f * s + extra);
+            path.rewind();
+            path.moveTo(x - 9 * s, y - 6 * s);                     // back foot
+            path.lineTo(x - 7 * s, y - 13 * s);                    // back knee
+            path.lineTo(x - 1 * s, y - 17 * s);                    // hip
+            path.lineTo(x + 9 * s, y - 9 * s);                     // front knee
+            path.lineTo(x + 8 * s, y + 0.5f * s);                  // front foot
+            c.drawPath(path, paint);
+            paint.setStrokeWidth(6.6f * s + extra);
+            c.drawLine(x - 1 * s, y - 17 * s, x + 3.5f * s, y - 27 * s, paint);  // torso
+            paint.setStrokeWidth(3.4f * s + extra);
+            path.rewind();
+            path.moveTo(x + 17 * s, y - 22 * s);                   // lead hand, reaching
+            path.lineTo(x + 10 * s, y - 26 * s);
+            path.lineTo(x + 3.5f * s, y - 26 * s);                 // shoulders
+            path.lineTo(x - 3 * s, y - 23 * s);
+            path.lineTo(x - 10 * s, y - 19 * s);                   // trailing hand
+            c.drawPath(path, paint);
         }
-        // Rider: a crouched figure leaning into the face.
-        c.drawRect(x - 4 * s, y - 20 * s, x + 4 * s, y - 6 * s, paint);      // torso
-        c.drawRect(x - 7 * s, y - 8 * s, x - 1 * s, y - 2 * s, paint);       // back leg
-        c.drawRect(x + 2 * s, y - 8 * s, x + 8 * s, y - 2 * s, paint);       // front leg
-        c.drawRect(x + 4 * s, y - 18 * s, x + 14 * s, y - 15 * s, paint);    // lead arm
-        paint.setColor(0xFFF1C27D);
-        c.drawCircle(x, y - 24 * s, 4.5f * s, paint);
+        // Light from the upper left: a thin highlight down the lit side of the torso.
+        if (!superman) {
+            paint.setStrokeWidth(1.6f * s);
+            paint.setColor(0x66FFFFFF);
+            c.drawLine(x - 2.6f * s, y - 18 * s, x + 1.6f * s, y - 27 * s, paint);
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStrokeJoin(Paint.Join.MITER);
+        paint.setStyle(Paint.Style.FILL);
+        if (superman) {
+            drawHead(c, x + 3 * s, y - 15 * s, 4.5f * s);
+        } else {
+            drawHead(c, x + 5.5f * s, y - 32 * s, 4.5f * s);
+        }
     }
 
     private void stat(Canvas c, float x, float y, String value, String caption) {

@@ -11,15 +11,28 @@ the app reads the S4 monitor over the USB cable that is already there.*
 
 <!-- screenshots:start -->
 
-<img src="docs/screenshots/canyon-fly-the-rings-at-the-speed-they-ask-for.png" alt="Canyon - fly the rings at the speed they ask for" width="49%">
-<img src="docs/screenshots/wave-rider-hold-the-pocket-not-the-throttle.png" alt="Wave Rider - hold the pocket, not the throttle" width="49%">
-<img src="docs/screenshots/row-runner-rowing-sets-the-pace-the-runner-jumps-itself.png" alt="Row Runner - rowing sets the pace, the runner jumps itself" width="49%">
-<img src="docs/screenshots/stroke-coach-the-shape-of-your-drive-scored.png" alt="Stroke Coach - the shape of your drive, scored" width="49%">
-<img src="docs/screenshots/skyline-every-strong-stroke-drops-another-floor.png" alt="Skyline - every strong stroke drops another floor" width="49%">
-<img src="docs/screenshots/night-grid-your-watts-light-the-town.png" alt="Night Grid - your watts light the town" width="49%">
-<img src="docs/screenshots/river-explorer-a-river-that-forks-where-you-steer.png" alt="River Explorer - a river that forks where you steer" width="49%">
-<img src="docs/screenshots/zombie-run-the-horde-is-right-behind-you.png" alt="Zombie Run - the horde is right behind you" width="49%">
+<img src="docs/screenshots/gauges-the-session-on-three-needles.png" alt="Gauges - the session on three needles" width="49%">
+<img src="docs/screenshots/shuffle-a-new-game-every-two-minutes.png" alt="Shuffle - a new game every two minutes" width="49%">
 <img src="docs/screenshots/zone-row-the-piece-as-one-instrument.png" alt="Zone Row - the piece as one instrument" width="49%">
+<img src="docs/screenshots/river-explorer-a-river-that-forks-where-you-steer.png" alt="River Explorer - a river that forks where you steer" width="49%">
+<img src="docs/screenshots/stroke-coach-the-shape-of-your-drive-scored.png" alt="Stroke Coach - the shape of your drive, scored" width="49%">
+<img src="docs/screenshots/zombie-run-the-horde-is-right-behind-you.png" alt="Zombie Run - the horde is right behind you" width="49%">
+<img src="docs/screenshots/row-runner-rowing-sets-the-pace-the-runner-jumps-itself.png" alt="Row Runner - rowing sets the pace, the runner jumps itself" width="49%">
+<img src="docs/screenshots/coast-flight-the-california-coast-on-a-real-globe.png" alt="Coast Flight - the California coast on a real globe" width="49%">
+<img src="docs/screenshots/skyline-every-strong-stroke-drops-another-floor.png" alt="Skyline - every strong stroke drops another floor" width="49%">
+<img src="docs/screenshots/wave-rider-hold-the-pocket-not-the-throttle.png" alt="Wave Rider - hold the pocket, not the throttle" width="49%">
+<img src="docs/screenshots/rocket-launch-hold-the-power-or-you-never-leave-the-pad.png" alt="Rocket Launch - hold the power or you never leave the pad" width="49%">
+<img src="docs/screenshots/canyon-fly-the-rings-at-the-speed-they-ask-for.png" alt="Canyon - fly the rings at the speed they ask for" width="49%">
+<img src="docs/screenshots/canyon-drive-the-same-canyon-at-ground-level.png" alt="Canyon Drive - the same canyon at ground level" width="49%">
+<img src="docs/screenshots/mega-pull-one-big-pull-at-the-fairground.png" alt="Mega Pull - one big pull at the fairground" width="49%">
+<img src="docs/screenshots/race-rivals-that-row-to-your-own-average.png" alt="Race - rivals that row to your own average" width="49%">
+<img src="docs/screenshots/crew-boat-eight-in-time-and-the-swing-is-yours-to-hold.png" alt="Crew Boat - eight in time, and the swing is yours to hold" width="49%">
+<img src="docs/screenshots/regatta-one-ranked-race-a-day.png" alt="Regatta - one ranked race a day" width="49%">
+<img src="docs/screenshots/daily-row-a-different-challenge-every-day.png" alt="Daily Row - a different challenge every day" width="49%">
+<img src="docs/screenshots/night-grid-your-watts-light-the-town.png" alt="Night Grid - your watts light the town" width="49%">
+<img src="docs/screenshots/head-race-2-000-m-against-three-crews-on-the-clock.png" alt="Head Race - 2,000 m against three crews on the clock" width="49%">
+<img src="docs/screenshots/tug-of-war-heave-on-every-stroke.png" alt="Tug of War - heave on every stroke" width="49%">
+<img src="docs/screenshots/collector-change-lanes-by-changing-pace.png" alt="Collector - change lanes by changing pace" width="49%">
 
 <!-- screenshots:end -->
 

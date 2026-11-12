@@ -376,6 +376,11 @@ final class GhostRaceGame extends PaceBoatGame {
     }
 
     @Override
+    protected boolean crewIsRival(int i) {
+        return kind[i] == KIND_RIVAL;
+    }
+
+    @Override
     protected float crewStrokeRate(int i) {
         float base = (float) profile.typicalRate();
         if (kind[i] != KIND_RIVAL) {

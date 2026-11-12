@@ -2,8 +2,12 @@ package com.codex.waterrowerdiagnostic;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.view.MotionEvent;
 
 /**
@@ -101,8 +105,61 @@ final class MegaPullGame extends GameView {
     /** Tap targets on the prize shelf (buy with tickets) and on the strongman ladder. */
     private final RectF[] prizeHit = {new RectF(), new RectF(), new RectF(), new RectF()};
     private final RectF[] rivalHit = {new RectF(), new RectF(), new RectF(), new RectF(), new RectF()};
-    private android.graphics.LinearGradient skyShader;
-    private float skyHeight;
+    private LinearGradient skyShader;
+
+    /*
+     * 3.25.0 graphics pass. Everything below is drawing state only - nothing here feeds the game.
+     * Shaders and static paths are built once per view size in ensureScene(); render allocates
+     * nothing. Fills that use a shader go through shaderPaint, whose colour is always opaque white.
+     */
+    private final Paint shaderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path outline = new Path();
+    private final Path farPath = new Path();
+    private final Path wirePath = new Path();
+    private final Path bellPath = new Path();
+    private float sceneW;
+    private float sceneH;
+    /** Where the far ground meets the sky, as a fraction of the height. */
+    private static final float HORIZON = 0.82f;
+    private LinearGradient groundShader;
+    private final LinearGradient[] beamShader = new LinearGradient[3];
+    private final LinearGradient[] tentShade = new LinearGradient[2];
+    private LinearGradient tentFloorShade;
+    private LinearGradient doorShader;
+    private LinearGradient towerShader;
+    private LinearGradient plinthShader;
+    private LinearGradient bellShader;
+    private LinearGradient boothShader;
+    private LinearGradient awningShade;
+    private LinearGradient shelfShader;
+    private LinearGradient boardFrameShader;
+    private LinearGradient boardInnerShader;
+    private LinearGradient skelterShade;
+    private static final int FAR_LIGHTS = 40;
+    private final float[] farLightX = new float[FAR_LIGHTS];
+    private final float[] farLightY = new float[FAR_LIGHTS];
+    private int farLights;
+    private final float[] tentX = new float[11];
+    private double wheelAngle;
+    /** The bell flashes when the puck shown on screen reaches it, not when the reading did. */
+    private boolean bellFlashed;
+    private double bellFlashAt = -10;
+    private float puckPrev;
+    private float puckVel;
+    private float rivalPuckPrev;
+    private float rivalPuckVel;
+
+    private static final int RED = 0xFFB8323A;
+    private static final int CREAM = 0xFFEDE3D0;
+    private static final int GOLD = 0xFFC8962A;
+    private static final int HAZE = 0xFF2A1E48;
+    private static final int[] SHIRTS = {0xFFC0405A, 0xFF4068C0, 0xFF40A070, 0xFFD0A040, 0xFF8050C0,
+            0xFF40A0B0, 0xFFD07040, 0xFFD8D8E0, 0xFF505868, 0xFFB03080};
+    private static final int[] SKINS = {0xFFF1C27D, 0xFFE0A47A, 0xFFC68642, 0xFF8D5524, 0xFF6B3E1E};
+    private static final int[] HAIRS = {0xFF1A1210, 0xFF3A2414, 0xFF6A4A2A, 0xFFB08A50, 0xFF2A2A2A,
+            0xFF8A3A1A};
+    private static final int[] BALLOONS = {0xFFFF5A7A, 0xFFF5C518, 0xFF6BD8FF, 0xFF6BFFB8, 0xFFB78CFF};
+    private static final int[] GONDOLA = {0xFFC8505A, 0xFF4E78C8, 0xFFD8A040, 0xFF50A878};
 
     private Mode mode = Mode.STRIKE;
     private Phase phase = Phase.READY;
@@ -198,7 +255,18 @@ final class MegaPullGame extends GameView {
 
     // Crowd: 0 = a few onlookers, 1 = packed and roaring.
     private static final int CROWD = 72;
+    /** Three rows of 24, back to front, so the crowd has depth. */
+    private static final int CROWD_ROW = CROWD / 3;
     private final float[] crowdIn = new float[CROWD];
+    // How each person looks: fixed per seat, from a hash, so nobody changes clothes between frames.
+    private final int[] crowdShirt = new int[CROWD];
+    private final int[] crowdSkin = new int[CROWD];
+    private final int[] crowdHair = new int[CROWD];
+    private final int[] crowdHat = new int[CROWD];
+    private final float[] crowdTall = new float[CROWD];
+    private final float[] crowdWide = new float[CROWD];
+    private final float[] crowdJit = new float[CROWD];
+    private final int[] crowdBalloon = new int[CROWD];
     private float crowd;
     private boolean celebrate;
 
@@ -217,6 +285,167 @@ final class MegaPullGame extends GameView {
     MegaPullGame(Context context, PersonalBests bests) {
         super(context);
         this.bests = bests;
+        for (int i = 0; i < CROWD; i++) {
+            crowdShirt[i] = SHIRTS[(int) (hash01(i * 11 + 1) * SHIRTS.length) % SHIRTS.length];
+            crowdSkin[i] = SKINS[(int) (hash01(i * 11 + 2) * SKINS.length) % SKINS.length];
+            crowdHair[i] = HAIRS[(int) (hash01(i * 11 + 3) * HAIRS.length) % HAIRS.length];
+            crowdHat[i] = (int) (hash01(i * 11 + 4) * 6) % 6;
+            // Kids to tall adults.
+            crowdTall[i] = 0.8f + hash01(i * 11 + 5) * 0.34f;
+            crowdWide[i] = 0.85f + hash01(i * 11 + 6) * 0.3f;
+            crowdJit[i] = hash01(i * 11 + 7) - 0.5f;
+            crowdBalloon[i] = hash01(i * 11 + 8) < 0.17f
+                    ? BALLOONS[(int) (hash01(i * 11 + 9) * BALLOONS.length) % BALLOONS.length] : 0;
+        }
+    }
+
+    /** Deterministic 0..1 from an integer - procedural detail without java.util.Random. */
+    private static float hash01(int n) {
+        n = (n << 13) ^ n;
+        n = n * (n * n * 15731 + 789221) + 1376312589;
+        return (n & 0x7fffffff) / (float) 0x7fffffff;
+    }
+
+    private static int mix(int a, int b, float f) {
+        if (f <= 0f) {
+            return a;
+        }
+        int ar = (a >> 16) & 0xFF;
+        int ag = (a >> 8) & 0xFF;
+        int ab = a & 0xFF;
+        int r = ar + (int) ((((b >> 16) & 0xFF) - ar) * f);
+        int g = ag + (int) ((((b >> 8) & 0xFF) - ag) * f);
+        int bl = ab + (int) (((b & 0xFF) - ab) * f);
+        return (a & 0xFF000000) | (r << 16) | (g << 8) | bl;
+    }
+
+    /**
+     * Every gradient and static path in the scene, rebuilt only when the view changes size. The
+     * geometry here has to match the draw code: tents at 0.17/0.83 of the width, tower from 0.12 to
+     * 0.86 of the height, the booth between 0.60 and 0.955 of the width.
+     */
+    private void ensureScene(float w, float h) {
+        if (w == sceneW && h == sceneH && skyShader != null) {
+            return;
+        }
+        sceneW = w;
+        sceneH = h;
+        Shader.TileMode cl = Shader.TileMode.CLAMP;
+        // Deep violet overhead, warming to a magenta haze where the fair's lights hit the horizon.
+        skyShader = new LinearGradient(0, 0, 0, h,
+                new int[] {0xFF12082A, 0xFF261044, 0xFF4A1A52, 0xFF2A1238, 0xFF0A0E14},
+                new float[] {0f, 0.42f, 0.78f, 0.86f, 1f}, cl);
+        float hz = h * HORIZON;
+        groundShader = new LinearGradient(0, hz, 0, h,
+                new int[] {0xFF2C1C40, 0xFF161024, 0xFF07070C}, new float[] {0f, 0.35f, 1f}, cl);
+        float len = h * 1.1f;
+        beamShader[0] = new LinearGradient(0, 0, 0, -len, 0x46BFD8FF, 0x00BFD8FF, cl);
+        beamShader[1] = new LinearGradient(0, 0, 0, -len, 0x56FFF0C8, 0x00FFF0C8, cl);
+        beamShader[2] = new LinearGradient(0, 0, 0, -len, 0x6CFFE28A, 0x00FFE28A, cl);
+        // Tents are lit from the striker in the middle: bright on the side facing it, dark round the back.
+        float tw = w * 0.13f;
+        float l0 = w * 0.17f;
+        float r0 = w * 0.83f;
+        tentShade[0] = new LinearGradient(l0 - tw, 0, l0 + tw, 0,
+                new int[] {0xA8000000, 0x58000000, 0x00000000, 0x1CFFE8C0, 0x48000000},
+                new float[] {0f, 0.24f, 0.56f, 0.76f, 1f}, cl);
+        tentShade[1] = new LinearGradient(r0 - tw, 0, r0 + tw, 0,
+                new int[] {0x48000000, 0x1CFFE8C0, 0x00000000, 0x58000000, 0xA8000000},
+                new float[] {0f, 0.24f, 0.44f, 0.76f, 1f}, cl);
+        tentFloorShade = new LinearGradient(0, h * 0.5f, 0, h * 0.9f + dp(10f),
+                new int[] {0x00000000, 0x00000000, 0x78000000}, new float[] {0f, 0.5f, 1f}, cl);
+        float doorTop = h * 0.66f + dp(26f);
+        float doorBottom = h * 0.9f + dp(10f);
+        doorShader = new LinearGradient(0, doorTop, 0, doorBottom,
+                new int[] {0xFF7A3220, 0xFFE0883A, 0xFFFFD884}, new float[] {0f, 0.55f, 1f}, cl);
+        float cx = w * 0.5f;
+        towerShader = new LinearGradient(cx - dp(18f), 0, cx + dp(18f), 0,
+                new int[] {0xFF1A1030, 0xFF4A3078, 0xFF8462C0, 0xFF4A3078, 0xFF140C26},
+                new float[] {0f, 0.28f, 0.42f, 0.72f, 1f}, cl);
+        float base = h * 0.86f;
+        plinthShader = new LinearGradient(0, base, 0, base + dp(20f), 0xFF7454A6, 0xFF22163A, cl);
+        bellShader = new LinearGradient(-dp(19f), 0, dp(19f), 0,
+                new int[] {0xFF6A4606, 0xFFD8A828, 0xFFFFF2A8, 0xFFC08A18, 0xFF4A3004},
+                new float[] {0f, 0.3f, 0.42f, 0.66f, 1f}, cl);
+        bellPath.rewind();
+        bellPath.moveTo(-dp(19f), 0);
+        bellPath.cubicTo(-dp(15f), -dp(4f), -dp(15f), -dp(21f), 0, -dp(22f));
+        bellPath.cubicTo(dp(15f), -dp(21f), dp(15f), -dp(4f), dp(19f), 0);
+        bellPath.lineTo(dp(19f), dp(2.5f));
+        bellPath.lineTo(-dp(19f), dp(2.5f));
+        bellPath.close();
+        float awnBot = h * 0.245f;
+        float shelfY = h * 0.44f;
+        boothShader = new LinearGradient(0, awnBot, 0, shelfY, 0xF0401634, 0xF01C0A22, cl);
+        awningShade = new LinearGradient(0, h * 0.20f, 0, awnBot + dp(12f),
+                new int[] {0x78000000, 0x18000000, 0x00000000}, new float[] {0f, 0.6f, 1f}, cl);
+        shelfShader = new LinearGradient(0, shelfY - dp(2f), 0, shelfY + dp(11f), 0xFFA8703E, 0xFF4A2A14, cl);
+        float by0 = h * 0.47f;
+        float by1 = h * 0.66f;
+        boardFrameShader = new LinearGradient(0, by0 - dp(4f), 0, by1 + dp(4f), 0xFF7A56B0, 0xFF3A2460, cl);
+        boardInnerShader = new LinearGradient(0, by0 + dp(18f), 0, by1, 0xFF261C3E, 0xFF120C1C, cl);
+        float sx = w * 0.655f;
+        float sh = w * 0.02f;
+        skelterShade = new LinearGradient(sx - sh, 0, sx + sh, 0,
+                new int[] {0x30FFE8C0, 0x00000000, 0x98000000}, new float[] {0f, 0.35f, 1f}, cl);
+
+        // The far side of the fair: stalls, domes and trees, one hazy silhouette path.
+        farPath.rewind();
+        farLights = 0;
+        float x = -dp(20f);
+        int n = 0;
+        while (x < w + dp(20f)) {
+            float sw = dp(50f) + hash01(n * 7 + 1) * dp(90f);
+            float stall = h * (0.03f + hash01(n * 7 + 2) * 0.055f);
+            int type = (int) (hash01(n * 7 + 3) * 4) % 4;
+            if (type == 0) {
+                farPath.addRect(x, hz - stall, x + sw, hz + dp(2f), Path.Direction.CW);
+                farPath.moveTo(x - dp(4f), hz - stall);
+                farPath.lineTo(x + sw * 0.5f, hz - stall * 1.6f);
+                farPath.lineTo(x + sw + dp(4f), hz - stall);
+                farPath.close();
+            } else if (type == 1) {
+                farPath.addRect(x, hz - stall * 0.6f, x + sw, hz + dp(2f), Path.Direction.CW);
+                oval.set(x, hz - stall * 1.25f, x + sw, hz);
+                farPath.addOval(oval, Path.Direction.CW);
+            } else if (type == 2) {
+                float cr = sw * 0.28f;
+                farPath.addCircle(x + sw * 0.3f, hz - cr * 0.9f, cr, Path.Direction.CW);
+                farPath.addCircle(x + sw * 0.62f, hz - cr * 1.3f, cr * 1.15f, Path.Direction.CW);
+                farPath.addCircle(x + sw * 0.85f, hz - cr * 0.7f, cr * 0.8f, Path.Direction.CW);
+                farPath.addRect(x + sw * 0.1f, hz - cr, x + sw, hz + dp(2f), Path.Direction.CW);
+            } else {
+                farPath.addRect(x, hz - stall * 0.7f, x + sw, hz + dp(2f), Path.Direction.CW);
+                farPath.addRect(x + sw * 0.45f, hz - stall * 1.6f, x + sw * 0.45f + dp(4f), hz - stall * 0.7f,
+                        Path.Direction.CW);
+                farPath.addRect(x + sw * 0.3f, hz - stall * 2.0f, x + sw * 0.75f, hz - stall * 1.6f,
+                        Path.Direction.CW);
+            }
+            if (farLights < FAR_LIGHTS && type != 2) {
+                farLightX[farLights] = x + sw * (0.2f + 0.6f * hash01(n * 7 + 4));
+                farLightY[farLights] = hz - stall * (0.2f + 0.3f * hash01(n * 7 + 5));
+                farLights++;
+            }
+            x += sw * (0.75f + hash01(n * 7 + 6) * 0.5f);
+            n++;
+        }
+
+        // The wire the bulb string hangs from, sagging a little between bulbs.
+        wirePath.rewind();
+        int bulbs = 26;
+        for (int i = 0; i < bulbs; i++) {
+            float f = i / (bulbs - 1f);
+            float bx = w * f;
+            float by = h * 0.08f + (float) Math.sin(f * Math.PI) * h * 0.1f - dp(6f);
+            if (i == 0) {
+                wirePath.moveTo(bx, by);
+            } else {
+                float pf = (i - 1) / (bulbs - 1f);
+                float px = w * pf;
+                float py = h * 0.08f + (float) Math.sin(pf * Math.PI) * h * 0.1f - dp(6f);
+                wirePath.quadTo((px + bx) * 0.5f, (py + by) * 0.5f + dp(7f), bx, by);
+            }
+        }
     }
 
     @Override
@@ -963,29 +1192,13 @@ final class MegaPullGame extends GameView {
 
     /* ---------------- scenery ---------------- */
 
-    /** Tents, a string of bulbs, sweeping spotlights and a crowd along the bottom. */
+    /**
+     * The night fair, back to front: stars and a moon, fireworks, sweeping spotlights, the far side
+     * of the fair in haze, the ground, a big wheel and a helter-skelter, the prize booth's legs,
+     * two lit tents, the bulb string and the crowd.
+     */
     private void drawFairground(Canvas c, float w, float h, float dt) {
         double t = sessionSeconds;
-        // Spotlights from the bottom corners: they sweep the sky when nothing is happening and
-        // swing in onto the tower as the crowd builds.
-        for (int side = 0; side < 2; side++) {
-            float ox = side == 0 ? w * 0.08f : w * 0.92f;
-            double sweep = -Math.PI / 2 + Math.sin(t * 0.6 + side * 2) * 0.55;
-            double onTower = Math.atan2(h * 0.14f - h, w * 0.5f - ox) + Math.sin(t * 2.5 + side) * 0.05;
-            double a = sweep + (onTower - sweep) * Math.min(1f, crowd * 1.2f);
-            float len = h * 1.1f;
-            float tx = ox + (float) Math.cos(a) * len;
-            float ty = h + (float) Math.sin(a) * len;
-            float nx = (float) -Math.sin(a) * dp(70f);
-            float ny = (float) Math.cos(a) * dp(70f);
-            tent.rewind();
-            tent.moveTo(ox, h);
-            tent.lineTo(tx + nx, ty + ny);
-            tent.lineTo(tx - nx, ty - ny);
-            tent.close();
-            paint.setColor(celebrate ? 0x30FFE28A : crowd > 0.6f ? 0x24FFF0C8 : 0x1ABFD8FF);
-            c.drawPath(tent, paint);
-        }
         // Stars.
         paint.setColor(0x88FFFFFF);
         for (int i = 0; i < 40; i++) {
@@ -994,40 +1207,67 @@ final class MegaPullGame extends GameView {
             float tw = 0.5f + 0.5f * (float) Math.sin(t * 2 + i);
             c.drawCircle(sx, sy, dp(1f) + tw * dp(1f), paint);
         }
+        drawMoon(c, w * 0.355f, h * 0.075f);
         drawFireworks(c);
-        // Two striped tents.
-        for (int k = 0; k < 2; k++) {
-            float tcx = k == 0 ? w * 0.17f : w * 0.83f;
-            float tw = w * 0.13f;
-            float roofTop = h * 0.50f;
-            float eave = h * 0.66f;
-            float floor = h * 0.9f;
-            int stripes = 8;
-            for (int i = 0; i < stripes; i++) {
-                float x0 = tcx - tw + 2 * tw * i / stripes;
-                float x1 = tcx - tw + 2 * tw * (i + 1) / stripes;
-                paint.setColor((i & 1) == 0 ? 0xFFB8323A : 0xFFEDE3D0);
-                tent.rewind();
-                tent.moveTo(tcx, roofTop);
-                tent.lineTo(x0, eave);
-                tent.lineTo(x1, eave);
-                tent.close();
-                c.drawPath(tent, paint);
-                c.drawRect(x0, eave, x1, floor, paint);
-            }
-            paint.setColor(0xFF1A1020);
-            c.drawRect(tcx - tw * 0.22f, eave + dp(20f), tcx + tw * 0.22f, floor, paint);
-            paint.setColor(0xFFF5C518);
-            c.drawRect(tcx - dp(1.5f), roofTop - dp(30f), tcx + dp(1.5f), roofTop, paint);
-            float flap = (float) Math.sin(t * 5 + k) * dp(4f);
+        // Spotlights from the bottom corners: they sweep the sky when nothing is happening and
+        // swing in onto the tower as the crowd builds. Each beam fades out along its length.
+        int beam = celebrate ? 2 : crowd > 0.6f ? 1 : 0;
+        float len = h * 1.1f;
+        for (int side = 0; side < 2; side++) {
+            float ox = side == 0 ? w * 0.08f : w * 0.92f;
+            double sweep = -Math.PI / 2 + Math.sin(t * 0.6 + side * 2) * 0.55;
+            double onTower = Math.atan2(h * 0.14f - h, w * 0.5f - ox) + Math.sin(t * 2.5 + side) * 0.05;
+            double a = sweep + (onTower - sweep) * Math.min(1f, crowd * 1.2f);
+            c.save();
+            c.translate(ox, h);
+            c.rotate((float) Math.toDegrees(a) + 90f);
             tent.rewind();
-            tent.moveTo(tcx + dp(1.5f), roofTop - dp(30f));
-            tent.lineTo(tcx + dp(26f), roofTop - dp(24f) + flap);
-            tent.lineTo(tcx + dp(1.5f), roofTop - dp(18f));
+            tent.moveTo(-dp(6f), 0);
+            tent.lineTo(dp(6f), 0);
+            tent.lineTo(dp(70f), -len);
+            tent.lineTo(-dp(70f), -len);
             tent.close();
-            c.drawPath(tent, paint);
+            shaderPaint.setColor(0xFFFFFFFF);
+            shaderPaint.setShader(beamShader[beam]);
+            c.drawPath(tent, shaderPaint);
+            shaderPaint.setShader(null);
+            c.restore();
         }
+        // The far side of the fair, pale in the haze, with a few lit windows.
+        paint.setColor(0xFF2E1E4A);
+        c.drawPath(farPath, paint);
+        for (int i = 0; i < farLights; i++) {
+            float tw = 0.6f + 0.4f * (float) Math.sin(t * 1.3 + i * 2.1);
+            paint.setColor(((int) (0x70 + 0x80 * tw) << 24) | (i % 3 == 0 ? 0xFF9EC4 : 0xFFC870));
+            c.drawCircle(farLightX[i], farLightY[i], dp(1.8f), paint);
+        }
+        // Ground: the fair's floor, darkening toward the viewer.
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(groundShader);
+        c.drawRect(-dp(30f), h * HORIZON, w + dp(30f), h + dp(30f), shaderPaint);
+        shaderPaint.setShader(null);
+        // The middle distance: a big wheel that turns faster as the crowd builds, and a helter-skelter.
+        wheelAngle += dt * (0.12 + crowd * 0.35 + (celebrate ? 0.4 : 0));
+        drawWheel(c, w * 0.38f, h * 0.64f, h * 0.14f, h * 0.86f, t);
+        drawHelterSkelter(c, w * 0.655f, h * 0.59f, h * 0.87f, w * 0.02f, t);
+        if (mode == Mode.STRIKE) {
+            // The prize booth stands on two posts behind the right-hand tent.
+            float bx0 = w * 0.60f;
+            float bx1 = w * 0.955f;
+            paint.setColor(0x66000000);
+            oval.set(bx0 - dp(16f), h * 0.88f - dp(5f), bx0 + dp(20f), h * 0.88f + dp(5f));
+            c.drawOval(oval, paint);
+            drawPost(c, bx0 - dp(4f), bx0 + dp(6f), h * 0.20f, h * 0.88f);
+            drawPost(c, bx1 - dp(6f), bx1 + dp(4f), h * 0.20f, h * 0.88f);
+        }
+        drawTent(c, 0, w, h, t);
+        drawTent(c, 1, w, h, t);
         // A string of bulbs swinging across the top; they flicker faster as the crowd builds.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x50C8B8E0);
+        c.drawPath(wirePath, paint);
+        paint.setStyle(Paint.Style.FILL);
         int n = 26;
         for (int i = 0; i < n; i++) {
             float f = i / (n - 1f);
@@ -1036,18 +1276,326 @@ final class MegaPullGame extends GameView {
             boolean on = celebrate ? ((int) (t * 10) + i) % 2 == 0
                     : ((int) (t * (3 + crowd * 5)) + i) % 5 != 0;
             int col = i % 3 == 0 ? 0xFFFF5A7A : i % 3 == 1 ? 0xFFF5C518 : 0xFF6BD8FF;
+            paint.setColor(0xFF1A1226);
+            c.drawRect(x - dp(2.5f), y - dp(8f), x + dp(2.5f), y - dp(3.5f), paint);
             paint.setColor(on ? col : 0xFF3A2A48);
             c.drawCircle(x, y, dp(5f), paint);
             if (on) {
                 Fx.glow(c, x, y, dp(16f), (col & 0x00FFFFFF) | 0x55000000);
+                paint.setColor(0xCCFFFFFF);
+                c.drawCircle(x - dp(1.5f), y - dp(1.5f), dp(1.6f), paint);
             }
         }
         drawCrowd(c, w, h, dt);
     }
 
+    private void drawMoon(Canvas c, float x, float y) {
+        Fx.glow(c, x, y, dp(80f), 0x30F4EEDC);
+        paint.setColor(0xFFF2ECDA);
+        c.drawCircle(x, y, dp(20f), paint);
+        paint.setColor(0xFFDCD2BC);
+        c.drawCircle(x - dp(6f), y - dp(4f), dp(4.5f), paint);
+        c.drawCircle(x + dp(7f), y + dp(5f), dp(3.5f), paint);
+        c.drawCircle(x + dp(2f), y - dp(10f), dp(2.5f), paint);
+        // The shadow side, so it reads as a sphere and not a disc.
+        paint.setColor(0x30302040);
+        c.drawCircle(x + dp(5f), y + dp(3f), dp(17f), paint);
+    }
+
+    /** A wooden post with a lit edge on the side facing the tower. */
+    private void drawPost(Canvas c, float x0, float x1, float top, float bottom) {
+        paint.setColor(0xFF4A2E1A);
+        c.drawRect(x0, top, x1, bottom, paint);
+        paint.setColor(0xFF9A6A3A);
+        c.drawRect(x0, top, x0 + dp(2f), bottom, paint);
+        paint.setColor(0xFF24140A);
+        c.drawRect(x1 - dp(2f), top, x1, bottom, paint);
+    }
+
+    /** The big wheel: A-frame legs, two rims, spokes, chasing rim bulbs and swinging gondolas. */
+    private void drawWheel(Canvas c, float wx, float wy, float r, float ground, double t) {
+        paint.setColor(0x60000000);
+        oval.set(wx - r * 0.8f, ground - dp(5f), wx + r * 0.8f, ground + dp(6f));
+        c.drawOval(oval, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(6f));
+        paint.setColor(0xFF2E2048);
+        c.drawLine(wx, wy, wx - r * 0.62f, ground, paint);
+        c.drawLine(wx, wy, wx + r * 0.62f, ground, paint);
+        paint.setStrokeWidth(dp(3f));
+        c.drawLine(wx - r * 0.42f, ground - (ground - wy) * 0.32f, wx + r * 0.42f, ground - (ground - wy) * 0.32f,
+                paint);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x995E4590);
+        for (int i = 0; i < 12; i++) {
+            double a = wheelAngle + i * Math.PI / 6;
+            c.drawLine(wx, wy, wx + (float) Math.cos(a) * r, wy + (float) Math.sin(a) * r, paint);
+        }
+        paint.setStrokeWidth(dp(3.5f));
+        paint.setColor(0xFF5E4590);
+        c.drawCircle(wx, wy, r, paint);
+        paint.setStrokeWidth(dp(1.5f));
+        c.drawCircle(wx, wy, r * 0.86f, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // Gondolas hang straight down whatever the wheel's angle, and swing a little.
+        for (int i = 0; i < 12; i++) {
+            double a = wheelAngle + i * Math.PI / 6 + Math.PI / 12;
+            float gx = wx + (float) Math.cos(a) * r;
+            float gy = wy + (float) Math.sin(a) * r;
+            float sway = (float) Math.sin(t * 1.4 + i) * dp(1.5f);
+            paint.setColor(0xFF2E2048);
+            c.drawRect(gx - dp(1f), gy, gx + dp(1f), gy + dp(4f), paint);
+            paint.setColor(shade(GONDOLA[i % GONDOLA.length], 0.62f));
+            c.drawRoundRect(gx - dp(9f) + sway, gy + dp(3f), gx + dp(9f) + sway, gy + dp(16f), dp(4f), dp(4f), paint);
+            paint.setColor(0x90FFD890);
+            c.drawRect(gx - dp(6f) + sway, gy + dp(6f), gx + dp(6f) + sway, gy + dp(9.5f), paint);
+        }
+        int bulbs = 24;
+        for (int i = 0; i < bulbs; i++) {
+            double a = wheelAngle + i * Math.PI * 2 / bulbs;
+            boolean lit = celebrate ? ((int) (t * 8) + i) % 2 == 0 : ((int) (t * 4) + i) % 3 != 0;
+            paint.setColor(lit ? (i % 2 == 0 ? 0xB8FFD070 : 0xB8FF7AA0) : 0xFF3A2A50);
+            c.drawCircle(wx + (float) Math.cos(a) * r, wy + (float) Math.sin(a) * r, dp(2.4f), paint);
+        }
+        Fx.glow(c, wx, wy, dp(28f), 0x40FFD890);
+        paint.setColor(0xFF7A5CA8);
+        c.drawCircle(wx, wy, dp(7f), paint);
+        paint.setColor(0xFFF5C518);
+        c.drawCircle(wx, wy, dp(3f), paint);
+    }
+
+    /** A striped helter-skelter: tapered tower, a spiral slide, a cone roof and a flag. */
+    private void drawHelterSkelter(Canvas c, float x, float top, float ground, float half, double t) {
+        float topHalf = half * 0.62f;
+        paint.setColor(0x60000000);
+        oval.set(x - half * 2.2f, ground - dp(4f), x + half * 2.2f, ground + dp(5f));
+        c.drawOval(oval, paint);
+        outline.rewind();
+        outline.moveTo(x - topHalf, top);
+        outline.lineTo(x + topHalf, top);
+        outline.lineTo(x + half, ground);
+        outline.lineTo(x - half, ground);
+        outline.close();
+        paint.setColor(0xFFB2A894);
+        c.drawPath(outline, paint);
+        // The slide winds round it: slanted red bands, clipped to the tower.
+        c.save();
+        c.clipPath(outline);
+        paint.setColor(0xFF8E2C3A);
+        int bands = 8;
+        float bandH = (ground - top) / bands;
+        for (int b = 0; b < bands; b++) {
+            float y = top + b * bandH;
+            tent.rewind();
+            tent.moveTo(x - half * 1.4f, y + bandH * 0.55f);
+            tent.lineTo(x + half * 1.4f, y);
+            tent.lineTo(x + half * 1.4f, y + bandH * 0.42f);
+            tent.lineTo(x - half * 1.4f, y + bandH * 0.97f);
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        c.restore();
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(skelterShade);
+        c.drawPath(outline, shaderPaint);
+        shaderPaint.setShader(null);
+        // A door at the foot, lit from inside, and the mat the slide lands on.
+        paint.setColor(0xFFE0883A);
+        c.drawRoundRect(x - half * 0.35f, ground - dp(22f), x + half * 0.35f, ground, dp(4f), dp(4f), paint);
+        paint.setColor(0xFF6A2A40);
+        c.drawRoundRect(x + half * 0.9f, ground - dp(5f), x + half * 2.1f, ground, dp(2f), dp(2f), paint);
+        // Cone roof, half in shadow, with a gold ball and a flag.
+        float peak = top - (ground - top) * 0.2f;
+        tent.rewind();
+        tent.moveTo(x - topHalf * 1.7f, top + dp(2f));
+        tent.lineTo(x, peak);
+        tent.lineTo(x + topHalf * 1.7f, top + dp(2f));
+        tent.close();
+        paint.setColor(0xFF9A2E3C);
+        c.drawPath(tent, paint);
+        tent.rewind();
+        tent.moveTo(x, top + dp(2f));
+        tent.lineTo(x, peak);
+        tent.lineTo(x + topHalf * 1.7f, top + dp(2f));
+        tent.close();
+        paint.setColor(0xFF5E1A26);
+        c.drawPath(tent, paint);
+        for (int i = 0; i < 5; i++) {
+            boolean lit = ((int) (t * 3) + i) % 2 == 0;
+            paint.setColor(lit ? 0xE0FFD070 : 0xFF3A2A50);
+            c.drawCircle(x - topHalf * 1.5f + i * topHalf * 0.75f, top + dp(3f), dp(2.2f), paint);
+        }
+        paint.setColor(GOLD);
+        c.drawRect(x - dp(1f), peak - dp(16f), x + dp(1f), peak, paint);
+        c.drawCircle(x, peak, dp(3f), paint);
+        float flap = (float) Math.sin(t * 5 + 1.7) * dp(3f);
+        tent.rewind();
+        tent.moveTo(x + dp(1f), peak - dp(16f));
+        tent.lineTo(x + dp(16f), peak - dp(12f) + flap);
+        tent.lineTo(x + dp(1f), peak - dp(8f));
+        tent.close();
+        paint.setColor(0xFF6BD8FF);
+        c.drawPath(tent, paint);
+    }
+
+    /** Bottom edge of a tent wall: the front of the drum bulges toward the viewer. */
+    private float wallBottom(float x, float tcx, float tw, float floor) {
+        float u = (x - tcx) / tw;
+        return floor + dp(10f) * (1f - u * u);
+    }
+
+    /**
+     * A big top: stripes spaced as they would be round a drum, so they crowd together toward the
+     * edges; a concave canvas roof; scalloped valance with bulbs; shading from the tower's side; and
+     * a doorway lit from inside with its curtains tied back.
+     */
+    private void drawTent(Canvas c, int k, float w, float h, double t) {
+        float tcx = k == 0 ? w * 0.17f : w * 0.83f;
+        float tw = w * 0.13f;
+        float roofTop = h * 0.50f;
+        float eave = h * 0.66f;
+        float floor = h * 0.9f;
+        float sag = dp(16f);
+        int stripes = tentX.length - 1;
+        for (int i = 0; i <= stripes; i++) {
+            tentX[i] = tcx + tw * (float) Math.sin(-Math.PI / 2 + Math.PI * i / stripes);
+        }
+        // Contact shadow on the ground.
+        paint.setColor(0x80000000);
+        oval.set(tcx - tw * 1.14f, floor - dp(4f), tcx + tw * 1.14f, floor + dp(24f));
+        c.drawOval(oval, paint);
+        // Walls.
+        for (int i = 0; i < stripes; i++) {
+            float x0 = tentX[i];
+            float x1 = tentX[i + 1];
+            paint.setColor((i & 1) == 0 ? RED : CREAM);
+            tent.rewind();
+            tent.moveTo(x0, eave);
+            tent.lineTo(x1, eave);
+            tent.lineTo(x1, wallBottom(x1, tcx, tw, floor));
+            tent.lineTo(x0, wallBottom(x0, tcx, tw, floor));
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        // Roof: each panel's edges sag inward, so the whole roof sweeps like canvas on ropes.
+        for (int i = 0; i < stripes; i++) {
+            float x0 = tentX[i];
+            float x1 = tentX[i + 1];
+            paint.setColor((i & 1) == 0 ? RED : CREAM);
+            tent.rewind();
+            tent.moveTo(tcx, roofTop);
+            tent.quadTo(tcx + (x0 - tcx) * 0.5f, (roofTop + eave) * 0.5f + sag * Math.abs(x0 - tcx) / tw,
+                    x0, eave);
+            tent.lineTo(x1, eave);
+            tent.quadTo(tcx + (x1 - tcx) * 0.5f, (roofTop + eave) * 0.5f + sag * Math.abs(x1 - tcx) / tw,
+                    tcx, roofTop);
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        // Light and shade over the whole tent: one pass across, one down toward the ground.
+        outline.rewind();
+        outline.moveTo(tcx, roofTop);
+        outline.quadTo(tcx - tw * 0.5f, (roofTop + eave) * 0.5f + sag, tentX[0], eave);
+        for (int i = 0; i <= stripes; i++) {
+            outline.lineTo(tentX[i], wallBottom(tentX[i], tcx, tw, floor));
+        }
+        outline.lineTo(tentX[stripes], eave);
+        outline.quadTo(tcx + tw * 0.5f, (roofTop + eave) * 0.5f + sag, tcx, roofTop);
+        outline.close();
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(tentShade[k]);
+        c.drawPath(outline, shaderPaint);
+        shaderPaint.setShader(tentFloorShade);
+        c.drawPath(outline, shaderPaint);
+        shaderPaint.setShader(null);
+        // Valance: a scallop under each roof panel, in the other colour, darker toward the edges.
+        for (int i = 0; i < stripes; i++) {
+            float x0 = tentX[i];
+            float x1 = tentX[i + 1];
+            float mid = (x0 + x1) * 0.5f;
+            float u = Math.abs(mid - tcx) / tw;
+            float depth = dp(15f) * Math.max(0.35f, (x1 - x0) / (2f * tw / stripes) * 0.75f);
+            float lit = k == 0 ? (mid > tcx ? 1f : 0.62f) : (mid < tcx ? 1f : 0.62f);
+            paint.setColor(shade((i & 1) == 0 ? CREAM : RED, lit * (1f - 0.35f * u * u)));
+            tent.rewind();
+            tent.moveTo(x0, eave - dp(2f));
+            tent.lineTo(x1, eave - dp(2f));
+            tent.quadTo(mid, eave + depth * 2f, x0, eave - dp(2f));
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        paint.setColor(GOLD);
+        c.drawRect(tentX[0], eave - dp(4f), tentX[stripes], eave - dp(1f), paint);
+        for (int i = 0; i <= stripes; i++) {
+            boolean on = ((int) (t * 3) + i + k) % 2 == 0 || celebrate;
+            paint.setColor(on ? 0xFFFFE08A : 0xFF6A5040);
+            c.drawCircle(tentX[i], eave - dp(2.5f), dp(3.2f), paint);
+            if (on) {
+                Fx.glow(c, tentX[i], eave - dp(2.5f), dp(12f), 0x66FFD070);
+            }
+        }
+        // The doorway, lit from inside.
+        float dw = tw * 0.44f;
+        float dl = tcx - dw * 0.5f;
+        float dt = eave + dp(26f);
+        float db = floor + dp(10f);
+        float dh = db - dt;
+        Fx.glow(c, tcx, db - dh * 0.35f, dw * 0.95f, 0x48FFC070);
+        tent.rewind();
+        tent.moveTo(dl, db);
+        tent.lineTo(dl, dt + dw * 0.25f);
+        tent.quadTo(dl, dt, tcx, dt);
+        tent.quadTo(dl + dw, dt, dl + dw, dt + dw * 0.25f);
+        tent.lineTo(dl + dw, db);
+        tent.close();
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(doorShader);
+        c.drawPath(tent, shaderPaint);
+        shaderPaint.setShader(null);
+        // Someone inside, against the light.
+        paint.setColor(0xCC3A1A14);
+        float px = tcx + (k == 0 ? -dw * 0.1f : dw * 0.12f);
+        c.drawRoundRect(px - dp(7f), db - dh * 0.42f, px + dp(7f), db, dp(6f), dp(6f), paint);
+        c.drawCircle(px, db - dh * 0.42f - dp(7f), dp(6.5f), paint);
+        // Curtains tied back on either side.
+        for (int side = 0; side < 2; side++) {
+            float s = side == 0 ? 1f : -1f;
+            float edge = side == 0 ? dl : dl + dw;
+            tent.rewind();
+            tent.moveTo(edge - s * dp(3f), dt + dw * 0.18f);
+            tent.lineTo(edge + s * dw * 0.46f, dt - dp(2f));
+            tent.quadTo(edge + s * dw * 0.18f, dt + dh * 0.35f, edge + s * dw * 0.05f, dt + dh * 0.62f);
+            tent.quadTo(edge + s * dw * 0.15f, dt + dh * 0.82f, edge - s * dp(2f), db);
+            tent.close();
+            paint.setColor(0xFF8E2230);
+            c.drawPath(tent, paint);
+            paint.setColor(GOLD);
+            c.drawCircle(edge + s * dw * 0.05f, dt + dh * 0.62f, dp(3f), paint);
+        }
+        // Light spilling out onto the ground in front.
+        paint.setColor(0x38FFB060);
+        oval.set(tcx - dw * 0.95f, db - dp(4f), tcx + dw * 0.95f, db + dp(22f));
+        c.drawOval(oval, paint);
+        // Flagpole, finial and pennant.
+        paint.setColor(0xFFF5C518);
+        c.drawRect(tcx - dp(1.5f), roofTop - dp(30f), tcx + dp(1.5f), roofTop, paint);
+        Fx.glow(c, tcx, roofTop - dp(30f), dp(12f), 0x66F5C518);
+        c.drawCircle(tcx, roofTop - dp(30f), dp(3.5f), paint);
+        float flap = (float) Math.sin(t * 5 + k) * dp(4f);
+        tent.rewind();
+        tent.moveTo(tcx + dp(1.5f), roofTop - dp(28f));
+        tent.lineTo(tcx + dp(26f), roofTop - dp(22f) + flap);
+        tent.lineTo(tcx + dp(1.5f), roofTop - dp(16f));
+        tent.close();
+        c.drawPath(tent, paint);
+    }
+
     /**
      * The crowd builds as you close in: onlookers drift in from below until the front is packed,
-     * the jumping gets higher, arms and pennants go up, and near the top they chant.
+     * the jumping gets higher, arms and pennants go up, and near the top they chant. Three rows,
+     * the back one smaller and lost in the haze; everyone has their own build, clothes and hat,
+     * a few carry balloons, and the near rows are rim-lit from the tower.
      */
     private void drawCrowd(Canvas c, float w, float h, float dt) {
         double t = sessionSeconds;
@@ -1057,46 +1605,103 @@ final class MegaPullGame extends GameView {
             float want = order < visible ? 1f : 0f;
             crowdIn[i] += (want - crowdIn[i]) * Math.min(1f, 3f * dt);
         }
-        float ground = h;
-        int half = CROWD / 2;
-        // Back row first, smaller and darker, then the front row over it.
-        for (int row = 1; row >= 0; row--) {
-            float scale = row == 1 ? 0.8f : 1f;
-            float rowGround = row == 1 ? ground - dp(22f) : ground;
-            for (int j = 0; j < half; j++) {
-                int i = row * half + j;
+        for (int row = 2; row >= 0; row--) {
+            float scale = row == 0 ? 1.06f : row == 1 ? 0.86f : 0.7f;
+            float rowGround = row == 0 ? h + dp(6f) : row == 1 ? h - dp(14f) : h - dp(30f);
+            float haze = row == 0 ? 0f : row == 1 ? 0.3f : 0.58f;
+            float night = row == 0 ? 0.5f : row == 1 ? 0.6f : 0.7f;
+            float offset = row == 0 ? 0.5f : row == 1 ? 0f : 0.25f;
+            int rimCol = row == 0 ? 0x80FFD8A8 : 0x50FFD8A8;
+            for (int j = 0; j < CROWD_ROW; j++) {
+                int i = row * CROWD_ROW + j;
                 float in = crowdIn[i];
                 if (in < 0.02f) {
                     continue;
                 }
-                float x = w * (j + (row == 1 ? 0f : 0.5f)) / half;
-                float rise = (1f - in) * dp(70f);
+                float x = w * (j + offset) / CROWD_ROW + crowdJit[i] * dp(16f);
+                float rise = (1f - in) * dp(80f);
                 float jump = celebrate ? (float) Math.abs(Math.sin(t * 9 + i)) * dp(12f)
                         : (float) Math.abs(Math.sin(t * (1.5 + crowd * 6) + i))
                         * (dp(1.5f) + crowd * crowd * dp(11f));
                 float gy = rowGround + rise - jump;
-                float s = scale;
-                paint.setColor(row == 1 ? 0xFF2A1E42 : 0xFF3A2858);
-                c.drawRoundRect(x - dp(11f) * s, gy - dp(34f) * s, x + dp(11f) * s, gy + dp(10f) * s + rise,
-                        dp(8f) * s, dp(8f) * s, paint);
-                c.drawCircle(x, gy - dp(44f) * s, dp(9f) * s, paint);
+                float s = scale * crowdTall[i];
+                float sw = scale * crowdWide[i];
+                float hr = dp(9f) * scale;
+                float torsoTop = gy - dp(34f) * s;
+                float headY = torsoTop - dp(4f) * scale - hr;
+                float dir = x < w * 0.5f ? 1f : -1f;   // the side facing the tower
+                int shirt = mix(shade(crowdShirt[i], night), HAZE, haze);
+                int skin = mix(shade(crowdSkin[i], night + 0.12f), HAZE, haze);
+                int hair = mix(crowdHair[i], HAZE, haze);
                 boolean armUp = (celebrate && i % 3 == 0) || (crowd > 0.7f && i % 4 == 1)
                         || (crowd > 0.9f && i % 2 == 0);
-                if (armUp) {
-                    c.drawRect(x - dp(13f) * s, gy - dp(66f) * s, x - dp(9f) * s, gy - dp(34f) * s, paint);
+                // A balloon on a string, bobbing above.
+                if (crowdBalloon[i] != 0 && row < 2 && Math.abs(x - w * 0.5f) > dp(120f)) {
+                    // (none right under the tower: it is drawn after the crowd and would cut them off)
+                    float handX = x - dir * dp(12f) * sw;
+                    float bx = handX - dir * dp(6f) + (float) Math.sin(t * 1.1 + i) * dp(3f);
+                    float by = headY - dp(46f) * scale + (float) Math.sin(t * 1.7 + i) * dp(4f);
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(dp(1f));
+                    paint.setColor(0x80D8D0E8);
+                    c.drawLine(handX, gy - dp(14f) * s, bx, by + dp(12f) * scale, paint);
+                    paint.setStyle(Paint.Style.FILL);
+                    int bc = mix(shade(crowdBalloon[i], 0.85f), HAZE, haze);
+                    paint.setColor(bc);
+                    oval.set(bx - dp(10f) * scale, by - dp(12f) * scale, bx + dp(10f) * scale, by + dp(12f) * scale);
+                    c.drawOval(oval, paint);
+                    paint.setColor(lighten(bc, 0.55f));
+                    c.drawCircle(bx - dp(3.5f) * scale, by - dp(5f) * scale, dp(2.6f) * scale, paint);
                 }
+                // A raised arm goes behind the body, so it is drawn first.
+                if (armUp) {
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+                    paint.setStrokeWidth(dp(6f) * scale);
+                    paint.setColor(shirt);
+                    float shx = x + dir * dp(8f) * sw;
+                    float hx = x + dir * dp(15f) * sw;
+                    float hy = torsoTop - dp(26f) * s;
+                    c.drawLine(shx, torsoTop + dp(5f) * s, hx, hy, paint);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(skin);
+                    c.drawCircle(hx, hy, dp(3.6f) * scale, paint);
+                }
+                if (crowdHat[i] == 2) {
+                    // Long hair falls behind the head and shoulders.
+                    paint.setColor(hair);
+                    c.drawRoundRect(x - hr * 1.1f, headY - hr * 1.05f, x + hr * 1.1f, headY + hr * 1.5f,
+                            hr, hr, paint);
+                }
+                if (row < 2) {
+                    // Rim light: the same shapes nudged toward the tower, mostly hidden by the body.
+                    paint.setColor(rimCol);
+                    c.drawRoundRect(x - dp(11f) * sw + dir * dp(1.8f), torsoTop - dp(1.2f),
+                            x + dp(11f) * sw + dir * dp(1.8f), gy + dp(10f) * s + rise, dp(8f) * sw, dp(8f) * sw,
+                            paint);
+                    c.drawCircle(x + dir * dp(1.6f), headY - dp(1f), hr, paint);
+                }
+                paint.setColor(shirt);
+                c.drawRoundRect(x - dp(11f) * sw, torsoTop, x + dp(11f) * sw, gy + dp(10f) * s + rise,
+                        dp(8f) * sw, dp(8f) * sw, paint);
+                paint.setColor(skin);
+                c.drawRect(x - dp(3f) * scale, headY + hr * 0.6f, x + dp(3f) * scale, torsoTop + dp(1f), paint);
+                c.drawCircle(x, headY, hr, paint);
+                drawHeadwear(c, crowdHat[i], x, headY, hr, hair, mix(shade(lighten(crowdShirt[i], 0.2f),
+                        night + 0.1f), HAZE, haze), dir);
                 // Pennants come out once it gets exciting.
                 if ((crowd > 0.55f || celebrate) && i % 5 == 0) {
-                    float px = x + dp(11f) * s;
+                    float px = x + dp(11f) * sw;
                     float top = gy - dp(72f) * s;
-                    c.drawRect(px, top, px + dp(2.5f) * s, gy - dp(30f) * s, paint);
-                    int col = FIREWORK[i % 4];
+                    paint.setColor(shirt);
+                    c.drawRect(px, top, px + dp(2.5f) * scale, gy - dp(30f) * s, paint);
+                    int col = mix(FIREWORK[i % 4], HAZE, haze);
                     paint.setColor(col);
-                    float wave = (float) Math.sin(t * 8 + i) * dp(5f) * s;
+                    float wave = (float) Math.sin(t * 8 + i) * dp(5f) * scale;
                     tent.rewind();
-                    tent.moveTo(px + dp(2.5f) * s, top);
-                    tent.lineTo(px + dp(26f) * s, top + dp(7f) * s + wave);
-                    tent.lineTo(px + dp(2.5f) * s, top + dp(14f) * s);
+                    tent.moveTo(px + dp(2.5f) * scale, top);
+                    tent.lineTo(px + dp(26f) * scale, top + dp(7f) * scale + wave);
+                    tent.lineTo(px + dp(2.5f) * scale, top + dp(14f) * scale);
                     tent.close();
                     c.drawPath(tent, paint);
                 }
@@ -1107,6 +1712,35 @@ final class MegaPullGame extends GameView {
             int col = crowd > 0.92f ? 0xFFF5C518 : 0xCCFFFFFF;
             bold(c, "GO!  GO!", w * 0.33f, h * 0.80f, 16f, col, Paint.Align.CENTER);
             bold(c, "GO!  GO!", w * 0.67f, h * 0.80f, 16f, col, Paint.Align.CENTER);
+        }
+    }
+
+    /** Hair and hats: 0 short hair, 1 cap, 2 long hair, 3 bobble hat, 4 bun, 5 bare. */
+    private void drawHeadwear(Canvas c, int kind, float x, float y, float hr, int hair, int hat, float dir) {
+        if (kind == 5) {
+            return;
+        }
+        if (kind == 3) {
+            paint.setColor(hat);
+            oval.set(x - hr * 1.02f, y - hr * 1.15f, x + hr * 1.02f, y + hr * 0.5f);
+            c.drawArc(oval, 180f, 180f, true, paint);
+            paint.setColor(lighten(hat, 0.3f));
+            c.drawRect(x - hr * 1.02f, y - hr * 0.42f, x + hr * 1.02f, y - hr * 0.18f, paint);
+            c.drawCircle(x, y - hr * 1.15f, hr * 0.36f, paint);
+            return;
+        }
+        paint.setColor(hair);
+        oval.set(x - hr * 1.04f, y - hr * 1.06f, x + hr * 1.04f, y + hr * 0.3f);
+        c.drawArc(oval, 180f, 180f, true, paint);
+        if (kind == 1) {
+            paint.setColor(hat);
+            oval.set(x - hr * 1.04f, y - hr * 1.12f, x + hr * 1.04f, y + hr * 0.1f);
+            c.drawArc(oval, 180f, 180f, true, paint);
+            float b0 = x + dir * hr * 0.3f;
+            float b1 = x + dir * hr * 1.6f;
+            c.drawRect(Math.min(b0, b1), y - hr * 0.52f, Math.max(b0, b1), y - hr * 0.3f, paint);
+        } else if (kind == 4) {
+            c.drawCircle(x, y - hr * 1.1f, hr * 0.45f, paint);
         }
     }
 
@@ -1172,14 +1806,24 @@ final class MegaPullGame extends GameView {
         float x1 = w * 0.195f;
         float y0 = h * 0.47f;
         float y1 = h * 0.66f;
-        paint.setColor(0xFF2A1E12);
-        c.drawRect((x0 + x1) * 0.5f - dp(5f), y1, (x0 + x1) * 0.5f + dp(5f), h * 0.9f, paint);
+        float mx = (x0 + x1) * 0.5f;
+        paint.setColor(0x66000000);
+        oval.set(mx - dp(18f), h * 0.9f - dp(4f), mx + dp(18f), h * 0.9f + dp(4f));
+        c.drawOval(oval, paint);
+        drawPost(c, mx - dp(5f), mx + dp(5f), y1, h * 0.9f);
+        // Drop shadow, dark outer edge, lit frame, then the recessed face the bars sit in.
+        paint.setColor(0x66000000);
+        c.drawRoundRect(x0 - dp(1f), y0, x1 + dp(8f), y1 + dp(9f), dp(8f), dp(8f), paint);
         paint.setColor(0xFF120D1C);
         c.drawRoundRect(x0 - dp(4f), y0 - dp(4f), x1 + dp(4f), y1 + dp(4f), dp(8f), dp(8f), paint);
-        paint.setColor(0xFF5A3A8A);
-        c.drawRoundRect(x0, y0, x1, y1, dp(6f), dp(6f), paint);
-        paint.setColor(0xFF1B1428);
-        c.drawRoundRect(x0 + dp(4f), y0 + dp(18f), x1 - dp(4f), y1 - dp(4f), dp(5f), dp(5f), paint);
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(boardFrameShader);
+        c.drawRoundRect(x0, y0, x1, y1, dp(6f), dp(6f), shaderPaint);
+        shaderPaint.setShader(boardInnerShader);
+        c.drawRoundRect(x0 + dp(4f), y0 + dp(18f), x1 - dp(4f), y1 - dp(4f), dp(5f), dp(5f), shaderPaint);
+        shaderPaint.setShader(null);
+        paint.setColor(0x60FFFFFF);
+        c.drawRect(x0 + dp(6f), y0, x1 - dp(6f), y0 + dp(1f), paint);
         label(c, "THIS WEEK'S BEST PULL", (x0 + x1) * 0.5f, y0 + dp(13f), 8.5f, 0xFFF5C518,
                 Paint.Align.CENTER);
         float top = y0 + dp(26f);
@@ -1193,10 +1837,18 @@ final class MegaPullGame extends GameView {
             float bh = Math.max(0f, Math.min(1f, value / peakW)) * (floor - top);
             boolean today = i == weekToday;
             paint.setColor(0xFF261B3A);
-            c.drawRect(bx, top, bx + bw, floor, paint);
+            c.drawRoundRect(bx, top, bx + bw, floor, dp(2.5f), dp(2.5f), paint);
             if (bh > 0.5f) {
-                paint.setColor(today ? 0xFFF5C518 : 0xFF35D0BA);
-                c.drawRect(bx, floor - bh, bx + bw, floor, paint);
+                int barCol = today ? 0xFFF5C518 : 0xFF35D0BA;
+                paint.setColor(shade(barCol, 0.7f));
+                c.drawRoundRect(bx, floor - bh, bx + bw, floor, dp(2.5f), dp(2.5f), paint);
+                paint.setColor(barCol);
+                c.drawRoundRect(bx, floor - bh, bx + bw * 0.72f, floor, dp(2.5f), dp(2.5f), paint);
+                if (bh > dp(5f)) {
+                    // Gloss down the lit side.
+                    paint.setColor(lighten(barCol, 0.45f));
+                    c.drawRect(bx + bw * 0.14f, floor - bh + dp(2f), bx + bw * 0.3f, floor - dp(1f), paint);
+                }
                 if (today) {
                     Fx.glow(c, bx + bw * 0.5f, floor - bh, dp(18f), 0x55F5C518);
                 }
@@ -1217,6 +1869,21 @@ final class MegaPullGame extends GameView {
         label(c, "BELL " + bell, x1 - dp(8f), bellLine - dp(3f), 7.5f, 0xFFF0B132, Paint.Align.RIGHT);
     }
 
+    /** A HUD panel: soft drop shadow, the fill, a faint border and a lit top edge. */
+    private void hudPanel(Canvas c, float l, float t, float r, float b, float rad, int fill) {
+        paint.setColor(0x55000000);
+        c.drawRoundRect(l + dp(2f), t + dp(4f), r + dp(2f), b + dp(5f), rad, rad, paint);
+        paint.setColor(fill);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x2CFFFFFF);
+        c.drawRoundRect(l + dp(0.5f), t + dp(0.5f), r - dp(0.5f), b - dp(0.5f), rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x50FFFFFF);
+        c.drawRect(l + rad, t, r - rad, t + dp(1f), paint);
+    }
+
     private float maxWeek() {
         float m = 0f;
         for (int i = 0; i < 7; i++) {
@@ -1231,9 +1898,8 @@ final class MegaPullGame extends GameView {
         float x1 = w * 0.965f;
         float y0 = h * 0.18f;
         float rowH = dp(34f);
-        paint.setColor(0xCC120D1C);
-        c.drawRoundRect(x0 - dp(8f), y0 - dp(24f), x1 + dp(8f), y0 + rowH * RIVALS.length + dp(8f),
-                dp(10f), dp(10f), paint);
+        hudPanel(c, x0 - dp(8f), y0 - dp(24f), x1 + dp(8f), y0 + rowH * RIVALS.length + dp(8f), dp(10f),
+                0xCC120D1C);
         label(c, "THE LADDER", (x0 + x1) * 0.5f, y0 - dp(8f), 9.5f, 0xFFF5C518, Paint.Align.CENTER);
         for (int k = 0; k < RIVALS.length; k++) {
             RectF r = rivalHit[k];
@@ -1272,8 +1938,7 @@ final class MegaPullGame extends GameView {
         float x1 = w * 0.965f;
         float y0 = h * 0.24f;
         float y1 = h * 0.44f;
-        paint.setColor(0xCC120D1C);
-        c.drawRoundRect(x0 - dp(8f), y0 - dp(24f), x1 + dp(8f), y1 + dp(26f), dp(10f), dp(10f), paint);
+        hudPanel(c, x0 - dp(8f), y0 - dp(24f), x1 + dp(8f), y1 + dp(26f), dp(10f), 0xCC120D1C);
         label(c, "TEN PULLS", (x0 + x1) * 0.5f, y0 - dp(8f), 9.5f, 0xFFF5C518, Paint.Align.CENTER);
         float span = (x1 - x0) / TEN_PULLS;
         float ref = Math.max(1f, Math.max(bell, tenMax()));
@@ -1317,8 +1982,7 @@ final class MegaPullGame extends GameView {
         float cx = w * 0.795f;
         float y0 = h * 0.20f;
         float bw = w * 0.15f;
-        paint.setColor(0xFF120D1C);
-        c.drawRoundRect(cx - bw, y0, cx + bw, y0 + dp(128f), dp(12f), dp(12f), paint);
+        hudPanel(c, cx - bw, y0, cx + bw, y0 + dp(128f), dp(12f), 0xFF120D1C);
         // Bulbs round the sign, chasing while a call is live.
         int n = 18;
         for (int i = 0; i < n; i++) {
@@ -1362,11 +2026,7 @@ final class MegaPullGame extends GameView {
     /** The prize shelf for STRIKE: what you have won lights up and hops. */
     private void drawPrizes(Canvas c, float w, float h) {
         float shelfY = h * 0.44f;
-        paint.setColor(0xFF5A3A22);
-        c.drawRect(w * 0.60f, shelfY, w * 0.955f, shelfY + dp(9f), paint);
-        paint.setColor(0xFF3A2414);
-        c.drawRect(w * 0.62f, shelfY + dp(9f), w * 0.62f + dp(5f), shelfY + dp(26f), paint);
-        c.drawRect(w * 0.935f, shelfY + dp(9f), w * 0.935f + dp(5f), shelfY + dp(26f), paint);
+        drawBooth(c, w, h, shelfY);
         label(c, "PRIZES", w * 0.7775f, shelfY + dp(24f), 9f, 0xFFF5C518, Paint.Align.CENTER);
         int best = (int) bests.get("megapull.prize", 0f);
         for (int k = 0; k < PRIZE_AT.length; k++) {
@@ -1386,6 +2046,11 @@ final class MegaPullGame extends GameView {
             if (won) {
                 Fx.glow(c, x, shelfY - size * 0.5f - hop, size * 0.9f, (PRIZE_COLOR[k] & 0x00FFFFFF) | 0x55000000);
             }
+            // Contact shadow on the shelf, shrinking as the prize hops off it.
+            float sh = size * 0.36f * (1f - Math.min(0.6f, hop / dp(40f)));
+            paint.setColor(0x70000000);
+            oval.set(x - sh, shelfY - dp(4f), x + sh, shelfY + dp(1f));
+            c.drawOval(oval, paint);
             drawPlush(c, x, shelfY - hop, size, PRIZE_COLOR[k], k, won ? 1f : 0.45f);
             if (best > k && !won) {
                 // Won on an earlier go: a small star so the shelf shows your collection.
@@ -1406,6 +2071,103 @@ final class MegaPullGame extends GameView {
                         8.5f, afford ? 0xFFF5C518 : FAINT, Paint.Align.CENTER);
             }
         }
+    }
+
+    /**
+     * The prize booth: a velvet back drape, a striped awning with a scalloped edge and chasing
+     * bulbs, the front of the two posts, and a thick shelf on brackets. The posts' lower half is
+     * drawn with the scenery, behind the right-hand tent.
+     */
+    private void drawBooth(Canvas c, float w, float h, float shelfY) {
+        float bx0 = w * 0.60f;
+        float bx1 = w * 0.955f;
+        float awnTop = h * 0.20f;
+        float awnBot = h * 0.245f;
+        double t = sessionSeconds;
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(boothShader);
+        c.drawRect(bx0, awnBot, bx1, shelfY, shaderPaint);
+        shaderPaint.setShader(null);
+        // Folds in the drape.
+        paint.setColor(0x10FFFFFF);
+        for (float x = bx0 + dp(12f); x < bx1 - dp(12f); x += dp(34f)) {
+            c.drawRect(x, awnBot, x + dp(12f), shelfY, paint);
+        }
+        // Light from the bulbs under the awning, falling on the drape.
+        Fx.glow(c, bx0 + (bx1 - bx0) * 0.2f, awnBot + dp(8f), dp(90f), 0x30FFD890);
+        Fx.glow(c, bx0 + (bx1 - bx0) * 0.5f, awnBot + dp(8f), dp(90f), 0x30FFD890);
+        Fx.glow(c, bx0 + (bx1 - bx0) * 0.8f, awnBot + dp(8f), dp(90f), 0x30FFD890);
+        drawPost(c, bx0 - dp(4f), bx0 + dp(6f), awnTop, shelfY + dp(11f));
+        drawPost(c, bx1 - dp(6f), bx1 + dp(4f), awnTop, shelfY + dp(11f));
+        // Awning: wider at the front edge than at the back, so it leans out toward you.
+        int n = 14;
+        float tl = bx0 + dp(4f);
+        float tr = bx1 - dp(4f);
+        float bl = bx0 - dp(14f);
+        float br = bx1 + dp(14f);
+        for (int i = 0; i < n; i++) {
+            float f0 = i / (float) n;
+            float f1 = (i + 1) / (float) n;
+            float xa = tl + (tr - tl) * f0;
+            float xb = tl + (tr - tl) * f1;
+            float xc = bl + (br - bl) * f0;
+            float xd = bl + (br - bl) * f1;
+            paint.setColor((i & 1) == 0 ? RED : CREAM);
+            tent.rewind();
+            tent.moveTo(xa, awnTop);
+            tent.lineTo(xb, awnTop);
+            tent.lineTo(xd, awnBot);
+            tent.lineTo(xc, awnBot);
+            tent.close();
+            c.drawPath(tent, paint);
+            tent.rewind();
+            tent.moveTo(xc, awnBot - dp(1f));
+            tent.lineTo(xd, awnBot - dp(1f));
+            tent.quadTo((xc + xd) * 0.5f, awnBot + dp(24f), xc, awnBot - dp(1f));
+            tent.close();
+            paint.setColor(shade((i & 1) == 0 ? RED : CREAM, 0.9f));
+            c.drawPath(tent, paint);
+        }
+        outline.rewind();
+        outline.moveTo(tl, awnTop);
+        outline.lineTo(tr, awnTop);
+        outline.lineTo(br, awnBot);
+        outline.lineTo(bl, awnBot);
+        outline.close();
+        shaderPaint.setShader(awningShade);
+        c.drawPath(outline, shaderPaint);
+        shaderPaint.setShader(null);
+        paint.setColor(GOLD);
+        c.drawRoundRect(tl - dp(6f), awnTop - dp(5f), tr + dp(6f), awnTop + dp(2f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFFF0D070);
+        c.drawRect(tl - dp(4f), awnTop - dp(5f), tr + dp(4f), awnTop - dp(3.5f), paint);
+        for (int i = 0; i < n; i++) {
+            float bx = bl + (br - bl) * (i + 0.5f) / n;
+            float by = awnBot + dp(12f);
+            boolean on = celebrate ? ((int) (t * 10) + i) % 2 == 0 : ((int) (t * 4) + i) % 3 != 0;
+            paint.setColor(on ? 0xFFFFE08A : 0xFF5A4038);
+            c.drawCircle(bx, by, dp(3.2f), paint);
+            if (on && (i & 1) == 0) {
+                Fx.glow(c, bx, by, dp(14f), 0x66FFD070);
+            }
+        }
+        // Shelf: a thick plank with a lit top edge, on a bracket at each post (the middle is
+        // left clear for the PRIZES caption).
+        paint.setColor(0xFF2A180E);
+        for (int i = 0; i < 2; i++) {
+            float x = i == 0 ? bx0 + dp(6f) : bx1 - dp(28f);
+            tent.rewind();
+            tent.moveTo(x, shelfY + dp(10f));
+            tent.lineTo(x + dp(22f), shelfY + dp(10f));
+            tent.lineTo(x + (i == 1 ? dp(22f) : 0f), shelfY + dp(28f));
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        shaderPaint.setShader(shelfShader);
+        c.drawRect(bx0 - dp(8f), shelfY - dp(2f), bx1 + dp(8f), shelfY + dp(11f), shaderPaint);
+        shaderPaint.setShader(null);
+        paint.setColor(0xFFE0A870);
+        c.drawRect(bx0 - dp(8f), shelfY - dp(2f), bx1 + dp(8f), shelfY - dp(0.5f), paint);
     }
 
     private static int shade(int color, float f) {
@@ -1623,6 +2385,186 @@ final class MegaPullGame extends GameView {
         c.restore();
     }
 
+    /* ---------------- the striker ---------------- */
+
+    /**
+     * Smoothed speed of a puck in tower-heights per second. A jump bigger than the easing could
+     * make in one frame is a reset to the foot (a new go), not motion, so it leaves no trail.
+     */
+    private static float trailVelocity(float now, float prev, float vel, float dt) {
+        if (dt <= 0f) {
+            return vel;
+        }
+        float step = now - prev;
+        float v = Math.abs(step) > 0.25f ? 0f : Math.max(-5f, Math.min(5f, step / dt));
+        return vel + (v - vel) * Math.min(1f, 12f * dt);
+    }
+
+    /**
+     * The tower: a pool of light on the ground, a plinth with the strike pad, brass rails for the
+     * bulbs, a tapered painted column lit from the left, the puck's track and a gold crossbar.
+     */
+    private void drawTowerBody(Canvas c, float cx, float top, float base) {
+        float foot = base + dp(18f);
+        c.save();
+        c.scale(1f, 0.22f, cx, foot);
+        Fx.glow(c, cx, foot, dp(170f), celebrate ? 0x70FFD070 : 0x40FFB070);
+        c.restore();
+        paint.setColor(0x88000000);
+        oval.set(cx - dp(92f), foot - dp(7f), cx + dp(92f), foot + dp(8f));
+        c.drawOval(oval, paint);
+        // Brass rails up both sides; the bulbs are mounted on them.
+        paint.setColor(0xFF6A4E22);
+        c.drawRect(cx - dp(24.5f), top + dp(2f), cx - dp(19.5f), base, paint);
+        c.drawRect(cx + dp(19.5f), top + dp(2f), cx + dp(24.5f), base, paint);
+        paint.setColor(0xFFD8B060);
+        c.drawRect(cx - dp(24.5f), top + dp(2f), cx - dp(23f), base, paint);
+        c.drawRect(cx + dp(19.5f), top + dp(2f), cx + dp(21f), base, paint);
+        for (int i = 1; i < 6; i++) {
+            float y = top + (base - top) * i / 6f;
+            paint.setColor(0xFF4A3418);
+            c.drawRect(cx - dp(24f), y - dp(1.5f), cx - dp(13f), y + dp(1.5f), paint);
+            c.drawRect(cx + dp(13f), y - dp(1.5f), cx + dp(24f), y + dp(1.5f), paint);
+        }
+        // Column.
+        tent.rewind();
+        tent.moveTo(cx - dp(13f), top);
+        tent.lineTo(cx + dp(13f), top);
+        tent.lineTo(cx + dp(18f), base);
+        tent.lineTo(cx - dp(18f), base);
+        tent.close();
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(towerShader);
+        c.drawPath(tent, shaderPaint);
+        shaderPaint.setShader(null);
+        // Painted chevrons up the face, faint, so the column reads as a made thing.
+        paint.setColor(0x18FFFFFF);
+        for (int i = 0; i < 12; i++) {
+            float y = top + dp(24f) + (base - top - dp(40f)) * i / 12f;
+            tent.rewind();
+            tent.moveTo(cx - dp(12f), y + dp(8f));
+            tent.lineTo(cx, y);
+            tent.lineTo(cx + dp(12f), y + dp(8f));
+            tent.lineTo(cx + dp(12f), y + dp(12f));
+            tent.lineTo(cx, y + dp(4f));
+            tent.lineTo(cx - dp(12f), y + dp(12f));
+            tent.close();
+            c.drawPath(tent, paint);
+        }
+        // The track the puck rides in.
+        paint.setColor(0xFF0E0918);
+        c.drawRect(cx - dp(5f), top + dp(4f), cx + dp(5f), base, paint);
+        paint.setColor(0x90C8C0E0);
+        c.drawRect(cx - dp(6f), top + dp(4f), cx - dp(4.5f), base, paint);
+        c.drawRect(cx + dp(4.5f), top + dp(4f), cx + dp(6f), base, paint);
+        // Plinth.
+        tent.rewind();
+        tent.moveTo(cx - dp(60f), base);
+        tent.lineTo(cx + dp(60f), base);
+        tent.lineTo(cx + dp(70f), foot);
+        tent.lineTo(cx - dp(70f), foot);
+        tent.close();
+        shaderPaint.setShader(plinthShader);
+        c.drawPath(tent, shaderPaint);
+        shaderPaint.setShader(null);
+        paint.setColor(0xFFA888D8);
+        c.drawRect(cx - dp(60f), base, cx + dp(60f), base + dp(1.5f), paint);
+        paint.setColor(0x50000000);
+        for (int i = -1; i <= 1; i++) {
+            c.drawRect(cx + i * dp(32f) - dp(0.5f), base + dp(2f), cx + i * dp(32f) + dp(0.5f), foot, paint);
+        }
+        // The strike pad the hammer lands on.
+        paint.setColor(0xFF2A1E22);
+        c.drawRoundRect(cx - dp(60f), base - dp(8f), cx - dp(30f), base + dp(1f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFFC62F3A);
+        c.drawRoundRect(cx - dp(59f), base - dp(9f), cx - dp(31f), base - dp(5f), dp(2f), dp(2f), paint);
+        // Gold crossbar the bell sits on, with lit finials.
+        Fx.glow(c, cx - dp(28f), top, dp(14f), 0x66F5C518);
+        Fx.glow(c, cx + dp(28f), top, dp(14f), 0x66F5C518);
+        paint.setColor(GOLD);
+        c.drawRoundRect(cx - dp(28f), top - dp(4f), cx + dp(28f), top + dp(5f), dp(3f), dp(3f), paint);
+        paint.setColor(0xFFF0D070);
+        c.drawRect(cx - dp(26f), top - dp(4f), cx + dp(26f), top - dp(2.5f), paint);
+        c.drawCircle(cx - dp(28f), top, dp(4.5f), paint);
+        c.drawCircle(cx + dp(28f), top, dp(4.5f), paint);
+    }
+
+    /** A brass bell on the crossbar: it rings with a flash and two shock rings, and swings. */
+    private void drawBell(Canvas c, float cx, float top) {
+        float lipY = top - dp(6f);
+        float mid = lipY - dp(11f);
+        double since = sessionSeconds - bellFlashAt;
+        boolean flashing = since >= 0 && since < 0.9;
+        Fx.glow(c, cx, mid, dp(44f), rang ? 0x99F5C518 : 0x33F5C518);
+        if (flashing) {
+            float p = (float) (since / 0.9);
+            Fx.glow(c, cx, mid, dp(120f), ((int) (0xE0 * (1 - p)) << 24) | 0xFFF2B0);
+            paint.setStyle(Paint.Style.STROKE);
+            for (int k = 0; k < 2; k++) {
+                float pk = p * 1.3f - k * 0.3f;
+                if (pk > 0f && pk < 1f) {
+                    paint.setStrokeWidth(dp(1f) + dp(4f) * (1f - pk));
+                    paint.setColor(((int) (0xD0 * (1f - pk)) << 24) | 0xFFE28A);
+                    c.drawCircle(cx, mid, dp(22f) + pk * dp(150f), paint);
+                }
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+        float swing = flashing ? (float) (Math.sin(since * 30) * 14 * (1 - since / 0.9))
+                : rang ? (float) Math.sin(sessionSeconds * 6) * 2f : 0f;
+        c.save();
+        c.translate(cx, lipY);
+        c.rotate(swing, 0, -dp(22f));
+        shaderPaint.setColor(0xFFFFFFFF);
+        shaderPaint.setShader(bellShader);
+        c.drawPath(bellPath, shaderPaint);
+        shaderPaint.setShader(null);
+        if (rang) {
+            int a = flashing ? (int) (0x30 + 0x90 * (1 - since / 0.9)) : 0x30;
+            paint.setColor((a << 24) | 0xFFF2C0);
+            c.drawPath(bellPath, paint);
+        }
+        paint.setColor(0xFF8A6208);
+        c.drawRect(-dp(19f), dp(0.5f), dp(19f), dp(2.5f), paint);
+        paint.setColor(0xFFB8890B);
+        c.drawCircle(0, -dp(23f), dp(3.5f), paint);
+        paint.setColor(0xFF4A3004);
+        c.drawCircle(0, dp(3.5f), dp(3f), paint);
+        c.restore();
+    }
+
+    /**
+     * A puck with a lit top and a shadowed underside, and a trail of fading ghosts behind it whose
+     * length follows its speed - so a big pull visibly flies up the tower.
+     */
+    private void drawPuck(Canvas c, float cx, float py, float vel, float span, float half,
+                          int body, int light, int glow) {
+        float len = Math.min(dp(170f), Math.abs(vel) * span * 0.1f);
+        if (len > dp(6f)) {
+            float dir = vel > 0 ? 1f : -1f;   // rising leaves the trail below it
+            paint.setColor(0x40FFE0E8);
+            c.drawRect(cx - dp(2.5f), Math.min(py, py + dir * len), cx + dp(2.5f), Math.max(py, py + dir * len),
+                    paint);
+            for (int g = 6; g >= 1; g--) {
+                float f = g / 6f;
+                float yy = py + dir * len * f;
+                int a = (int) (0x70 * (1f - f)) + 0x10;
+                paint.setColor((a << 24) | (body & 0x00FFFFFF));
+                float hw = half * (1f - 0.35f * f);
+                c.drawRoundRect(cx - hw, yy - dp(6f), cx + hw, yy + dp(6f), dp(5f), dp(5f), paint);
+            }
+        }
+        Fx.glow(c, cx, py, dp(30f), glow);
+        paint.setColor(shade(body, 0.5f));
+        c.drawRoundRect(cx - half, py - dp(6.5f), cx + half, py + dp(8f), dp(5f), dp(5f), paint);
+        paint.setColor(body);
+        c.drawRoundRect(cx - half, py - dp(7f), cx + half, py + dp(5f), dp(5f), dp(5f), paint);
+        paint.setColor(light);
+        c.drawRoundRect(cx - half + dp(3f), py - dp(6f), cx + half - dp(3f), py - dp(1.5f), dp(3f), dp(3f), paint);
+        paint.setColor(0xCCFFFFFF);
+        c.drawRoundRect(cx - half * 0.6f, py - dp(5.5f), cx - half * 0.2f, py - dp(3.5f), dp(1f), dp(1f), paint);
+    }
+
     /* ---------------- frame ---------------- */
 
     private float crowdTarget() {
@@ -1720,20 +2662,21 @@ final class MegaPullGame extends GameView {
         }
         puck += (puckTarget - puck) * Math.min(1f, 5f * dt);
         rivalPuck += (rivalPuckTarget - rivalPuck) * Math.min(1f, 4f * dt);
+        // Drawing only: how fast each puck is moving, for its motion trail.
+        puckVel = trailVelocity(puck, puckPrev, puckVel, dt);
+        puckPrev = puck;
+        rivalPuckVel = trailVelocity(rivalPuck, rivalPuckPrev, rivalPuckVel, dt);
+        rivalPuckPrev = rivalPuck;
         crowd += (crowdTarget() - crowd) * Math.min(1f, 1.5f * dt);
         celebrate = rang || (phase == Phase.RESULT && success) || (phase == Phase.ROUND_END && roundYours);
 
         c.save();
         c.translate(shake.dx, shake.dy);
-        if (skyShader == null || skyHeight != h) {
-            skyHeight = h;
-            skyShader = new android.graphics.LinearGradient(0, 0, 0, h, 0xFF2A1040, 0xFF0A0E14,
-                    android.graphics.Shader.TileMode.CLAMP);
-        }
-        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
-        paint.setShader(skyShader);
-        c.drawRect(-dp(30f), -dp(30f), w + dp(30f), h + dp(30f), paint);
-        paint.setShader(null);
+        ensureScene(w, h);
+        shaderPaint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        shaderPaint.setShader(skyShader);
+        c.drawRect(-dp(30f), -dp(30f), w + dp(30f), h + dp(30f), shaderPaint);
+        shaderPaint.setShader(null);
         drawFairground(c, w, h, dt);
         drawWeekBoard(c, w, h);
         if (mode == Mode.STRIKE) {
@@ -1750,10 +2693,7 @@ final class MegaPullGame extends GameView {
         float cx = w * 0.5f;
         float top = h * 0.12f;
         float base = h * 0.86f;
-        paint.setColor(0xFF3B2A5E);
-        c.drawRect(cx - dp(14f), top, cx + dp(14f), base, paint);
-        paint.setColor(0xFF5A3A8A);
-        c.drawRect(cx - dp(60f), base, cx + dp(60f), base + dp(16f), paint);
+        drawTowerBody(c, cx, top, base);
         // Bulbs up both edges of the tower: lit behind the puck, chasing once the bell rings.
         int bulbs = 24;
         for (int i = 0; i < bulbs; i++) {
@@ -1829,22 +2769,31 @@ final class MegaPullGame extends GameView {
                 ly += dp(14f);
             }
             label(c, rivalName() + "  " + rivalMark + " W", cx - dp(76f), ly, 9.5f, 0xFF8FA6FF, Paint.Align.RIGHT);
-            Fx.glow(c, cx, ry, dp(26f), 0x556F8CFF);
-            paint.setColor(0xFF6F8CFF);
-            c.drawRoundRect(cx - dp(18f), ry - dp(6f), cx + dp(18f), ry + dp(6f), dp(5f), dp(5f), paint);
+            drawPuck(c, cx, ry, rivalPuckVel, base - top, dp(18f), 0xFF6F8CFF, 0xFFB4C4FF, 0x556F8CFF);
         }
-        // Bell itself.
-        Fx.glow(c, cx, top - dp(6f), dp(40f), rang ? 0x99F5C518 : 0x33F5C518);
-        paint.setColor(rang ? 0xFFFFE28A : 0xFFB8890B);
-        c.drawCircle(cx, top - dp(6f), dp(16f), paint);
+        // The bell flashes the moment the puck you can see reaches it.
+        if (!rang) {
+            bellFlashed = false;
+        } else if (!bellFlashed && puck >= Math.min(1f, bell / scaleMax) - 0.015f) {
+            bellFlashed = true;
+            bellFlashAt = sessionSeconds;
+            fx.burst(cx, top - dp(16f), 24, dp(220f), 0.7f, dp(3f), 0xFFFFFFFF, true);
+        }
+        double flashSince = sessionSeconds - bellFlashAt;
+        if (flashSince >= 0 && flashSince < 0.6 && (mode == Mode.STRIKE || mode == Mode.RIVAL)) {
+            int a = (int) (0xC0 * (1 - flashSince / 0.6));
+            Fx.glow(c, cx, bellY, dp(70f), (a << 24) | 0xFFE28A);
+        }
+        drawBell(c, cx, top);
         if (mode == Mode.RIVAL) {
+            paint.setColor(0x70000000);
+            oval.set(cx - dp(195f), base + dp(10f), cx - dp(105f), base + dp(22f));
+            c.drawOval(oval, paint);
             drawStrongman(c, cx - dp(150f), base + dp(16f), cx - dp(45f), base);
         }
         // Puck.
         float py = base - (base - top) * puck;
-        Fx.glow(c, cx, py, dp(30f), 0x66FF3B5C);
-        paint.setColor(0xFFFF3B5C);
-        c.drawRoundRect(cx - dp(20f), py - dp(7f), cx + dp(20f), py + dp(7f), dp(5f), dp(5f), paint);
+        drawPuck(c, cx, py, puckVel, base - top, dp(20f), 0xFFFF3B5C, 0xFFFF92A6, 0x66FF3B5C);
         fx.draw(c);
         c.restore();
 
@@ -2009,8 +2958,15 @@ final class MegaPullGame extends GameView {
                 RectF r = pills[k];
                 r.set(x0 + k * (pw + gap), y0, x0 + k * (pw + gap) + pw, y0 + ph);
                 boolean sel = MODES[k] == mode;
-                paint.setColor(sel ? ACCENT : 0x33FFFFFF);
+                paint.setColor(0x55000000);
+                c.drawRoundRect(r.left, r.top + dp(3f), r.right, r.bottom + dp(3f), ph / 2f, ph / 2f, paint);
+                paint.setColor(sel ? ACCENT : 0xFF423860);
                 c.drawRoundRect(r, ph / 2f, ph / 2f, paint);
+                // A shadowed bottom edge and a lit top edge, so the pill reads as a raised button.
+                paint.setColor(0x48000000);
+                c.drawRect(r.left + ph * 0.5f, r.bottom - dp(2.2f), r.right - ph * 0.5f, r.bottom - dp(1f), paint);
+                paint.setColor(sel ? 0x80FFFFFF : 0x40FFFFFF);
+                c.drawRect(r.left + ph * 0.5f, r.top + dp(1f), r.right - ph * 0.5f, r.top + dp(2.2f), paint);
                 bold(c, MODE_NAMES[k], r.centerX(), r.centerY() + dp(4.5f), 11.5f,
                         sel ? 0xFF0A0E14 : TEXT, Paint.Align.CENTER);
             }

@@ -96,7 +96,25 @@ final class RegattaGame extends GameView {
     private final Fx.Particles fx = new Fx.Particles();
     private android.graphics.LinearGradient skyShader;
     private android.graphics.LinearGradient finalSkyShader;
-    private float skyHeight;
+    /* 3.25.0 graphics pass: every gradient is built once per view size, never per frame. */
+    private float shaderW;
+    private float shaderH;
+    private android.graphics.LinearGradient hazeDusk;
+    private android.graphics.LinearGradient hazeDay;
+    private android.graphics.LinearGradient deckDusk;
+    private android.graphics.LinearGradient deckDay;
+    private android.graphics.LinearGradient edgeShade;
+    private android.graphics.LinearGradient headerCard;
+    private android.graphics.LinearGradient plaqueCard;
+    private android.graphics.LinearGradient bottomCard;
+    private android.graphics.LinearGradient footCard;
+    private android.graphics.LinearGradient pillGloss;
+    private android.graphics.LinearGradient grudgeGloss;
+    private android.graphics.LinearGradient trainGloss;
+    /** Right edge of the header card, so the position plaque never runs into it. */
+    private float headerRight;
+    private int qualifyCol = WARN;
+    private float launchX = Float.NaN;
     private String callout = "";
     private int calloutColor = ACCENT;
     private double calloutUntil;
@@ -353,6 +371,7 @@ final class RegattaGame extends GameView {
         phase = Phase.READY;
         aheadKnown = false;
         grudgeLane = -1;
+        launchX = Float.NaN;
         for (int i = 0; i < 3; i++) {
             finishTimes[i] = crewTime(laneCrew[i], s);
             rivalX[i] = 0f;
@@ -1159,24 +1178,15 @@ final class RegattaGame extends GameView {
         float speed = boat.value();
         river.advance(racing ? speed : 0f, dt, ppm);
         float bankTop = waterTop - dp(46f);
-        if (skyShader == null || skyHeight != bankTop) {
-            skyHeight = bankTop;
-            skyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, 0xFF0B1322, 0xFF2A4E74,
-                    android.graphics.Shader.TileMode.CLAMP);
-            finalSkyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, 0xFF1D4F86, 0xFF7FB4DE,
-                    android.graphics.Shader.TileMode.CLAMP);
-        }
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
-        paint.setShader(finalsDay ? finalSkyShader : skyShader);
-        c.drawRect(0, 0, w, bankTop, paint);
-        paint.setShader(null);
+        ensureShaders(w, h, bankTop, waterTop, waterBottom);
+        // Sky, sun, far hills, a hazy tree line and the regatta enclosure behind the far bank.
+        drawSky(c, w, bankTop, waterTop, you, ppm, finalsDay, racing ? speed : 0f);
         if (finalsDay) {
-            Fx.glow(c, w * 0.82f, bankTop * 0.35f, dp(120f), 0x55FFF1C0);
             // Below the HUD lines, above the bank banners.
             drawBunting(c, w, Math.min(dp(80f), bankTop - dp(70f)), dp(12f), you * ppm * 0.3, 0);
         }
         river.drawWater(c, waterTop, waterBottom, w);
+        drawLandingStage(c, w, h, waterBottom, you, ppm, finalsDay);
         fx.step(dt, dp(260f));
         float laneH = (waterBottom - lanesTop) / 4f;
         float yourX = w * 0.42f;
@@ -1198,6 +1208,26 @@ final class RegattaGame extends GameView {
         float finishX = yourX + dp(66f) + (float) (RACE_METERS - you) * ppm;
         if (finishX < w + dp(40f)) {
             scenery.drawFinishLine(c, finishX, lanesTop, waterBottom, sessionSeconds);
+        }
+        // The start: a stake pontoon at every lane's stern, its holder letting go on the first stroke.
+        drawStartPontoons(c, w, yourX - dp(78f) - (float) (you * ppm), lanesTop, laneH,
+                phase == Phase.READY, finalsDay);
+        // The umpire's launch, following a little behind the back of the field.
+        float field = yourX;
+        for (int i = 0; i < 3; i++) {
+            if (rivalX[i] != 0f) {
+                field = Math.min(field, rivalX[i]);
+            }
+        }
+        float launchTarget = field - dp(170f);
+        if (Float.isNaN(launchX)) {
+            launchX = launchTarget;
+        }
+        launchX += (launchTarget - launchX) * Math.min(1f, 1.2f * dt);
+        launchX = Math.min(launchX, launchTarget + dp(20f));
+        if (launchX > -dp(60f)) {
+            drawUmpireLaunch(c, launchX, lanesTop + dp(14f), racing ? speed : 0f,
+                    phase == Phase.READY, finalsDay);
         }
 
         // The crews.
@@ -1315,17 +1345,25 @@ final class RegattaGame extends GameView {
     private void drawHud(Canvas c, float w, float h, float waterTop, double t, double you, int ahead,
                          double d2, double nextAhead) {
         boolean gold = stage == Stage.A_FINAL || stage == Stage.GRAND;
-        bold(c, DIVISIONS[division] + "  ·  " + stageName(), dp(18f), dp(34f), 20f,
-                stage == Stage.GRAND ? 0xFFFF8A4C : gold ? 0xFFF5C518 : ACCENT, Paint.Align.LEFT);
+        int titleCol = stage == Stage.GRAND ? 0xFFFF8A4C : gold ? 0xFFF5C518 : ACCENT;
+        String title = DIVISIONS[division] + "  ·  " + stageName();
         String sub = (ranked ? "TODAY'S RANKED REGATTA" : "PRACTICE") + "  ·  " + RACE_METERS + " m  ·  "
                 + (stage == Stage.GRAND ? "24 / 18 / 14 / 10 season points"
                 : stage == Stage.HEAT ? "top two reach the A final" : stage == Stage.A_FINAL
                 ? "12 / 9 / 7 / 5 season points" : "4 / 3 / 2 / 1 season points");
-        label(c, sub, dp(18f), dp(52f), 10f, FAINT, Paint.Align.LEFT);
         String week = "WEEK: " + ordinal(ladderRank) + " OF 8  ·  " + seasonPoints + " PTS  ·  "
                 + (6 - dayOfWeek(today())) + " DAYS LEFT";
+        String qText = qualifyText();
+        // The header sits on a card sized to its longest line, with a stripe in the stage colour.
+        float qW = 7 * (dp(11f) + dp(5f)) + dp(8f) + labelWidth(qText, 10f);
+        float headW = Math.max(Math.max(boldWidth(title, 20f), labelWidth(sub, 10f)),
+                Math.max(labelWidth(week, 10f), qW));
+        headerRight = dp(18f) + headW + dp(16f);
+        card(c, dp(8f), dp(8f), headerRight, dp(100f), headerCard, titleCol);
+        bold(c, title, dp(18f), dp(34f), 20f, titleCol, Paint.Align.LEFT);
+        label(c, sub, dp(18f), dp(52f), 10f, FAINT, Paint.Align.LEFT);
         label(c, week, dp(18f), dp(68f), 10f, ladderRank <= 2 ? ACCENT : ladderRank >= 7 ? BAD : DIM, Paint.Align.LEFT);
-        drawQualifyStrip(c, dp(18f), dp(80f));
+        drawQualifyStrip(c, dp(18f), dp(80f), qText);
 
         String big;
         int col;
@@ -1340,7 +1378,6 @@ final class RegattaGame extends GameView {
             big = ordinal(pos);
             col = pos == 1 ? ACCENT : pos == 4 ? BAD : WARN;
         }
-        bold(c, big, w * 0.5f, dp(44f), 38f, col, Paint.Align.CENTER);
 
         // What is at stake right now.
         String stake = "";
@@ -1385,17 +1422,44 @@ final class RegattaGame extends GameView {
                     : stageName() + ": row to start" + (outcome.isEmpty() ? "" : "  ·  " + outcome);
             stakeCol = DIM;
         }
+        // The position plaque: a card behind the ordinal and the stake line, never into the header.
+        float bigW = boldWidth(big, 38f);
+        float stakeW = stake.isEmpty() ? 0f : boldWidth(stake, 13f);
+        float half = Math.min(Math.max(bigW, stakeW) / 2f + dp(24f), w * 0.5f - headerRight - dp(12f));
+        if (half > dp(40f)) {
+            card(c, w * 0.5f - half, dp(8f), w * 0.5f + half, stake.isEmpty() ? dp(58f) : dp(78f), plaqueCard, 0);
+            Fx.glow(c, w * 0.5f, dp(32f), dp(64f), (col & 0x00FFFFFF) | 0x22000000);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor((col & 0x00FFFFFF) | 0xAA000000);
+            rect.set(w * 0.5f - bigW * 0.36f, dp(50f), w * 0.5f + bigW * 0.36f, dp(52f));
+            c.drawRoundRect(rect, dp(1f), dp(1f), paint);
+        }
+        bold(c, big, w * 0.5f, dp(44f), 38f, col, Paint.Align.CENTER);
         bold(c, stake, w * 0.5f, dp(66f), 13f, stakeCol, Paint.Align.CENTER);
 
         String foot = phase == Phase.DONE ? clock(finishTime) + "  ·  " + outcome + "  ·  tap to race again"
                 : phase == Phase.RACING ? clock(t) + "  ·  " + Math.round(you) + " of " + RACE_METERS + " m" : "";
+        boolean twoLines = phase == Phase.DONE && !outcome2.isEmpty();
+        if (!foot.isEmpty()) {
+            float fw = Math.max(boldWidth(foot, 12f), twoLines ? boldWidth(outcome2, 12f) : 0f) / 2f + dp(20f);
+            card(c, w * 0.5f - fw, h - dp(twoLines ? 56f : 38f), w * 0.5f + fw, h - dp(4f), footCard, 0);
+        }
         bold(c, foot, w * 0.5f, h - dp(14f), 12f, phase == Phase.DONE ? col : TEXT, Paint.Align.CENTER);
-        if (phase == Phase.DONE && !outcome2.isEmpty()) {
+        if (twoLines) {
             bold(c, outcome2, w * 0.5f, h - dp(32f), 12f, ladderRank <= 2 ? ACCENT : BAD, Paint.Align.CENTER);
         }
         float pct = (float) Math.min(1, you / RACE_METERS);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x40000000);
+        c.drawRect(0, waterTop - dp(3f), w, waterTop, paint);
         paint.setColor(ACCENT);
         c.drawRect(0, waterTop - dp(3f), w * pct, waterTop, paint);
+        if (pct > 0.002f) {
+            // A bright head on the course bar, so it reads as something travelling.
+            Fx.glow(c, w * pct, waterTop - dp(1.5f), dp(16f), 0x8835D0BA);
+            paint.setColor(0xFFE6FFF9);
+            c.drawCircle(w * pct, waterTop - dp(1.5f), dp(2.5f), paint);
+        }
     }
 
     private void drawButtons(Canvas c, float w) {
@@ -1420,7 +1484,7 @@ final class RegattaGame extends GameView {
      * The week's seven days as pips: filled for a day raced, and a ring on Sunday once the
      * {@value #QUALIFY_DAYS} qualifying days are in and the grand final is on.
      */
-    private void drawQualifyStrip(Canvas c, float x, float y) {
+    private void drawQualifyStrip(Canvas c, float x, float y, String text) {
         float pip = dp(11f);
         float gap = dp(5f);
         int dow = dayOfWeek(today());
@@ -1445,6 +1509,12 @@ final class RegattaGame extends GameView {
             paint.setStyle(Paint.Style.FILL);
         }
         float tx = x + 7 * (pip + gap) + dp(8f);
+        label(c, text, tx, y + pip - dp(1.5f), 10f, qualifyCol, Paint.Align.LEFT);
+    }
+
+    /** The qualification line beside the day pips; sets {@link #qualifyCol} to its colour. */
+    private String qualifyText() {
+        int dow = dayOfWeek(today());
         String text;
         int col;
         if (grandDay) {
@@ -1465,7 +1535,8 @@ final class RegattaGame extends GameView {
                     + (need == 1 ? " more day" : " more days") + " for the grand final";
             col = WARN;
         }
-        label(c, text, tx, y + pip - dp(1.5f), 10f, col, Paint.Align.LEFT);
+        qualifyCol = col;
+        return text;
     }
 
     /**
@@ -1492,51 +1563,76 @@ final class RegattaGame extends GameView {
         boolean flash = sessionSeconds < grudgeFlashUntil;
         float pulse = flash ? 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 9) : 0f;
 
-        bold(c, "GRUDGE  ·  " + CREWS[nemesis], x0, y0 - dp(6f), 11f,
-                flash && pulse > 0.5f ? 0xFFFFFFFF : col, Paint.Align.LEFT);
-        label(c, "you " + h2hWins[nemesis] + " - " + h2hLosses[nemesis] + " them"
-                        + (grudgeLane >= 0 ? String.format(java.util.Locale.US, "   ·   %+.0f m now", gap) : ""),
-                x0 + bw, y0 - dp(6f), 10f, grudgeLane >= 0 ? TEXT : DIM, Paint.Align.RIGHT);
+        String title = "GRUDGE  ·  " + CREWS[nemesis];
+        String score = "you " + h2hWins[nemesis] + " - " + h2hLosses[nemesis] + " them"
+                + (grudgeLane >= 0 ? String.format(java.util.Locale.US, "   ·   %+.0f m now", gap) : "");
+        String note = !grudgeNote.isEmpty() && sessionSeconds < grudgeFlashUntil ? grudgeNote
+                : grudgeLane >= 0 ? "THEY ARE IN THIS RACE - BEAT THEM"
+                : !grudgeOpen() ? "every grudge in this division is settled"
+                : "lead them by " + GRUDGE_TARGET + " to settle it";
+        // A card on the landing stage, wide enough for whichever line is longest.
+        float need = Math.max(Math.max(bw, labelWidth(note, 10f)),
+                boldWidth(title, 11f) + dp(18f) + labelWidth(score, 10f));
+        card(c, dp(8f), h - dp(100f), x0 + need + dp(14f), h - dp(34f), bottomCard, col);
+
+        bold(c, title, x0, y0 - dp(6f), 11f, flash && pulse > 0.5f ? 0xFFFFFFFF : col, Paint.Align.LEFT);
+        label(c, score, x0 + bw, y0 - dp(6f), 10f, grudgeLane >= 0 ? TEXT : DIM, Paint.Align.RIGHT);
 
         barRect.set(x0, y0, x0 + bw, y0 + bh);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC16202E);
+        paint.setColor(0xFF070C14);   // a recessed track
         c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        paint.setColor(0x66000000);
+        rect.set(x0 + dp(4f), y0 + dp(1f), x0 + bw - dp(4f), y0 + dp(3f));
+        c.drawRoundRect(rect, dp(1f), dp(1f), paint);
         // Their half in their colour, yours in the boat's teal, meeting at the needle.
         float mid = x0 + bw / 2f;
         float nx = mid + grudgeNeedle * (bw / 2f - dp(10f));
-        paint.setColor((col & 0x00FFFFFF) | 0x66000000);
-        c.drawRect(x0 + dp(2f), y0 + dp(3f), Math.max(x0 + dp(2f), nx), y0 + bh - dp(3f), paint);
-        paint.setColor(0x6635D0BA);
-        c.drawRect(Math.min(x0 + bw - dp(2f), nx), y0 + dp(3f), x0 + bw - dp(2f), y0 + bh - dp(3f), paint);
+        float ri = (bh - dp(6f)) / 2f;
+        paint.setColor((col & 0x00FFFFFF) | 0xB0000000);
+        rect.set(x0 + dp(3f), y0 + dp(3f), Math.max(x0 + dp(3f) + 2f * ri, nx), y0 + bh - dp(3f));
+        c.drawRoundRect(rect, ri, ri, paint);
+        paint.setColor(0xB035D0BA);
+        rect.set(Math.min(x0 + bw - dp(3f) - 2f * ri, nx), y0 + dp(3f), x0 + bw - dp(3f), y0 + bh - dp(3f));
+        c.drawRoundRect(rect, ri, ri, paint);
+        // Gloss across the top of both halves.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(grudgeGloss);
+        rect.set(x0 + dp(5f), y0 + dp(3f), x0 + bw - dp(5f), y0 + bh / 2f);
+        c.drawRoundRect(rect, ri, ri * 0.6f, paint);
+        paint.setShader(null);
         // The target marks: settle the grudge by leading them by GRUDGE_TARGET.
         paint.setColor(0x66FFFFFF);
         c.drawRect(mid - dp(0.6f), y0 + dp(1f), mid + dp(0.6f), y0 + bh - dp(1f), paint);
-        paint.setColor(0x88F5C518);
+        paint.setColor(0xCCF5C518);
         float winX = mid + (bw / 2f - dp(10f));
         c.drawRect(winX - dp(1.5f), y0, winX + dp(1.5f), y0 + bh, paint);
-        // The needle itself.
+        // The needle itself: a cut jewel with a drop shadow and a bright edge.
         if (flash) {
             Fx.glow(c, nx, y0 + bh / 2f, dp(34f), (0x40 + (int) (pulse * 0x60)) << 24 | 0x00F5C518);
         }
-        paint.setColor(grudgeNeedle >= 0 ? ACCENT : col);
         path.rewind();
         path.moveTo(nx, y0 - dp(4f));
         path.lineTo(nx + dp(6f), y0 + bh / 2f);
         path.lineTo(nx, y0 + bh + dp(4f));
         path.lineTo(nx - dp(6f), y0 + bh / 2f);
         path.close();
+        c.save();
+        c.translate(dp(1f), dp(2f));
+        paint.setColor(0x77000000);
+        c.drawPath(path, paint);
+        c.restore();
+        paint.setColor(grudgeNeedle >= 0 ? ACCENT : col);
         c.drawPath(path, paint);
         paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0xCCFFFFFF);
+        c.drawPath(path, paint);
         paint.setStrokeWidth(dp(1.4f));
-        paint.setColor(0x66FFFFFF);
+        paint.setColor(0x55FFFFFF);
         c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
         paint.setStyle(Paint.Style.FILL);
 
-        String note = !grudgeNote.isEmpty() && sessionSeconds < grudgeFlashUntil ? grudgeNote
-                : grudgeLane >= 0 ? "THEY ARE IN THIS RACE - BEAT THEM"
-                : !grudgeOpen() ? "every grudge in this division is settled"
-                : "lead them by " + GRUDGE_TARGET + " to settle it";
         label(c, note, x0, y0 + bh + dp(14f), 10f,
                 !grudgeNote.isEmpty() && flash ? 0xFFF5C518 : grudgeLane >= 0 ? col : FAINT, Paint.Align.LEFT);
     }
@@ -1551,33 +1647,51 @@ final class RegattaGame extends GameView {
         float x0 = x1 - bw;
         float y0 = h - dp(74f);
         float bh = dp(10f);
+        String right = pts > 0 ? "+" + pts + " PTS NEXT WEEK" : "keep rowing";
+        String text = pts >= TRAIN_CAP
+                ? "banked in full  ·  " + Math.round(trainMetres) + " m this week"
+                : Math.round(trainMetres) + " m  ·  " + Math.round(per - (trainMetres % per)) + " m to the next point";
+        if (carriedPoints > 0) {
+            text = text + "   ·   brought in +" + carriedPoints;
+        }
+        float need = Math.max(Math.max(bw, labelWidth(text, 10f)),
+                boldWidth("OFF-SEASON TRAINING", 11f) + dp(18f) + labelWidth(right, 10f));
+        card(c, x1 - need - dp(14f), h - dp(100f), w - dp(8f), h - dp(34f), bottomCard, BLUE);
         bold(c, "OFF-SEASON TRAINING", x0, y0 - dp(6f), 11f, BLUE, Paint.Align.LEFT);
-        label(c, pts > 0 ? "+" + pts + " PTS NEXT WEEK" : "keep rowing", x1, y0 - dp(6f), 10f,
-                pts > 0 ? ACCENT : DIM, Paint.Align.RIGHT);
+        label(c, right, x1, y0 - dp(6f), 10f, pts > 0 ? ACCENT : DIM, Paint.Align.RIGHT);
         barRect.set(x0, y0, x1, y0 + bh);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC16202E);
+        paint.setColor(0xFF070C14);   // a recessed track
         c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
         paint.setColor(pts >= TRAIN_CAP ? 0xFFF5C518 : BLUE);
-        barRect.set(x0, y0, x0 + Math.max(dp(2f), bw * frac), y0 + bh);
+        float fillR = x0 + Math.max(dp(2f), bw * frac);
+        barRect.set(x0, y0, fillR, y0 + bh);
         c.drawRoundRect(barRect, bh / 2f, bh / 2f, paint);
+        if (fillR - x0 > bh) {
+            paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+            paint.setShader(trainGloss);
+            rect.set(x0 + dp(2f), y0 + dp(1f), fillR - dp(2f), y0 + bh / 2f);
+            c.drawRoundRect(rect, bh / 4f, bh / 4f, paint);
+            paint.setShader(null);
+        }
         // Ticks for each point banked, so progress is countable at a glance.
         paint.setColor(0x66FFFFFF);
         for (int i = 1; i < TRAIN_CAP; i++) {
             float tx = x0 + bw * (i / (float) TRAIN_CAP);
             c.drawRect(tx - dp(0.5f), y0, tx + dp(0.5f), y0 + bh, paint);
         }
-        String text = pts >= TRAIN_CAP
-                ? "banked in full  ·  " + Math.round(trainMetres) + " m this week"
-                : Math.round(trainMetres) + " m  ·  " + Math.round(per - (trainMetres % per)) + " m to the next point";
-        label(c, text + (carriedPoints > 0 ? "   ·   brought in +" + carriedPoints : ""),
-                x1, y0 + bh + dp(14f), 10f, FAINT, Paint.Align.RIGHT);
+        label(c, text, x1, y0 + bh + dp(14f), 10f, FAINT, Paint.Align.RIGHT);
     }
 
     private void drawPill(Canvas c, RectF r, String text, boolean on) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(on ? ACCENT : 0xCC16202E);
         c.drawRoundRect(r, r.height() / 2f, r.height() / 2f, paint);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(pillGloss);
+        rect.set(r.left + r.height() * 0.3f, r.top + dp(2f), r.right - r.height() * 0.3f, r.centerY());
+        c.drawRoundRect(rect, r.height() / 4f, r.height() / 4f, paint);
+        paint.setShader(null);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.5f));
         paint.setColor(ACCENT);
@@ -2285,6 +2399,761 @@ final class RegattaGame extends GameView {
             c.drawCircle(px, py - dp(4.5f), dp(2.4f), paint);
             float wave = (float) Math.sin(sessionSeconds * 8 + p + k) * dp(2.5f) * cheer;
             c.drawLine(px + dp(2f), py - dp(1f), px + dp(4f) + wave, py - dp(8f) * (0.4f + cheer * 0.6f), paint);
+        }
+    }
+
+    /* =====================================================================
+     * 3.25.0 graphics pass: sky, regatta enclosure, start, umpire, landing stage, HUD cards.
+     * Nothing here allocates per frame: gradients are built in ensureShaders when the view size
+     * changes, paths are rewound, and all variety comes from a deterministic hash.
+     * ===================================================================== */
+
+    private static final int[] DUSK_SKY = {0xFF08101D, 0xFF12223A, 0xFF29466A, 0xFF6A6A88, 0xFFB98A7C};
+    private static final int[] DAY_SKY = {0xFF1D4F86, 0xFF3A74AC, 0xFF7FB4DE, 0xFFB8D6EA, 0xFFE2ECEE};
+    private static final float[] SKY_STOPS = {0f, 0.35f, 0.68f, 0.9f, 1f};
+    private static final int CARD_TOP = 0xEE152234;
+    private static final int CARD_BOTTOM = 0xEE0A111B;
+    private static final int V_MARQUEE = 0, V_FLAGS = 1, V_STAND = 2, V_TENTS = 3, V_BOX = 4, V_POLE = 5;
+    /** The enclosure repeats every eight slots: one commentary box per stretch of bank. */
+    private static final int[] VENUE = {V_MARQUEE, V_FLAGS, V_STAND, V_TENTS, V_BOX, V_FLAGS, V_MARQUEE, V_POLE};
+    private static final int[] TENT_STRIPES = {0xFFB8323C, 0xFF2D5296, 0xFF2E7D5B, 0xFFC98B22, 0xFF7A4BB0};
+    private static final int[] SKIN = {0xFFF1C27D, 0xFF8D5524, 0xFFE0AC69, 0xFFC68642};
+
+    private void ensureShaders(float w, float h, float bankTop, float waterTop, float waterBottom) {
+        if (w == shaderW && h == shaderH && skyShader != null) {
+            return;
+        }
+        shaderW = w;
+        shaderH = h;
+        android.graphics.Shader.TileMode clamp = android.graphics.Shader.TileMode.CLAMP;
+        skyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, DUSK_SKY, SKY_STOPS, clamp);
+        finalSkyShader = new android.graphics.LinearGradient(0, 0, 0, bankTop, DAY_SKY, SKY_STOPS, clamp);
+        float base = bankTop + dp(8f);
+        float hazeTop = base - skylineHeight(bankTop) * 0.55f;
+        hazeDusk = new android.graphics.LinearGradient(0, hazeTop, 0, base, 0x007A6E88, 0x997A6E88, clamp);
+        hazeDay = new android.graphics.LinearGradient(0, hazeTop, 0, base, 0x00D6E6EE, 0xAAD6E6EE, clamp);
+        float deckTop = waterBottom + dp(12f);
+        deckDusk = new android.graphics.LinearGradient(0, deckTop, 0, h, 0xFF2E231A, 0xFF120E0A, clamp);
+        deckDay = new android.graphics.LinearGradient(0, deckTop, 0, h, 0xFF6E5139, 0xFF3A2A1E, clamp);
+        edgeShade = new android.graphics.LinearGradient(0, waterBottom - dp(16f), 0, waterBottom,
+                0x00000000, 0x70000000, clamp);
+        headerCard = new android.graphics.LinearGradient(0, dp(8f), 0, dp(100f), CARD_TOP, CARD_BOTTOM, clamp);
+        plaqueCard = new android.graphics.LinearGradient(0, dp(8f), 0, dp(78f), CARD_TOP, CARD_BOTTOM, clamp);
+        bottomCard = new android.graphics.LinearGradient(0, h - dp(100f), 0, h - dp(34f), CARD_TOP, CARD_BOTTOM, clamp);
+        footCard = new android.graphics.LinearGradient(0, h - dp(56f), 0, h - dp(4f), CARD_TOP, CARD_BOTTOM, clamp);
+        pillGloss = new android.graphics.LinearGradient(0, dp(16f), 0, dp(29f), 0x50FFFFFF, 0x00FFFFFF, clamp);
+        float gy = h - dp(74f);
+        grudgeGloss = new android.graphics.LinearGradient(0, gy + dp(3f), 0, gy + dp(8f), 0x60FFFFFF, 0x00FFFFFF, clamp);
+        trainGloss = new android.graphics.LinearGradient(0, gy + dp(1f), 0, gy + dp(5f), 0x70FFFFFF, 0x00FFFFFF, clamp);
+    }
+
+    /** Height the far-bank skyline may use: from just behind the trees up to below the HUD cards. */
+    private float skylineHeight(float bankTop) {
+        float base = bankTop + dp(8f);
+        float ceil = Math.max(dp(106f), bankTop - dp(66f));
+        return Math.max(dp(30f), base - ceil);
+    }
+
+    /** The same size curve GameView applies in label()/bold(), so text can be measured for cards. */
+    private static float textCurve(float sizeDp) {
+        float scale;
+        if (sizeDp <= 10f) {
+            scale = 1.35f;
+        } else if (sizeDp >= 30f) {
+            scale = 1.08f;
+        } else {
+            scale = 1.35f + (1.08f - 1.35f) * ((sizeDp - 10f) / 20f);
+        }
+        return sizeDp * scale;
+    }
+
+    private float boldWidth(String s, float sizeDp) {
+        textPaint.setTextSize(dp(textCurve(sizeDp)));
+        return textPaint.measureText(s);
+    }
+
+    private float labelWidth(String s, float sizeDp) {
+        dimPaint.setFakeBoldText(false);
+        dimPaint.setTextSize(dp(textCurve(sizeDp)));
+        return dimPaint.measureText(s);
+    }
+
+    private static int hash(int k) {
+        int x = k * 0x9E3779B1;
+        x ^= x >>> 16;
+        x *= 0x7FEB352D;
+        x ^= x >>> 15;
+        return x & 0x7FFFFFFF;
+    }
+
+    private static int shade(int c, float f) {
+        int r = Math.min(255, (int) (((c >> 16) & 0xFF) * f));
+        int g = Math.min(255, (int) (((c >> 8) & 0xFF) * f));
+        int b = Math.min(255, (int) ((c & 0xFF) * f));
+        return (c & 0xFF000000) | (r << 16) | (g << 8) | b;
+    }
+
+    private static int mix(int a, int b, float t) {
+        int r = (int) (((a >> 16) & 0xFF) + ((((b >> 16) & 0xFF) - ((a >> 16) & 0xFF)) * t));
+        int g = (int) (((a >> 8) & 0xFF) + ((((b >> 8) & 0xFF) - ((a >> 8) & 0xFF)) * t));
+        int bl = (int) ((a & 0xFF) + (((b & 0xFF) - (a & 0xFF)) * t));
+        return (a & 0xFF000000) | (r << 16) | (g << 8) | bl;
+    }
+
+    /**
+     * A HUD card in the app's panel family: soft drop shadow, vertical gradient, hairline border, a
+     * lighter top edge and, when {@code accent} is set, a stripe down the left in that colour.
+     */
+    private void card(Canvas c, float l, float t, float r, float b, android.graphics.Shader sh, int accent) {
+        float rad = dp(10f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setShader(null);
+        paint.setColor(0x55000000);
+        rect.set(l + dp(1f), t + dp(3f), r + dp(1f), b + dp(4f));
+        c.drawRoundRect(rect, rad, rad, paint);
+        rect.set(l, t, r, b);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(sh);
+        c.drawRoundRect(rect, rad, rad, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0xFF1C2736);
+        c.drawRoundRect(rect, rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x3AFFFFFF);
+        c.drawRect(l + rad, t + dp(1f), r - rad, t + dp(2f), paint);
+        if (accent != 0) {
+            paint.setColor(accent);
+            rect.set(l + dp(3f), t + dp(10f), l + dp(6f), b - dp(10f));
+            c.drawRoundRect(rect, dp(1.5f), dp(1.5f), paint);
+        }
+    }
+
+    /* ---------- the sky and the far bank ---------- */
+
+    /**
+     * Everything above the water, back to front: graded sky (dusk for heats, a bright afternoon for
+     * finals), stars or sun, drifting cloud, far hills fading into haze, a dark tree line, and the
+     * regatta enclosure - marquees, flags, a grandstand and the commentary box - standing behind
+     * the bank. Each layer scrolls slower than the bank, so the course has depth. The light comes
+     * from the right, where the sun is, so every structure is lit on that side.
+     */
+    private void drawSky(Canvas c, float w, float bankTop, float waterTop, double you, float ppm,
+                         boolean day, float speed) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(day ? finalSkyShader : skyShader);
+        c.drawRect(0, 0, w, bankTop + dp(2f), paint);
+        paint.setShader(null);
+
+        float base = bankTop + dp(8f);
+        float H = skylineHeight(bankTop);
+        float s = H / dp(72f);
+        double t = sessionSeconds;
+
+        if (!day) {
+            // A few early stars in the deep blue at the top, twinkling.
+            for (int i = 0; i < 16; i++) {
+                int hh = hash(i * 31 + 7);
+                float sx = (hh % 10000) / 10000f * w;
+                float sy = dp(4f) + ((hh >>> 8) % 1000) / 1000f * bankTop * 0.45f;
+                float tw = 0.55f + 0.45f * (float) Math.sin(t * (1.1 + (hh & 7) * 0.23) + i);
+                paint.setColor(((int) (tw * 0x90) << 24) | 0x00E8EEFF);
+                c.drawCircle(sx, sy, dp(1.1f) + (hh & 1) * dp(0.5f), paint);
+            }
+        }
+        // The sun, on the right: low and orange at dusk, high and white for finals.
+        float sunX = w * 0.81f;
+        float sunY = day ? bankTop * 0.5f : base - H * 0.5f;
+        if (day) {
+            Fx.glow(c, sunX, sunY, dp(150f), 0x55FFF1C0);
+            Fx.glow(c, sunX, sunY, dp(44f), 0x90FFF8E0);
+            paint.setColor(0xFFFFF8E6);
+            c.drawCircle(sunX, sunY, dp(15f), paint);
+        } else {
+            Fx.glow(c, sunX, sunY, dp(220f), 0x38FF8A50);
+            Fx.glow(c, sunX, sunY, dp(70f), 0x70FFC080);
+            paint.setColor(0xFFFFD9A2);
+            c.drawCircle(sunX, sunY, dp(17f), paint);
+        }
+        // Cloud drifting slowly left, lit from below at dusk.
+        float span = w + dp(400f);
+        for (int i = 0; i < 5; i++) {
+            int hh = hash(i * 977 + 3);
+            double v = (hh % 2000) / 2000.0 * span - t * dp(4f + i * 1.5f) - you * ppm * 0.03;
+            double m = v % span;
+            if (m < 0) {
+                m += span;
+            }
+            float cx = (float) m - dp(200f);
+            float cy = bankTop * (0.22f + 0.12f * i);
+            float cw = dp(110f) + (hh % 90) * dp(1f);
+            float ch = dp(11f) + (hh % 5) * dp(2f);
+            paint.setColor(day ? 0x55FFFFFF : 0x1E9AA8C8);
+            c.drawOval(cx - cw * 0.5f, cy - ch * 0.5f, cx + cw * 0.5f, cy + ch * 0.5f, paint);
+            c.drawOval(cx - cw * 0.28f, cy - ch * 1.1f, cx + cw * 0.1f, cy + ch * 0.2f, paint);
+            c.drawOval(cx - cw * 0.02f, cy - ch * 0.85f, cx + cw * 0.3f, cy + ch * 0.1f, paint);
+            paint.setColor(day ? 0x22B4C4D8 : 0x2CFF9E70);
+            c.drawOval(cx - cw * 0.44f, cy, cx + cw * 0.44f, cy + ch * 0.55f, paint);
+        }
+
+        // Far hills, barely moving, then haze rising off their feet. Built from ovals rather than one
+        // full-width path: a wide non-convex path that changes every frame is rasterised on the CPU,
+        // where ovals and circles are drawn analytically by the GPU.
+        paint.setColor(day ? 0xFF86A8C4 : 0xFF33405E);
+        c.drawRect(0, base - H * 0.14f, w, waterTop, paint);
+        float hg = dp(300f);
+        double hs = you * ppm * 0.05;
+        float hoff = (float) (hs % hg);
+        for (float x = -hoff - hg; x < w + hg * 1.5f; x += hg) {
+            int k = (int) Math.floor((x + hs) / hg + 0.5);
+            int hh = hash(k * 7 + 41);
+            float hw = hg * (0.75f + (hh % 100) / 100f * 0.55f);
+            float ht = H * (0.4f + ((hh >>> 7) % 100) / 100f * 0.32f);
+            float hx = x + ((hh >>> 3) % 60) * dp(1f);
+            c.drawOval(hx - hw, base - ht, hx + hw, base + ht * 0.6f, paint);
+        }
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(day ? hazeDay : hazeDusk);
+        c.drawRect(0, base - H * 0.55f, w, waterTop, paint);
+        paint.setShader(null);
+
+        // A nearer tree line: rounded crowns, darker and more saturated than the hills.
+        int treeCol = day ? 0xFF4C7A63 : 0xFF17252E;
+        paint.setColor(treeCol);
+        c.drawRect(0, base - H * 0.16f, w, waterTop, paint);
+        double ts = you * ppm * 0.16;
+        float tg = dp(30f);
+        float toff = (float) (ts % tg);
+        for (float x = -toff - tg; x < w + tg; x += tg) {
+            int k = (int) Math.floor((x + ts) / tg + 0.5);
+            int hh = hash(k + 101);
+            float r = H * (0.13f + (hh % 100) / 100f * 0.09f);
+            float tx = x + ((hh >>> 8) % 9) * dp(1f);
+            float ty = base - H * 0.16f - r * 0.45f - ((hh >>> 4) % 3) * H * 0.03f;
+            paint.setColor(treeCol);
+            c.drawCircle(tx, ty, r, paint);
+            // Lit on the sun side.
+            paint.setColor(day ? 0x22FFFFE0 : 0x14FFB080);
+            c.drawCircle(tx + r * 0.3f, ty - r * 0.25f, r * 0.55f, paint);
+        }
+
+        float wind = 0.35f + 0.65f * Math.min(1f, speed / Math.max(1f, (float) profile.typicalSpeed()));
+        drawVenue(c, w, base, H, s, you, ppm, day, wind);
+    }
+
+    /** The enclosure behind the far bank, one structure per slot, scrolling at 0.28 of the course. */
+    private void drawVenue(Canvas c, float w, float base, float H, float s, double you, float ppm,
+                           boolean day, float wind) {
+        float gap = dp(176f) * Math.max(0.8f, s);
+        double scroll = you * ppm * 0.28;
+        float off = (float) (scroll % gap);
+        for (float x = -off - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5);
+            int hh = hash(k * 13 + 5);
+            int kind = VENUE[((k % VENUE.length) + VENUE.length) % VENUE.length];
+            float cx = x + ((hh % 41) - 20) * dp(1f);
+            int si = (hh >>> 6) % TENT_STRIPES.length;
+            switch (kind) {
+                case V_MARQUEE:
+                    drawMarquee(c, cx, base, dp(112f) * s, H * 0.34f, H * 0.28f, TENT_STRIPES[si], day, k, wind);
+                    break;
+                case V_TENTS:
+                    drawMarquee(c, cx - dp(38f) * s, base, dp(66f) * s, H * 0.27f, H * 0.2f, TENT_STRIPES[si], day, k, wind);
+                    drawMarquee(c, cx + dp(40f) * s, base, dp(62f) * s, H * 0.25f, H * 0.19f,
+                            TENT_STRIPES[(si + 2) % TENT_STRIPES.length], day, k + 7, wind);
+                    break;
+                case V_FLAGS:
+                    drawFlags(c, cx, base, H, s, k, wind, day, 3);
+                    break;
+                case V_POLE:
+                    drawFlags(c, cx, base, H, s, k, wind, day, 1);
+                    break;
+                case V_STAND:
+                    drawStand(c, cx, base, H, s, k, day);
+                    break;
+                default:
+                    drawCommentaryBox(c, cx, base, H, s, k, day);
+                    break;
+            }
+        }
+    }
+
+    /** A striped marquee: panelled walls, a fan-striped roof, a scalloped valance and a pennant. */
+    private void drawMarquee(Canvas c, float cx, float base, float wd, float wall, float roof, int stripe,
+                             boolean day, int k, float wind) {
+        float l = cx - wd / 2f;
+        float eaveY = base - wall;
+        float peakY = eaveY - roof;
+        int canvasLit = day ? 0xFFF6F2E8 : 0xFFCDBFBC;
+        int canvasShade = day ? 0xFFC4C9D4 : 0xFF6C6C84;
+        int stripeLit = day ? stripe : shade(mix(stripe, 0xFFFF9A60, 0.15f), 0.92f);
+        int stripeShade = shade(stripe, day ? 0.72f : 0.5f);
+        paint.setStyle(Paint.Style.FILL);
+        // Walls, panelled in the club's colours, lit on the sun side.
+        int n = 8;
+        float pw = wd / n;
+        for (int i = 0; i < n; i++) {
+            float px = l + i * pw;
+            boolean lit = px + pw / 2f > cx;
+            paint.setColor((i & 1) == 0 ? (lit ? canvasLit : canvasShade) : (lit ? stripeLit : stripeShade));
+            c.drawRect(px, eaveY, px + pw + dp(0.5f), base, paint);
+        }
+        // The open doorway: lantern-lit at dusk, shade inside by day.
+        float dw = wd * 0.2f;
+        paint.setColor(day ? 0xFF2B3442 : 0xFFFFC46E);
+        c.drawRect(cx - dw / 2f, eaveY + wall * 0.28f, cx + dw / 2f, base, paint);
+        if (!day) {
+            Fx.glow(c, cx, base - wall * 0.35f, wd * 0.45f, 0x40FFB050);
+        }
+        // Roof: a fan of stripes from the peak, overhanging the walls.
+        float eave = wd * 0.08f;
+        float rl = l - eave;
+        float rr = l + wd + eave;
+        int m = 6;
+        float seg = (rr - rl) / m;
+        for (int j = 0; j < m; j++) {
+            float sx = rl + j * seg;
+            boolean lit = sx + seg / 2f > cx;
+            paint.setColor((j & 1) == 0 ? (lit ? stripeLit : stripeShade) : (lit ? canvasLit : canvasShade));
+            path.rewind();
+            path.moveTo(cx, peakY);
+            path.lineTo(sx, eaveY);
+            path.lineTo(sx + seg + dp(0.5f), eaveY);
+            path.close();
+            c.drawPath(path, paint);
+        }
+        // Scalloped valance along the eave.
+        float rad = (rr - rl) / (4f * m);
+        for (int j = 0; j < 2 * m; j++) {
+            float vx = rl + (j + 0.5f) * 2f * rad;
+            boolean lit = vx > cx;
+            paint.setColor((j & 1) == 0 ? (lit ? stripeLit : stripeShade) : (lit ? canvasLit : canvasShade));
+            c.drawCircle(vx, eaveY, rad, paint);
+        }
+        // A highlight down the sunlit ridge.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(day ? 0x66FFFFFF : 0x66FFC890);
+        c.drawLine(cx, peakY, rr, eaveY, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // Festoon lights along the eave at dusk.
+        if (!day) {
+            for (int j = 0; j < 7; j++) {
+                float bx = rl + (j + 0.5f) * (rr - rl) / 7f;
+                float by = eaveY + rad * 1.2f;
+                float fl = 0.7f + 0.3f * (float) Math.sin(sessionSeconds * 3 + j + k);
+                paint.setColor(((int) (fl * 0x50) << 24) | 0x00FFC060);
+                c.drawCircle(bx, by, dp(3.4f), paint);
+                paint.setColor(0xFFFFE8B0);
+                c.drawCircle(bx, by, dp(1.4f), paint);
+            }
+        }
+        // King pole and a pennant streaming in the wind.
+        float poleTop = peakY - roof * 0.7f;
+        paint.setColor(day ? 0xFFD8D8D8 : 0xFF9A98A8);
+        c.drawRect(cx - dp(0.8f), poleTop, cx + dp(0.8f), peakY, paint);
+        float pl = dp(16f) * Math.max(0.7f, wd / dp(112f)) * (0.7f + 0.3f * wind);
+        float wave = (float) Math.sin(sessionSeconds * (3 + wind * 4) + k) * dp(2.5f) * wind;
+        path.rewind();
+        path.moveTo(cx + dp(0.8f), poleTop);
+        path.lineTo(cx + dp(0.8f) + pl, poleTop + dp(3f) + wave + (1f - wind) * dp(5f));
+        path.lineTo(cx + dp(0.8f), poleTop + dp(6f));
+        path.close();
+        paint.setColor(day ? PARTY[((k % PARTY.length) + PARTY.length) % PARTY.length]
+                : shade(PARTY[((k % PARTY.length) + PARTY.length) % PARTY.length], 0.8f));
+        c.drawPath(path, paint);
+    }
+
+    /** One or three flagpoles with club flags; they stream harder the faster you row. */
+    private void drawFlags(Canvas c, float cx, float base, float H, float s, int k, float wind, boolean day, int count) {
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < count; i++) {
+            int hh = hash(k * 3 + i + 11);
+            float px = count == 1 ? cx : cx + (i - 1) * dp(36f) * s;
+            float top = base - H * (count == 1 ? 0.98f : 0.8f + 0.18f * ((hh % 100) / 100f));
+            // Pole, lit on its right, with a gilded finial.
+            paint.setColor(day ? 0xFFB8BEC8 : 0xFF6E6C7E);
+            c.drawRect(px - dp(1.2f) * s, top, px + dp(1.2f) * s, base, paint);
+            paint.setColor(day ? 0xFFF4F6F8 : 0xFFC8A890);
+            c.drawRect(px, top, px + dp(1.2f) * s, base, paint);
+            paint.setColor(0xFFE8C65A);
+            c.drawCircle(px, top - dp(1.5f) * s, dp(2.2f) * s, paint);
+            // The flag: two quadratic edges rippling, the fly end drooping when the air is still.
+            float fw = dp(count == 1 ? 40f : 32f) * s;
+            float fh = dp(count == 1 ? 24f : 19f) * s;
+            double ph = sessionSeconds * (2.6 + wind * 2.4) + k + i * 1.7;
+            float amp = dp(3f) * s * (0.4f + wind);
+            float y1 = (float) Math.sin(ph) * amp;
+            float y2 = (float) Math.sin(ph - 1.3) * amp * 1.4f;
+            float droop = (1f - wind) * dp(6f) * s;
+            float reach = fw * (0.75f + 0.25f * wind);
+            float fx = px + dp(1.2f) * s;
+            float fy = top + dp(1f);
+            int col = CREW_COLORS[hh % NCREWS];
+            path.rewind();
+            path.moveTo(fx, fy);
+            path.quadTo(fx + reach * 0.5f, fy + y1, fx + reach, fy + y2 + droop);
+            path.lineTo(fx + reach, fy + fh + y2 + droop * 1.4f);
+            path.quadTo(fx + reach * 0.5f, fy + fh + y1, fx, fy + fh);
+            path.close();
+            paint.setColor(day ? col : shade(col, 0.78f));
+            c.drawPath(path, paint);
+            // A white canton at the hoist, and a shadowed fold through the middle.
+            paint.setColor(day ? 0xFFF4F4F4 : 0xFFB8B4BE);
+            c.drawRect(fx, fy + y1 * 0.15f, fx + reach * 0.3f, fy + fh * 0.5f + y1 * 0.15f, paint);
+            paint.setColor(0x33000000);
+            c.drawRect(fx + reach * 0.48f, fy + y1 * 0.8f + dp(1f), fx + reach * 0.56f, fy + fh + y1 * 0.8f, paint);
+        }
+    }
+
+    /** A covered grandstand: three tiers of spectators who bounce when there is something to cheer. */
+    private void drawStand(Canvas c, float cx, float base, float H, float s, int k, boolean day) {
+        float wd = dp(150f) * s;
+        float l = cx - wd / 2f;
+        float r = cx + wd / 2f;
+        float top = base - H * 0.52f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(day ? 0xFF56647A : 0xFF20293A);
+        c.drawRect(l, top, r, base, paint);
+        float rowH = (base - top) / 3.4f;
+        for (int row = 0; row < 3; row++) {
+            float ry = base - rowH * row;
+            float inset = row * dp(5f) * s;
+            paint.setColor(row % 2 == 0 ? (day ? 0xFF7E8EA4 : 0xFF333F58) : (day ? 0xFF718198 : 0xFF2B364D));
+            c.drawRect(l + inset, ry - rowH, r - inset, ry, paint);
+            paint.setColor(day ? 0x44FFFFFF : 0x30FFC890);
+            c.drawRect(l + inset, ry - rowH, r - inset, ry - rowH + dp(1f), paint);
+            int count = 11 - row;
+            float usable = wd - inset * 2f - dp(14f) * s;
+            for (int j = 0; j < count; j++) {
+                int hh = hash(k * 131 + row * 17 + j);
+                if (hh % 9 == 0) {
+                    continue;   // an empty seat
+                }
+                float px = l + inset + dp(7f) * s + usable * j / (count - 1f) + ((hh % 5) - 2) * dp(0.8f);
+                float bounce = cheer * (float) Math.abs(Math.sin(sessionSeconds * 7 + j * 1.3 + row)) * dp(2.5f) * s;
+                float py = ry - rowH * 0.15f - bounce;
+                int shirt = PARTY[hh % PARTY.length];
+                paint.setColor(day ? shirt : shade(shirt, 0.62f));
+                c.drawRect(px - dp(2.6f) * s, py - rowH * 0.5f, px + dp(2.6f) * s, py, paint);
+                int skin = SKIN[(hh >>> 4) % SKIN.length];
+                paint.setColor(day ? skin : shade(skin, 0.7f));
+                c.drawCircle(px, py - rowH * 0.5f - dp(2.4f) * s, dp(2.4f) * s, paint);
+            }
+        }
+        // A cantilevered roof, rising toward the water, on three posts.
+        paint.setColor(day ? 0xFF3B4658 : 0xFF151C28);
+        c.drawRect(l + dp(3f) * s, top - dp(6f) * s, l + dp(5f) * s, base, paint);
+        c.drawRect(cx - dp(1f) * s, top - dp(8f) * s, cx + dp(1f) * s, top, paint);
+        c.drawRect(r - dp(5f) * s, top - dp(10f) * s, r - dp(3f) * s, top, paint);
+        int roofCol = TENT_STRIPES[hash(k) % TENT_STRIPES.length];
+        path.rewind();
+        path.moveTo(l - dp(6f) * s, top - dp(3f) * s);
+        path.lineTo(r + dp(10f) * s, top - dp(12f) * s);
+        path.lineTo(r + dp(10f) * s, top - dp(7f) * s);
+        path.lineTo(l - dp(6f) * s, top + dp(1f) * s);
+        path.close();
+        paint.setColor(day ? roofCol : shade(roofCol, 0.6f));
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.2f));
+        paint.setColor(day ? 0x88FFFFFF : 0x66FFC890);
+        c.drawLine(l - dp(6f) * s, top - dp(3f) * s, r + dp(10f) * s, top - dp(12f) * s, paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** The commentary box on stilts, two commentators at the window and a loudspeaker on the roof. */
+    private void drawCommentaryBox(Canvas c, float cx, float base, float H, float s, int k, boolean day) {
+        float bw = dp(72f) * s;
+        float l = cx - bw / 2f;
+        float r = cx + bw / 2f;
+        float boxB = base - H * 0.40f;
+        float boxT = base - H * 0.78f;
+        paint.setStyle(Paint.Style.FILL);
+        // Stilts, a cross brace and the stair up the lit side.
+        int timber = day ? 0xFF6A5A4A : 0xFF3A3038;
+        paint.setColor(timber);
+        c.drawRect(l + dp(4f) * s, boxB, l + dp(7f) * s, base, paint);
+        c.drawRect(r - dp(7f) * s, boxB, r - dp(4f) * s, base, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f) * s);
+        c.drawLine(l + dp(6f) * s, boxB, r - dp(6f) * s, base, paint);
+        c.drawLine(r - dp(6f) * s, boxB, l + dp(6f) * s, base, paint);
+        paint.setColor(day ? 0xFF8A7864 : 0xFF54474E);
+        paint.setStrokeWidth(dp(2f) * s);
+        c.drawLine(r - dp(4f) * s, boxB + dp(2f), r + dp(22f) * s, base, paint);
+        paint.setStrokeWidth(dp(1f) * s);
+        c.drawLine(r - dp(4f) * s, boxB - dp(7f) * s, r + dp(22f) * s, base - dp(9f) * s, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // The box: shaded left, lit right.
+        paint.setColor(day ? 0xFFD9D2C2 : 0xFF4E4A5E);
+        c.drawRect(l, boxT, cx, boxB, paint);
+        paint.setColor(day ? 0xFFF6F0E2 : 0xFF8A7C84);
+        c.drawRect(cx, boxT, r, boxB, paint);
+        // The window band: sky-glass by day, lamplit at dusk.
+        float wt = boxT + (boxB - boxT) * 0.2f;
+        float wb = boxT + (boxB - boxT) * 0.7f;
+        paint.setColor(day ? 0xFF8FB7D6 : 0xFFFFCC80);
+        c.drawRect(l + dp(5f) * s, wt, r - dp(5f) * s, wb, paint);
+        if (!day) {
+            Fx.glow(c, cx, (wt + wb) / 2f, bw * 0.7f, 0x40FFB060);
+        }
+        // Two commentators; the one on the right talks faster when the crowd is up.
+        float talk = (float) Math.sin(sessionSeconds * (5 + cheer * 6) + k) * dp(1f) * s;
+        paint.setColor(day ? 0xFF2A3040 : 0xFF3A2A28);
+        float hr = dp(3.4f) * s;
+        c.drawRect(l + bw * 0.33f - hr * 1.5f, wb - hr * 1.6f, l + bw * 0.33f + hr * 1.5f, wb, paint);
+        c.drawCircle(l + bw * 0.33f, wb - hr * 2.6f, hr, paint);
+        c.drawRect(l + bw * 0.66f - hr * 1.5f, wb - hr * 1.6f, l + bw * 0.66f + hr * 1.5f, wb, paint);
+        c.drawCircle(l + bw * 0.66f, wb - hr * 2.6f + talk, hr, paint);
+        // Mullions and a glint on the glass.
+        paint.setColor(day ? 0xFFF6F0E2 : 0xFF6A5C64);
+        c.drawRect(cx - dp(0.8f), wt, cx + dp(0.8f), wb, paint);
+        if (day) {
+            paint.setColor(0x55FFFFFF);
+            path.rewind();
+            path.moveTo(r - dp(22f) * s, wt);
+            path.lineTo(r - dp(14f) * s, wt);
+            path.lineTo(r - dp(22f) * s, wb);
+            path.lineTo(r - dp(30f) * s, wb);
+            path.close();
+            c.drawPath(path, paint);
+        }
+        // Flat roof with an overhang.
+        paint.setColor(day ? 0xFF8E2F35 : 0xFF4E2430);
+        c.drawRect(l - dp(5f) * s, boxT - dp(5f) * s, r + dp(5f) * s, boxT, paint);
+        paint.setColor(day ? 0x66FFFFFF : 0x55FFC890);
+        c.drawRect(l - dp(5f) * s, boxT - dp(5f) * s, r + dp(5f) * s, boxT - dp(4f) * s, paint);
+        // Loudspeaker on a mast, pointing down the course, sound rings when the crowd goes up.
+        float mx = l + dp(10f) * s;
+        float hy = base - H * 0.93f;
+        paint.setColor(day ? 0xFFB8BEC8 : 0xFF6E6C7E);
+        c.drawRect(mx - dp(0.9f), hy, mx + dp(0.9f), boxT - dp(5f) * s, paint);
+        path.rewind();
+        path.moveTo(mx, hy - dp(1.5f) * s);
+        path.lineTo(mx + dp(11f) * s, hy - dp(5f) * s);
+        path.lineTo(mx + dp(11f) * s, hy + dp(5f) * s);
+        path.lineTo(mx, hy + dp(1.5f) * s);
+        path.close();
+        paint.setColor(day ? 0xFFDCE0E6 : 0xFF9A98A8);
+        c.drawPath(path, paint);
+        if (cheer > 0.25f) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.4f));
+            for (int i = 0; i < 2; i++) {
+                float ph = (float) ((sessionSeconds * 1.6 + i * 0.5) % 1.0);
+                float rr = dp(8f) * s + ph * dp(12f) * s;
+                paint.setColor(((int) ((1f - ph) * cheer * 0x90) << 24) | (day ? 0x00FFFFFF : 0x00FFD9A0));
+                rect.set(mx + dp(11f) * s - rr, hy - rr, mx + dp(11f) * s + rr, hy + rr);
+                c.drawArc(rect, -35f, 70f, false, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+    /* ---------- the start and the umpire ---------- */
+
+    /** A stake pontoon at each lane's stern, a boat holder kneeling on it; arms up once you go. */
+    private void drawStartPontoons(Canvas c, float w, float sternX, float lanesTop, float laneH,
+                                   boolean holding, boolean day) {
+        if (sternX < -dp(40f) || sternX > w + dp(60f)) {
+            return;
+        }
+        float l = sternX - dp(30f);
+        float r = sternX - dp(2f);
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 4; i++) {
+            float cy = lanesTop + laneH * (i + 0.5f);
+            float top = cy - dp(14f);
+            float bot = cy + dp(14f);
+            paint.setColor(0x50000000);   // its shadow on the water
+            c.drawRect(l + dp(4f), bot, r + dp(4f), bot + dp(7f), paint);
+            paint.setColor(day ? 0xFF4E3A28 : 0xFF2E2219);
+            c.drawRect(l, bot - dp(1f), r, bot + dp(4f), paint);
+            paint.setColor(day ? 0xFF9A7650 : 0xFF5E4834);
+            c.drawRect(l, top, r, bot, paint);
+            paint.setColor(day ? 0xFF6E5236 : 0xFF3E2E22);
+            for (int p = 1; p < 4; p++) {
+                float py = top + (bot - top) * p / 4f;
+                c.drawRect(l, py - dp(0.6f), r, py + dp(0.6f), paint);
+            }
+            paint.setColor(day ? 0xFFC9A57A : 0xFF8A6C50);
+            c.drawRect(l, top, r, top + dp(1.5f), paint);
+            // Lane flag on the outer corner.
+            paint.setColor(0xFFCCCCCC);
+            c.drawRect(l + dp(2f), top - dp(18f), l + dp(3.2f), top, paint);
+            float fl = (float) Math.sin(sessionSeconds * 5 + i) * dp(1.2f);
+            path.rewind();
+            path.moveTo(l + dp(3.2f), top - dp(18f));
+            path.lineTo(l + dp(13f), top - dp(15f) + fl);
+            path.lineTo(l + dp(3.2f), top - dp(12f));
+            path.close();
+            paint.setColor(i == 3 ? ACCENT : 0xFFF0B132);
+            c.drawPath(path, paint);
+            // The boat holder.
+            float hx = sternX - dp(15f);
+            paint.setColor(0xFF2A2F3A);
+            c.drawRect(hx - dp(7f), cy - dp(1f), hx + dp(3f), cy + dp(3f), paint);
+            paint.setColor(0xFFF0B132);
+            c.drawRect(hx - dp(4f), cy - dp(13f), hx + dp(3f), cy - dp(1f), paint);
+            paint.setColor(0xFFF1C27D);
+            c.drawCircle(hx - dp(0.5f), cy - dp(16.5f), dp(3.2f), paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2.2f));
+            paint.setColor(0xFFE0A42A);
+            if (holding) {
+                c.drawLine(hx + dp(2f), cy - dp(10f), sternX + dp(4f), cy - dp(2f), paint);
+            } else {
+                c.drawLine(hx + dp(2f), cy - dp(11f), hx + dp(6f), cy - dp(24f), paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+    /** The umpire's launch: white hull, cabin, the umpire at the bow with the flag up at the start. */
+    private void drawUmpireLaunch(Canvas c, float x, float y, float speed, boolean flagUp, boolean day) {
+        float wake = Math.min(dp(90f), dp(10f) + speed * dp(18f));
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x55DCEBF7);
+        c.drawLine(x - dp(30f), y + dp(2f), x - dp(30f) - wake, y - dp(3f), paint);
+        c.drawLine(x - dp(30f), y + dp(4f), x - dp(30f) - wake, y + dp(9f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x40000000);
+        c.drawOval(x - dp(34f), y + dp(2f), x + dp(36f), y + dp(9f), paint);
+        path.rewind();
+        path.moveTo(x - dp(32f), y - dp(5f));
+        path.lineTo(x + dp(26f), y - dp(5f));
+        path.lineTo(x + dp(38f), y - dp(8f));
+        path.lineTo(x + dp(30f), y + dp(5f));
+        path.lineTo(x - dp(30f), y + dp(5f));
+        path.close();
+        paint.setColor(day ? 0xFFF2F4F6 : 0xFFB8BCC8);
+        c.drawPath(path, paint);
+        paint.setColor(0xFF1E3A5C);
+        c.drawRect(x - dp(30f), y + dp(2f), x + dp(31f), y + dp(5f), paint);
+        paint.setColor(day ? 0xFFFFFFFF : 0xFFE0E2EA);
+        c.drawRect(x - dp(32f), y - dp(5f), x + dp(26f), y - dp(4f), paint);
+        // Cabin with its windows, lit from inside at dusk.
+        paint.setColor(day ? 0xFFD5DBE2 : 0xFF8E94A4);
+        c.drawRect(x - dp(20f), y - dp(15f), x + dp(6f), y - dp(5f), paint);
+        paint.setColor(day ? 0xFF2A3C50 : 0xFFFFD08A);
+        c.drawRect(x - dp(17f), y - dp(13f), x + dp(3f), y - dp(9f), paint);
+        paint.setColor(0xFF1E3A5C);
+        c.drawRect(x - dp(22f), y - dp(17f), x + dp(8f), y - dp(15f), paint);
+        // Stern ensign.
+        paint.setColor(0xFFBBBBBB);
+        c.drawRect(x - dp(31f), y - dp(18f), x - dp(30f), y - dp(5f), paint);
+        float fl = (float) Math.sin(sessionSeconds * 6) * dp(1.2f);
+        path.rewind();
+        path.moveTo(x - dp(30f), y - dp(18f));
+        path.lineTo(x - dp(20f), y - dp(15f) + fl);
+        path.lineTo(x - dp(30f), y - dp(12f));
+        path.close();
+        paint.setColor(0xFFF0655D);
+        c.drawPath(path, paint);
+        // The umpire at the bow.
+        float ux = x + dp(14f);
+        paint.setColor(0xFF24324A);
+        c.drawRect(ux - dp(2.5f), y - dp(16f), ux + dp(2.5f), y - dp(5f), paint);
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(ux, y - dp(19f), dp(2.6f), paint);
+        if (flagUp) {
+            paint.setColor(0xFFDDDDDD);
+            c.drawRect(ux + dp(2f), y - dp(32f), ux + dp(3f), y - dp(14f), paint);
+            float ff = (float) Math.sin(sessionSeconds * 7) * dp(1.5f);
+            path.rewind();
+            path.moveTo(ux + dp(3f), y - dp(32f));
+            path.lineTo(ux + dp(14f), y - dp(31f) + ff);
+            path.lineTo(ux + dp(14f), y - dp(24f) + ff);
+            path.lineTo(ux + dp(3f), y - dp(25f));
+            path.close();
+            paint.setColor(0xFFFFFFFF);
+            c.drawPath(path, paint);
+        }
+        // Bow wave, growing with the pace of the field.
+        if (speed > 0.3f) {
+            int a = (int) (Math.min(1f, speed / 4f) * 0xB0);
+            paint.setColor((a << 24) | 0x00DCEBF7);
+            path.rewind();
+            path.moveTo(x + dp(36f), y - dp(6f));
+            path.lineTo(x + dp(42f) + speed * dp(2f), y + dp(5f));
+            path.lineTo(x + dp(28f), y + dp(5f));
+            path.close();
+            c.drawPath(path, paint);
+        }
+    }
+
+    /* ---------- the near bank ---------- */
+
+    /**
+     * The landing stage you are watching from: a timber edge beam, deck boards that scroll fastest
+     * of anything (the nearest layer), iron bollards with a mooring rope, and the stage's shadow on
+     * the water. The grudge and training cards sit on it like signboards.
+     */
+    private void drawLandingStage(Canvas c, float w, float h, float waterBottom, double you, float ppm, boolean day) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(edgeShade);
+        c.drawRect(0, waterBottom - dp(16f), w, waterBottom, paint);
+        float deckTop = waterBottom + dp(12f);
+        paint.setShader(day ? deckDay : deckDusk);
+        c.drawRect(0, deckTop, w, h, paint);
+        paint.setShader(null);
+        // Edge beam with a lit top.
+        paint.setColor(day ? 0xFF5A4030 : 0xFF2A1F17);
+        c.drawRect(0, waterBottom, w, deckTop, paint);
+        paint.setColor(day ? 0xFF9A7652 : 0xFF5C4634);
+        c.drawRect(0, waterBottom, w, waterBottom + dp(2f), paint);
+        paint.setColor(0xFF0E0A07);
+        c.drawRect(0, deckTop - dp(1f), w, deckTop + dp(1f), paint);
+        // Boards: seams getting wider apart toward you, butt joints staggered row by row.
+        float deckH = h - deckTop;
+        float prev = deckTop;
+        for (int row = 0; row < 4; row++) {
+            float y1 = row < 3 ? deckTop + deckH * (0.2f + row * 0.25f + row * row * 0.02f) : h;
+            if (row < 3) {
+                paint.setColor(0xFF0E0A07);
+                c.drawRect(0, y1 - dp(1f), w, y1 + dp(1f), paint);
+                paint.setColor(day ? 0x26FFFFFF : 0x14FFFFFF);
+                c.drawRect(0, y1 + dp(1f), w, y1 + dp(2f), paint);
+            }
+            float jg = dp(230f) * (1f + row * 0.25f);
+            double js = you * ppm * (1.1 + row * 0.12) + row * dp(97f);
+            float joff = (float) (js % jg);
+            paint.setColor(0xCC0E0A07);
+            for (float jx = -joff; jx < w + jg; jx += jg) {
+                c.drawRect(jx, prev + dp(1f), jx + dp(1.5f), y1 - dp(1f), paint);
+            }
+            prev = y1;
+        }
+        // Bollards and the mooring rope swagged between them.
+        float bg = dp(420f);
+        double bs = you * ppm * 1.05;
+        float boff = (float) (bs % bg);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2.5f));
+        paint.setColor(day ? 0xFFC8AA78 : 0xFF7A6448);
+        for (float bx = -boff - bg; bx < w + bg; bx += bg) {
+            path.rewind();
+            path.moveTo(bx + dp(6f), waterBottom + dp(3f));
+            path.quadTo(bx + bg / 2f, waterBottom + dp(18f), bx + bg - dp(6f), waterBottom + dp(3f));
+            c.drawPath(path, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        for (float bx = -boff - bg; bx < w + bg; bx += bg) {
+            paint.setColor(0x40000000);
+            c.drawOval(bx - dp(10f), deckTop - dp(1f), bx + dp(12f), deckTop + dp(5f), paint);
+            paint.setColor(0xFF1C2228);
+            c.drawRect(bx - dp(7f), waterBottom - dp(3f), bx + dp(7f), deckTop + dp(2f), paint);
+            paint.setColor(0xFF4A5560);
+            c.drawRect(bx + dp(3f), waterBottom - dp(3f), bx + dp(6f), deckTop + dp(2f), paint);
+            paint.setColor(0xFF3A444E);
+            c.drawOval(bx - dp(9f), waterBottom - dp(7f), bx + dp(9f), waterBottom, paint);
+            paint.setColor(0x66FFFFFF);
+            c.drawOval(bx - dp(2f), waterBottom - dp(6.5f), bx + dp(7f), waterBottom - dp(4f), paint);
         }
     }
 }

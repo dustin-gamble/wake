@@ -468,19 +468,71 @@ final class SessionLog {
         private int points;
         private int bucketSeconds = SERIES_BUCKET_SECONDS;
 
+        /**
+         * Every screen rowed in this session, in the order first visited. A session is now begun
+         * and ended by the rower (3.25.0), not by opening a screen, so one row can span several
+         * games and history has to be able to say so.
+         */
+        private final java.util.LinkedHashSet<String> games = new java.util.LinkedHashSet<>();
+
         Recorder(String game) {
-            this.game = game == null ? "" : game;
+            this.game = "";
+            addGame(game);
         }
 
-        /** Rename mid-piece - SHUFFLE switches games inside one row. */
+        /** Rename mid-piece - kept for callers; it now records the game rather than replacing it. */
         void setGame(String game) {
-            if (game != null && !game.isEmpty()) {
-                this.game = game;
+            addGame(game);
+        }
+
+        /**
+         * Notes a screen rowed in this session. The stored name is the first game, plus a count of
+         * the others ("HEAD RACE +2"), so a history row stays one line however many were visited.
+         */
+        void addGame(String g) {
+            if (g == null || g.isEmpty()) {
+                return;
             }
+            games.add(g);
+            // Headlined by the first game, not the instruments: "GAUGES +1" says less than
+            // "HEAD RACE +1" about a session that warmed up on the gauges and then raced.
+            String first = null;
+            for (String name : games) {
+                if (!"GAUGES".equals(name)) {
+                    first = name;
+                    break;
+                }
+            }
+            if (first == null) {
+                first = games.iterator().next();
+            }
+            game = games.size() > 1 ? first + " +" + (games.size() - 1) : first;
         }
 
         String game() {
             return game;
+        }
+
+        /** Every game visited, first to last - for the end-of-session card. */
+        java.util.List<String> games() {
+            return new java.util.ArrayList<>(games);
+        }
+
+        /** Rowing seconds so far - the session clock. Paused when the rower stops, like a game's. */
+        float seconds() {
+            return seconds;
+        }
+
+        float metres() {
+            return metres;
+        }
+
+        int strokes() {
+            return strokes;
+        }
+
+        float averageWatts() {
+            return seconds > 0 ? (float) (wattSecondsTotal / seconds) : 0f;
         }
 
         boolean started() {

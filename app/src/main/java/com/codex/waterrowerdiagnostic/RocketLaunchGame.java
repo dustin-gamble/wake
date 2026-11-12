@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.Shader;
 import android.view.MotionEvent;
 
@@ -146,6 +147,41 @@ final class RocketLaunchGame extends GameView {
     // Sky gradient, rebuilt only when the colour step or height changes (was allocated every frame).
     private LinearGradient skyShader;
     private int skyKey = -1;
+    /** The sky's horizon colour this frame, so far scenery can be hazed into it. */
+    private int skyLow = 0xFFB6DFF8;
+
+    // 3.25 art. Shapes and shaders are built once (buildArt) in the rocket's own coordinates and
+    // drawn through a canvas translate/scale, so nothing in the frame loop allocates.
+    private boolean artBuilt;
+    private float flameRef;
+    private final Path nosePath = new Path();
+    private final Path finPath = new Path();
+    private final Path finEdgePath = new Path();
+    private final Path bellPath = new Path();
+    private final Path flamePath = new Path();
+    private final Path haloPath = new Path();
+    private final Path corePath = new Path();
+    private final Path diamondPath = new Path();
+    /** Rewound each use for the ridges, the treeline and the pad apron. */
+    private final Path scenePath = new Path();
+    private LinearGradient bodyShader;
+    private LinearGradient redShader;
+    private LinearGradient finShader;
+    private LinearGradient bellShader;
+    private LinearGradient flameShader;
+    private LinearGradient haloShader;
+    private LinearGradient coreShader;
+    private LinearGradient groundShader;
+    private LinearGradient earthShader;
+    private RadialGradient glassShader;
+    /** HUD panel gradients by slot, rebuilt only when that slot's top or bottom moves. */
+    private final LinearGradient[] panelShader = new LinearGradient[5];
+    private final float[] panelTop = new float[5];
+    private final float[] panelBot = new float[5];
+    /** 0..1: the billowing cloud round the pad at lift-off. */
+    private float padSmoke;
+    /** 0..1: the service arm swinging clear of the rocket. */
+    private float armSwing;
 
     // Power, smoothed: thrust follows within a stroke, the booster and lander over a few strokes.
     private float thrustW;
@@ -673,6 +709,9 @@ final class RocketLaunchGame extends GameView {
         if (w == 0 || h == 0) {
             return;
         }
+        if (!artBuilt) {
+            buildArt();
+        }
         int watts = status == null ? 0 : status.watts;
         thrustW += (watts - thrustW) * Math.min(1f, dt / 0.8f);
         smoothW += (watts - smoothW) * Math.min(1f, dt / 2.5f);
@@ -1085,7 +1124,7 @@ final class RocketLaunchGame extends GameView {
     /* ---------- drawing the climb ---------- */
 
     private void drawAscentWorld(Canvas c, float w, float h, float dt) {
-        // Sky: blue at sea level through to black at the Karman line.
+        // Sky: blue at sea level, through dusk in the stratosphere, to black space at the Karman line.
         float space = Math.min(1f, altitude / 80_000f);
         c.save();
         c.translate(shake.dx, shake.dy);
@@ -1093,9 +1132,10 @@ final class RocketLaunchGame extends GameView {
         if (key != skyKey) {
             skyKey = key;
             float s = (int) (space * 48) / 48f;
+            skyLow = skyStop(SKY_LOW, s);
             skyShader = new LinearGradient(0, 0, 0, h,
-                    blend(0xFF2F7FD0, 0xFF000308, s), blend(0xFF9ED2F5, 0xFF040A14, s),
-                    Shader.TileMode.CLAMP);
+                    new int[]{skyStop(SKY_TOP, s), skyStop(SKY_MID, s), skyLow},
+                    new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP);
         }
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
@@ -1111,48 +1151,23 @@ final class RocketLaunchGame extends GameView {
             }
             paint.setAlpha(255);
         }
+        drawEarthLimb(c, w, h, space);
 
         float rocketY = h * 0.58f;
-        // Ground and the curve of the earth receding.
+        // Ground receding: the far ridge, the treeline and the field drop away at different rates.
         // 3.19.5: the ground drops away within the first few km. At 0.012 px/m the rocket still sat
         // beside its launch tower at 2.4 km on the emulator.
-        float groundY = rocketY + dp(60f) + Math.min(h, altitude * 0.25f);
-        if (groundY < h + dp(400f)) {
-            paint.setColor(0xFF2E6B35);
-            if (altitude < 20_000f) {
-                c.drawRect(0, groundY, w, h + dp(400f), paint);
-                paint.setColor(0xFF20532A);
-                float scroll = (altitude * 0.6f) % dp(60f);
-                for (float gx = -scroll; gx < w; gx += dp(60f)) {
-                    c.drawRect(gx, groundY, gx + dp(3f), h, paint);
-                }
-                // Launch pad and its tower, which the rocket leaves behind.
-                paint.setColor(0xFF4A4A55);
-                c.drawRect(w * 0.5f - dp(40f), groundY - dp(6f), w * 0.5f + dp(40f), groundY, paint);
-                float towerX = w * 0.5f - dp(48f);
-                paint.setColor(0xFFB8452F);
-                c.drawRect(towerX - dp(6f), groundY - dp(120f), towerX, groundY - dp(6f), paint);
-                c.drawRect(towerX - dp(14f), groundY - dp(120f), towerX - dp(10f), groundY - dp(6f), paint);
-                paint.setStrokeWidth(dp(1.5f));
-                for (float ty = groundY - dp(114f); ty < groundY - dp(8f); ty += dp(14f)) {
-                    c.drawLine(towerX - dp(14f), ty, towerX, ty + dp(14f), paint);
-                }
-                c.drawRect(towerX - dp(14f), groundY - dp(80f), w * 0.5f - dp(16f), groundY - dp(76f), paint);
-                if (((int) (sessionSeconds * 2)) % 2 == 0) {
-                    paint.setColor(0xFFFF3B3B);
-                    c.drawCircle(towerX - dp(7f), groundY - dp(126f), dp(3f), paint);
-                }
-            } else {
-                // High enough for the horizon to curve.
-                paint.setColor(0xFF2E6B35);
-                c.drawOval(-w * 1.2f, groundY, w * 2.2f, groundY + h * 2.4f, paint);
-                paint.setColor(0x5599D8FF);
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(6f));
-                c.drawOval(-w * 1.2f, groundY, w * 2.2f, groundY + h * 2.4f, paint);
-                paint.setStyle(Paint.Style.FILL);
-            }
+        float base = rocketY + dp(60f);
+        float drop = Math.min(h, altitude * 0.25f);
+        float groundY = base + drop;
+        if (altitude < 20_000f && base + drop * 0.55f - dp(50f) < h) {
+            drawLaunchSite(c, w, h, base, drop);
         }
+        float smokeTarget = !over && plume > 0.25f && altitude < 2_500f
+                ? (started ? 1f : 0.3f * Math.min(1f, plume)) : 0f;
+        padSmoke += (smokeTarget - padSmoke) * Math.min(1f, dt * (smokeTarget > padSmoke ? 1.6f : 0.25f));
+        armSwing += ((started ? 1f : 0f) - armSwing) * Math.min(1f, dt * 1.5f);
+        drawPadSmoke(c, w, h, groundY);
 
         // Clouds drifting down past you while in the troposphere: puffy, several sizes.
         if (altitude < 16_000f) {
@@ -1165,10 +1180,16 @@ final class RocketLaunchGame extends GameView {
                 float cx = ((i * 0.29f + 0.1f) % 1f) * w + (float) Math.sin(i + sessionSeconds * 0.2) * dp(20f)
                         + shearVis * (float) ((sessionSeconds * dp(260f) + i * dp(200f)) % w) * 0.4f;
                 float sc = 0.7f + (i % 3) * 0.35f;
-                paint.setColor((cloudA << 24) | 0xFFFFFF);
-                c.drawOval(cx - dp(70f) * sc, cy - dp(12f) * sc, cx + dp(70f) * sc, cy + dp(14f) * sc, paint);
+                // Shaded underside first, then the body, then a sunlit top - warming toward dusk.
+                paint.setColor(((cloudA * 7 / 8) << 24) | 0xA9BACF);
+                c.drawOval(cx - dp(66f) * sc, cy - dp(2f) * sc, cx + dp(66f) * sc, cy + dp(17f) * sc, paint);
+                paint.setColor((cloudA << 24) | (blend(0xFFEEF3F8, 0xFFFFD3B4, space * 4f) & 0xFFFFFF));
+                c.drawOval(cx - dp(70f) * sc, cy - dp(12f) * sc, cx + dp(70f) * sc, cy + dp(12f) * sc, paint);
                 c.drawOval(cx - dp(40f) * sc, cy - dp(30f) * sc, cx + dp(20f) * sc, cy + dp(6f) * sc, paint);
                 c.drawOval(cx - dp(4f) * sc, cy - dp(22f) * sc, cx + dp(46f) * sc, cy + dp(8f) * sc, paint);
+                paint.setColor(((cloudA * 3 / 4) << 24) | 0xFFFFFF);
+                c.drawOval(cx - dp(34f) * sc, cy - dp(28f) * sc, cx + dp(2f) * sc, cy - dp(10f) * sc, paint);
+                c.drawOval(cx + dp(2f) * sc, cy - dp(20f) * sc, cx + dp(34f) * sc, cy - dp(6f) * sc, paint);
             }
         }
         drawAltitudeLife(c, w, h);
@@ -1185,16 +1206,24 @@ final class RocketLaunchGame extends GameView {
         if (shearVis > 0.02f) {
             drawShearWind(c, w, h);
         }
+        drawSpeedStreaks(c, w, h, space);
         if (sessionSeconds < boosterUntil) {
             // The spent stage falls away, tumbling.
             boosterY += dp(160f) * dt;
             boosterSpin += 220f * dt;
             c.save();
             c.rotate(boosterSpin, w * 0.5f + dp(26f), boosterY);
-            paint.setColor(0xFFCFD6DE);
-            c.drawRoundRect(w * 0.5f + dp(18f), boosterY - dp(22f), w * 0.5f + dp(34f), boosterY + dp(22f), dp(4f), dp(4f), paint);
-            paint.setColor(0xFFD8453C);
-            c.drawRect(w * 0.5f + dp(18f), boosterY + dp(12f), w * 0.5f + dp(34f), boosterY + dp(22f), paint);
+            c.translate(w * 0.5f + dp(26f), boosterY);
+            c.scale(0.62f, 1f);   // the rocket's cylinder shaders, narrowed to the booster's 16dp
+            paint.setColor(0xFFFFFFFF);
+            paint.setShader(bodyShader);
+            c.drawRoundRect(-dp(13f), -dp(22f), dp(13f), dp(22f), dp(5f), dp(5f), paint);
+            paint.setShader(redShader);
+            c.drawRect(-dp(13f), dp(12f), dp(13f), dp(22f), paint);
+            paint.setShader(null);
+            paint.setColor(0x50202833);
+            paint.setStrokeWidth(dp(1f));
+            c.drawLine(-dp(13f), -dp(4f), dp(13f), -dp(4f), paint);
             c.restore();
         }
 
@@ -1207,23 +1236,17 @@ final class RocketLaunchGame extends GameView {
         c.save();
         c.rotate(tilt, rx, ry);
         if (plume > 0.05f && !over && !testDone) {
-            float len = dp(20f) + plume * dp(90f);
-            paint.setColor(0xFFFFD36A);
-            path.reset();
-            path.moveTo(rx - dp(11f), ry + dp(30f));
-            path.lineTo(rx + dp(11f), ry + dp(30f));
-            path.lineTo(rx + dp(4f), ry + dp(30f) + len);
-            path.lineTo(rx - dp(4f), ry + dp(30f) + len);
-            path.close();
-            c.drawPath(path, paint);
-            paint.setColor(0xFFFF7A3D);
-            path.reset();
-            path.moveTo(rx - dp(6f), ry + dp(30f));
-            path.lineTo(rx + dp(6f), ry + dp(30f));
-            path.lineTo(rx, ry + dp(30f) + len * 0.62f);
-            path.close();
-            c.drawPath(path, paint);
-            Fx.glow(c, rx, ry + dp(40f), len * 0.8f, 0x55FF9A4D);
+            // Fire: a translucent halo, an orange-yellow flame, a white-hot core and, at full
+            // thrust, shock diamonds - all stretched by the thrust the physics already computes.
+            float flick = 1f + 0.07f * (float) Math.sin(sessionSeconds * 31.0)
+                    + 0.04f * (float) Math.sin(sessionSeconds * 17.3);
+            float len = (dp(20f) + plume * dp(90f)) * flick;
+            float wide = 0.8f + 0.3f * Math.min(1.4f, plume);
+            float diamonds = Math.max(0f, Math.min(1f, (plume - 0.9f) / 0.3f));
+            // Radius quantised to 8dp steps so the cached glow is reused rather than rebuilt.
+            float gr = Math.max(dp(16f), Math.round(len * 0.8f / dp(8f)) * dp(8f));
+            Fx.glow(c, rx, ry + dp(40f) + len * 0.3f, gr, 0x66FF9A4D);
+            drawFlame(c, rx, ry + dp(39f), len, wide, diamonds);
         }
         boolean fuelFail = over && "OUT OF FUEL".equals(failReason);
         boolean deployed = orbit && campaign() && MISSION_TOL[mission] > 0f && mission != DOCK;
@@ -1238,37 +1261,456 @@ final class RocketLaunchGame extends GameView {
         c.restore();
     }
 
+    /**
+     * The hero: a shaded cylinder lit from the upper left - a highlight stripe, darker edges, panel
+     * lines, a red skirt and nose cap, fins with a visible thickness, and an engine bell. Same
+     * footprint as before (13dp half-width, nose 42dp up), so nothing it lines up with moved.
+     */
     private void drawRocket(Canvas c, float rx, float rocketY, boolean withNose) {
-        paint.setColor(0xFFE6EDF7);
-        path.reset();
-        if (withNose) {
-            path.moveTo(rx, rocketY - dp(40f));
-            path.lineTo(rx + dp(13f), rocketY - dp(4f));
-        } else {
-            // The fairing has opened and the satellite has gone.
-            path.moveTo(rx - dp(13f), rocketY - dp(10f));
-            path.lineTo(rx + dp(13f), rocketY - dp(10f));
+        float r = dp(13f);
+        c.save();
+        c.translate(rx, rocketY);
+        // Side fins sit behind the body; the left one catches the light.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(finShader);
+        c.drawPath(finPath, paint);
+        paint.setShader(null);
+        paint.setColor(0xFF5A1511);
+        c.drawPath(finEdgePath, paint);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x99FFD0C4);
+        c.drawLine(-r + dp(1f), dp(8f), -r - dp(15f), dp(27f), paint);
+        // Engine bell, its lip glowing while it burns.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(bellShader);
+        c.drawPath(bellPath, paint);
+        paint.setShader(null);
+        if (plume > 0.05f && !over && !testDone) {
+            paint.setColor(((int) (Math.min(1f, plume) * 230) << 24) | 0xFFB25A);
+            c.drawRect(-dp(10f), dp(38f), dp(10f), dp(40f), paint);
         }
-        path.lineTo(rx + dp(13f), rocketY + dp(30f));
-        path.lineTo(rx - dp(13f), rocketY + dp(30f));
-        path.lineTo(rx - dp(13f), rocketY - dp(4f));
-        path.close();
-        c.drawPath(path, paint);
-        paint.setColor(0xFFD8453C);
-        path.reset();
-        path.moveTo(rx - dp(13f), rocketY + dp(14f));
-        path.lineTo(rx - dp(26f), rocketY + dp(34f));
-        path.lineTo(rx - dp(13f), rocketY + dp(30f));
-        path.close();
-        c.drawPath(path, paint);
-        path.reset();
-        path.moveTo(rx + dp(13f), rocketY + dp(14f));
-        path.lineTo(rx + dp(26f), rocketY + dp(34f));
-        path.lineTo(rx + dp(13f), rocketY + dp(30f));
-        path.close();
-        c.drawPath(path, paint);
-        paint.setColor(0xFF6FA6D6);
-        c.drawCircle(rx, rocketY - dp(8f), dp(6f), paint);
+        // Body and nose share one horizontal gradient, which is what makes them round.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(bodyShader);
+        c.drawRect(-r, -dp(6f), r, dp(31f), paint);
+        if (withNose) {
+            c.drawPath(nosePath, paint);
+        }
+        paint.setShader(redShader);
+        c.drawRect(-r, dp(22f), r, dp(31f), paint);
+        if (withNose) {
+            c.save();
+            c.clipRect(-r, -dp(44f), r, -dp(31f));
+            c.drawPath(nosePath, paint);
+            c.restore();
+        }
+        paint.setShader(null);
+        // Panel lines and the specular stripe.
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x48202833);
+        c.drawLine(-r, -dp(6f), r, -dp(6f), paint);
+        c.drawLine(-r, dp(13f), r, dp(13f), paint);
+        c.drawLine(-r, dp(22f), r, dp(22f), paint);
+        c.drawLine(r * 0.42f, -dp(6f), r * 0.42f, dp(22f), paint);
+        if (withNose) {
+            c.drawLine(-r * 0.62f, -dp(31f), r * 0.62f, -dp(31f), paint);
+        }
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0xAAFFFFFF);
+        c.drawLine(-r * 0.38f, -dp(4f), -r * 0.38f, dp(20f), paint);
+        if (!withNose) {
+            // The fairing has opened and the satellite has gone: an empty ring on top.
+            paint.setColor(0xFF27303C);
+            c.drawOval(-r, -dp(9f), r, -dp(3f), paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setColor(0xFFC9D1DB);
+            c.drawOval(-r, -dp(9f), r, -dp(3f), paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
+        // Porthole: a dark rim, glass with depth, a glint.
+        paint.setColor(0xFF2E3846);
+        c.drawCircle(0, dp(4f), dp(6.5f), paint);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(glassShader);
+        c.drawCircle(0, dp(4f), dp(5f), paint);
+        paint.setShader(null);
+        paint.setColor(0xCCFFFFFF);
+        c.drawCircle(-dp(1.8f), dp(2.2f), dp(1.4f), paint);
+        // The third fin, edge-on toward you.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(redShader);
+        c.drawRect(-dp(2.2f), dp(16f), dp(2.2f), dp(38f), paint);
+        paint.setShader(null);
+        paint.setColor(0xFF5A1511);
+        c.drawRect(-dp(2.2f), dp(36f), dp(2.2f), dp(38.5f), paint);
+        c.restore();
+    }
+
+    /**
+     * The exhaust in the nozzle's own frame, stretched to {@code len}: a translucent halo, the
+     * flame, a white-hot core, and shock diamonds that come in at full thrust.
+     */
+    private void drawFlame(Canvas c, float x, float y, float len, float wide, float diamonds) {
+        c.save();
+        c.translate(x, y);
+        c.scale(wide, len / flameRef);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(haloShader);
+        c.drawPath(haloPath, paint);
+        paint.setShader(flameShader);
+        c.drawPath(flamePath, paint);
+        paint.setShader(coreShader);
+        c.drawPath(corePath, paint);
+        paint.setShader(null);
+        if (diamonds > 0.02f) {
+            for (int k = 0; k < 4; k++) {
+                float s = 1f - k * 0.17f;
+                int a = (int) (diamonds * (235 - k * 45));
+                c.save();
+                c.translate(0, flameRef * (0.14f + 0.16f * k));
+                c.scale(s * 1.6f, s * 1.25f);
+                paint.setColor(((a / 2) << 24) | 0xFFA040);
+                c.drawPath(diamondPath, paint);
+                c.scale(1f / 1.6f, 1f / 1.25f);
+                paint.setColor((a << 24) | 0xFFFFF4);
+                c.drawPath(diamondPath, paint);
+                c.restore();
+            }
+        }
+        c.restore();
+    }
+
+    /** The launch site: far ridge, treeline, field, apron, launch table and the service tower. */
+    private void drawLaunchSite(Canvas c, float w, float h, float base, float drop) {
+        float groundY = base + drop;
+        float farY = base + drop * 0.55f;
+        float midY = base + drop * 0.8f;
+        // Far ridge, hazed into the sky behind it.
+        paint.setColor(blend(0xFF6C8DA8, skyLow, 0.45f));
+        scenePath.rewind();
+        scenePath.moveTo(0, midY + dp(4f));
+        for (int k = 0; k <= 24; k++) {
+            scenePath.lineTo(w * k / 24f, farY - dp(14f + ((k * 73 + 29) % 34)));
+        }
+        scenePath.lineTo(w, midY + dp(4f));
+        scenePath.close();
+        c.drawPath(scenePath, paint);
+        // Haze pooling at the ridge's foot.
+        paint.setColor(0x22FFFFFF);
+        c.drawRect(0, farY - dp(4f), w, midY, paint);
+        // Treeline, nearer and darker.
+        paint.setColor(blend(0xFF2D5A45, skyLow, 0.18f));
+        float step = dp(22f);
+        int n = (int) (w / step) + 2;
+        scenePath.rewind();
+        scenePath.moveTo(0, groundY + dp(4f));
+        scenePath.lineTo(0, midY - dp(6f));
+        for (int k = 0; k < n; k++) {
+            float th = dp(8f + ((k * 37 + 11) % 15));
+            scenePath.quadTo(k * step + step * 0.5f, midY - dp(6f) - 2f * th, (k + 1) * step, midY - dp(6f));
+        }
+        scenePath.lineTo(n * step, groundY + dp(4f));
+        scenePath.close();
+        c.drawPath(scenePath, paint);
+        if (groundY - dp(180f) > h) {
+            return;   // the tower's beacon is the last thing to leave the frame
+        }
+        if (groundY < h) {
+            // The field: lighter and hazier at the horizon, with furrows closing up as they recede.
+            c.save();
+            c.translate(0, groundY);
+            paint.setColor(0xFFFFFFFF);
+            paint.setShader(groundShader);
+            c.drawRect(0, 0, w, h - groundY + dp(4f), paint);
+            paint.setShader(null);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor(0x24000000);
+            for (int k = 1; k <= 10; k++) {
+                float y = dp(4f) + dp(2.2f) * k * k;
+                if (groundY + y > h) {
+                    break;
+                }
+                c.drawLine(0, y, w, y, paint);
+            }
+            c.restore();
+        }
+
+        float px = w * 0.5f;
+        // Concrete apron in perspective, and the soft shadow of everything standing on it.
+        scenePath.rewind();
+        scenePath.moveTo(px - dp(120f), groundY);
+        scenePath.lineTo(px + dp(120f), groundY);
+        scenePath.lineTo(px + dp(230f), groundY + dp(46f));
+        scenePath.lineTo(px - dp(230f), groundY + dp(46f));
+        scenePath.close();
+        paint.setColor(0xFF7C838C);
+        c.drawPath(scenePath, paint);
+        paint.setColor(0xFF9AA1AA);
+        c.drawRect(px - dp(120f), groundY, px + dp(120f), groundY + dp(2f), paint);
+        paint.setColor(0x50000000);
+        c.drawOval(px - dp(110f), groundY - dp(3f), px + dp(70f), groundY + dp(10f), paint);
+        // Launch table with its flame trench, glowing while the engines run.
+        paint.setColor(0xFF4C515B);
+        c.drawRect(px - dp(44f), groundY - dp(8f), px + dp(44f), groundY + dp(2f), paint);
+        paint.setColor(0xFF858B96);
+        c.drawRect(px - dp(44f), groundY - dp(8f), px + dp(44f), groundY - dp(6f), paint);
+        paint.setColor(0xFF14171C);
+        c.drawRect(px - dp(14f), groundY - dp(6f), px + dp(14f), groundY + dp(2f), paint);
+        if (plume > 0.1f && !over) {
+            Fx.glow(c, px, groundY - dp(4f), dp(60f), ((int) (Math.min(1f, plume) * 120) << 24) | 0xFF9A40);
+        }
+        // Hold-down posts under the fin tips.
+        paint.setColor(0xFF5E646E);
+        c.drawRect(px - dp(30f), groundY - dp(20f), px - dp(22f), groundY - dp(8f), paint);
+        c.drawRect(px + dp(22f), groundY - dp(20f), px + dp(30f), groundY - dp(8f), paint);
+        paint.setColor(0xFF9299A3);
+        c.drawRect(px - dp(30f), groundY - dp(20f), px - dp(28f), groundY - dp(8f), paint);
+        c.drawRect(px + dp(22f), groundY - dp(20f), px + dp(24f), groundY - dp(8f), paint);
+
+        // Service tower: a lit leg and a shadowed leg, cross-bracing, platforms and a mast.
+        float tR = px - dp(46f);
+        float tL = tR - dp(24f);
+        float top = groundY - dp(150f);
+        paint.setStrokeWidth(dp(1.6f));
+        paint.setColor(0xFF9A3A26);
+        for (float ty = top + dp(4f); ty < groundY - dp(12f); ty += dp(16f)) {
+            c.drawLine(tL + dp(2f), ty, tR - dp(2f), ty + dp(16f), paint);
+            c.drawLine(tR - dp(2f), ty, tL + dp(2f), ty + dp(16f), paint);
+        }
+        paint.setColor(0xFFD65C3D);
+        c.drawRect(tL, top, tL + dp(4f), groundY - dp(6f), paint);
+        paint.setColor(0xFF7A2A1C);
+        c.drawRect(tR - dp(4f), top, tR, groundY - dp(6f), paint);
+        paint.setColor(0xFF5E2418);
+        for (int k = 0; k < 3; k++) {
+            float py = top + dp(10f) + k * dp(46f);
+            c.drawRect(tL - dp(4f), py, tR + dp(4f), py + dp(3f), paint);
+        }
+        paint.setColor(0xFFB9C0C8);
+        paint.setStrokeWidth(dp(2f));
+        c.drawLine(tL + dp(12f), top, tL + dp(12f), top - dp(26f), paint);
+        if (((int) (sessionSeconds * 2)) % 2 == 0) {
+            Fx.glow(c, tL + dp(12f), top - dp(28f), dp(14f), 0x88FF3B3B);
+            paint.setColor(0xFFFF3B3B);
+            c.drawCircle(tL + dp(12f), top - dp(28f), dp(3f), paint);
+        }
+        // The crew-access arm, which swings up clear of the rocket at lift-off.
+        float armY = groundY - dp(58f);
+        c.save();
+        c.rotate(-armSwing * 75f, tR, armY);
+        paint.setColor(0xFFB8452F);
+        c.drawRect(tR, armY - dp(3f), px - dp(20f), armY + dp(3f), paint);
+        paint.setColor(0xFF7A2A1C);
+        c.drawRect(tR, armY + dp(1.5f), px - dp(20f), armY + dp(3f), paint);
+        paint.setColor(0xFFE6EDF7);
+        c.drawRect(px - dp(26f), armY - dp(9f), px - dp(14f), armY + dp(3f), paint);
+        paint.setColor(0xFF9AA5B4);
+        c.drawRect(px - dp(26f), armY - dp(9f), px - dp(24f), armY + dp(3f), paint);
+        c.restore();
+    }
+
+    /** Billows rolling out along the ground from the flame trench, warm near the flame. */
+    private void drawPadSmoke(Canvas c, float w, float h, float groundY) {
+        if (padSmoke < 0.02f || groundY > h + dp(120f)) {
+            return;
+        }
+        float px = w * 0.5f;
+        float heat = Math.min(1f, plume);
+        for (int i = 0; i < 16; i++) {
+            float side = (i & 1) == 0 ? -1f : 1f;
+            int k = i >> 1;
+            float hash = ((k * 37 + (i & 1) * 17) % 23) / 23f;
+            float a = (float) ((sessionSeconds / 3.4 + k / 8.0 + (i & 1) * 0.06) % 1.0);
+            float r = dp(12f) + a * dp(48f) * (0.8f + 0.4f * hash);
+            float x = px + side * (dp(24f) + a * dp(240f) * (0.75f + 0.5f * hash));
+            float y = groundY - dp(6f) - a * dp(30f) - hash * a * dp(22f);
+            int alpha = (int) (padSmoke * Math.min(1f, a * 8f) * (1f - a) * 235);
+            if (alpha < 4) {
+                continue;
+            }
+            int body = blend(0xFFE2E5EA, 0xFFFFB474, (1f - a) * (1f - a) * heat * 0.7f);
+            paint.setColor(((alpha * 9 / 10) << 24) | 0x9CA3AD);
+            c.drawCircle(x + r * 0.08f, y + r * 0.2f, r * 0.92f, paint);
+            paint.setColor((alpha << 24) | (body & 0xFFFFFF));
+            c.drawCircle(x, y, r, paint);
+            paint.setColor(((alpha * 7 / 10) << 24) | 0xFFFFFF);
+            c.drawCircle(x - r * 0.28f, y - r * 0.3f, r * 0.5f, paint);
+        }
+    }
+
+    /** Streaks rushing past while the climb is fast, so the speed is felt and not just read. */
+    private void drawSpeedStreaks(Canvas c, float w, float h, float space) {
+        if (!started || over || orbit || docking) {
+            return;
+        }
+        float s = Math.max(0f, Math.min(1f, (velocity - 1.2f) / 3.5f));
+        if (s < 0.03f) {
+            return;
+        }
+        paint.setColor(((int) (s * 80 * (1f - 0.5f * space)) << 24) | 0xFFFFFF);
+        paint.setStrokeWidth(dp(1.5f));
+        float len = dp(30f) + s * dp(70f);
+        for (int i = 0; i < 14; i++) {
+            float x = w * (0.08f + 0.84f * ((i * 0.618f + 0.11f) % 1f));
+            if (Math.abs(x - w * 0.5f) < dp(60f)) {
+                x += dp(140f);   // keep the rocket clear
+            }
+            float speed = dp(700f) + (i % 5) * dp(140f);
+            float y = (float) ((sessionSeconds * speed + i * dp(173f)) % (h + len)) - len;
+            c.drawLine(x, y, x, y + len, paint);
+        }
+    }
+
+    /** The curve of the earth rising from the bottom of the frame once you are in the dark. */
+    private void drawEarthLimb(Canvas c, float w, float h, float space) {
+        if (space < 0.3f) {
+            return;
+        }
+        float f = Math.min(1f, (space - 0.3f) / 0.4f);
+        float top = h - dp(24f) - f * dp(76f);
+        c.save();
+        c.translate(0, top);
+        paint.setColor(0xFFFFFFFF);
+        paint.setAlpha((int) (255 * f));
+        paint.setShader(earthShader);
+        c.drawOval(-w * 0.5f, 0, w * 1.5f, w * 1.4f, paint);
+        paint.setShader(null);
+        // Cloud bands, kept to the middle where the limb is flattest so none pokes past it.
+        paint.setColor(((int) (f * 70) << 24) | 0xFFFFFF);
+        for (int k = 0; k < 4; k++) {
+            float x = w * (0.38f + 0.08f * k) + (float) Math.sin(sessionSeconds * 0.05 + k) * dp(10f);
+            float y = dp(34f + (k % 2) * 18f);
+            c.drawOval(x - dp(56f), y - dp(5f), x + dp(56f), y + dp(5f), paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(12f));
+        paint.setColor(((int) (f * 70) << 24) | 0x5FA8FF);
+        c.drawOval(-w * 0.5f, 0, w * 1.5f, w * 1.4f, paint);
+        paint.setStrokeWidth(dp(3f));
+        paint.setColor(((int) (f * 200) << 24) | 0xBFE6FF);
+        c.drawOval(-w * 0.5f, 0, w * 1.5f, w * 1.4f, paint);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+    }
+
+    /** A rounded HUD panel: vertical gradient, consistent radius, a 1px lighter top edge. */
+    private void drawPanel(Canvas c, int slot, float l, float t, float r, float b, int top, int bottom, int alpha) {
+        if (panelShader[slot] == null || panelTop[slot] != t || panelBot[slot] != b) {
+            panelTop[slot] = t;
+            panelBot[slot] = b;
+            panelShader[slot] = new LinearGradient(0, t, 0, b, top, bottom, Shader.TileMode.CLAMP);
+        }
+        paint.setColor(0xFFFFFFFF);
+        paint.setAlpha(alpha);
+        paint.setShader(panelShader[slot]);
+        c.drawRoundRect(l, t, r, b, dp(10f), dp(10f), paint);
+        paint.setShader(null);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(((alpha * 0x40 / 255) << 24) | 0xFFFFFF);
+        c.drawLine(l + dp(10f), t + dp(0.5f), r - dp(10f), t + dp(0.5f), paint);
+    }
+
+    private static final float[] SKY_AT = {0f, 0.3f, 0.55f, 1f};
+    private static final int[] SKY_TOP = {0xFF2C74C8, 0xFF1C3C88, 0xFF0A1238, 0xFF000207};
+    private static final int[] SKY_MID = {0xFF5CA2E2, 0xFF4E5FA8, 0xFF2A2250, 0xFF02050E};
+    private static final int[] SKY_LOW = {0xFFB6DFF8, 0xFFF29A62, 0xFFA8465A, 0xFF0B1A34};
+
+    /** One band of the sky at altitude share {@code s}: blue, then dusk, then space. */
+    private static int skyStop(int[] cols, float s) {
+        for (int i = 1; i < SKY_AT.length; i++) {
+            if (s <= SKY_AT[i]) {
+                return blend(cols[i - 1], cols[i], (s - SKY_AT[i - 1]) / (SKY_AT[i] - SKY_AT[i - 1]));
+            }
+        }
+        return cols[cols.length - 1];
+    }
+
+    /** Builds every fixed shape and shader once; they are all in dp, so they never need rebuilding. */
+    private void buildArt() {
+        artBuilt = true;
+        float r = dp(13f);
+        nosePath.rewind();
+        nosePath.moveTo(-r, -dp(6f));
+        nosePath.cubicTo(-r, -dp(22f), -dp(6f), -dp(36f), 0, -dp(42f));
+        nosePath.cubicTo(dp(6f), -dp(36f), r, -dp(22f), r, -dp(6f));
+        nosePath.close();
+        finPath.rewind();
+        finEdgePath.rewind();
+        for (int sd = -1; sd <= 1; sd += 2) {
+            finPath.moveTo(sd * (r - dp(1f)), dp(8f));
+            finPath.lineTo(sd * (r + dp(15f)), dp(27f));
+            finPath.lineTo(sd * (r + dp(15f)), dp(38f));
+            finPath.lineTo(sd * (r - dp(1f)), dp(31f));
+            finPath.close();
+            finEdgePath.moveTo(sd * (r - dp(1f)), dp(31f));
+            finEdgePath.lineTo(sd * (r + dp(15f)), dp(38f));
+            finEdgePath.lineTo(sd * (r + dp(15f)), dp(40.5f));
+            finEdgePath.lineTo(sd * (r - dp(1f)), dp(33.5f));
+            finEdgePath.close();
+        }
+        bellPath.rewind();
+        bellPath.moveTo(-dp(6f), dp(30f));
+        bellPath.lineTo(dp(6f), dp(30f));
+        bellPath.quadTo(dp(7f), dp(36f), dp(10f), dp(40f));
+        bellPath.lineTo(-dp(10f), dp(40f));
+        bellPath.quadTo(-dp(7f), dp(36f), -dp(6f), dp(30f));
+        bellPath.close();
+
+        float f = dp(100f);
+        flameRef = f;
+        flamePath.rewind();
+        flamePath.moveTo(-dp(8f), 0);
+        flamePath.cubicTo(-dp(13f), f * 0.18f, -dp(9f), f * 0.62f, 0, f);
+        flamePath.cubicTo(dp(9f), f * 0.62f, dp(13f), f * 0.18f, dp(8f), 0);
+        flamePath.close();
+        haloPath.rewind();
+        haloPath.moveTo(-dp(10f), 0);
+        haloPath.cubicTo(-dp(22f), f * 0.25f, -dp(14f), f * 0.72f, 0, f * 1.1f);
+        haloPath.cubicTo(dp(14f), f * 0.72f, dp(22f), f * 0.25f, dp(10f), 0);
+        haloPath.close();
+        corePath.rewind();
+        corePath.moveTo(-dp(5f), 0);
+        corePath.cubicTo(-dp(6.5f), f * 0.1f, -dp(3.5f), f * 0.32f, 0, f * 0.48f);
+        corePath.cubicTo(dp(3.5f), f * 0.32f, dp(6.5f), f * 0.1f, dp(5f), 0);
+        corePath.close();
+        diamondPath.rewind();
+        diamondPath.moveTo(0, -dp(6f));
+        diamondPath.lineTo(dp(4.5f), 0);
+        diamondPath.lineTo(0, dp(6f));
+        diamondPath.lineTo(-dp(4.5f), 0);
+        diamondPath.close();
+
+        float[] cyl = {0f, 0.18f, 0.32f, 0.56f, 0.82f, 1f};
+        bodyShader = new LinearGradient(-r, 0, r, 0,
+                new int[]{0xFF8B96A5, 0xFFE4EAF1, 0xFFFFFFFF, 0xFFD5DCE5, 0xFF9CA7B5, 0xFF5B6676},
+                cyl, Shader.TileMode.CLAMP);
+        redShader = new LinearGradient(-r, 0, r, 0,
+                new int[]{0xFF9A2A22, 0xFFE0574A, 0xFFF4836F, 0xFFCF443A, 0xFF8E241D, 0xFF5A1511},
+                cyl, Shader.TileMode.CLAMP);
+        finShader = new LinearGradient(-(r + dp(15f)), 0, r + dp(15f), 0,
+                new int[]{0xFFF0705E, 0xFFD8453C, 0xFFB5352D, 0xFF7E211A},
+                new float[]{0f, 0.3f, 0.65f, 1f}, Shader.TileMode.CLAMP);
+        bellShader = new LinearGradient(-dp(10f), 0, dp(10f), 0,
+                new int[]{0xFF3A3F48, 0xFF8E95A0, 0xFFBFC6CF, 0xFF5A606A, 0xFF22262C},
+                new float[]{0f, 0.24f, 0.36f, 0.7f, 1f}, Shader.TileMode.CLAMP);
+        flameShader = new LinearGradient(0, 0, 0, f,
+                new int[]{0xFFFFF6D2, 0xFFFFD24C, 0xFFFF8F2A, 0xCCFF5A1C, 0x00FF3A10},
+                new float[]{0f, 0.16f, 0.42f, 0.74f, 1f}, Shader.TileMode.CLAMP);
+        haloShader = new LinearGradient(0, 0, 0, f * 1.1f,
+                new int[]{0x99FFB050, 0x66FF6A20, 0x00FF4A10},
+                new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
+        coreShader = new LinearGradient(0, 0, 0, f * 0.48f,
+                new int[]{0xFFFFFFFF, 0xF0FFFBE8, 0x00FFF2C0},
+                new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP);
+        glassShader = new RadialGradient(-dp(1.8f), dp(2.2f), dp(6f),
+                new int[]{0xFFD6F1FF, 0xFF5B97D2, 0xFF1A3150},
+                new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP);
+        groundShader = new LinearGradient(0, 0, 0, dp(360f),
+                new int[]{0xFF6FA460, 0xFF4A8A42, 0xFF2D6331, 0xFF1A4122},
+                new float[]{0f, 0.08f, 0.45f, 1f}, Shader.TileMode.CLAMP);
+        earthShader = new LinearGradient(0, 0, 0, dp(150f),
+                new int[]{0xFF6FB0E8, 0xFF2A64A8, 0xFF0E2A55},
+                new float[]{0f, 0.22f, 1f}, Shader.TileMode.CLAMP);
     }
 
     /** After insertion the satellite leaves the fairing and unfolds its panels along the orbit. */
@@ -1401,6 +1843,7 @@ final class RocketLaunchGame extends GameView {
     private void drawAscentHud(Canvas c, float w, float h, int watts) {
         float cx = w * 0.30f;
         float by = h * 0.20f;
+        drawAscentBacking(c, cx, by);
         if (campaign()) {
             label(c, "MISSION " + (mission + 1) + " OF " + MISSIONS + "  ·  " + MISSION_NAME[mission],
                     cx, by - dp(50f), 10f, DIM, Paint.Align.CENTER);
@@ -1538,6 +1981,43 @@ final class RocketLaunchGame extends GameView {
         }
     }
 
+    /**
+     * A panel behind the readout so it reads against a bright sky. Its height follows what the HUD
+     * is showing (the same conditions drawAscentHud uses), and it thins out as the sky goes dark.
+     */
+    private void drawAscentBacking(Canvas c, float cx, float by) {
+        boolean flying = started && !over && !orbit;
+        float top = by - dp(campaign() ? 70f : 52f);
+        float bottom = by + dp(34f);
+        float right = cx + dp(330f);
+        if (campaign()) {
+            bottom = by + dp(78f);
+            if (!started) {
+                bottom = by + dp(146f);
+            }
+            boolean stressShown = (inShear || stress > 0.02f) && flying;
+            if (stressShown) {
+                bottom = Math.max(bottom, by + dp(114f));
+            }
+            float lower = inShear || stress > 0.02f ? dp(116f) : dp(84f);
+            float tol = MISSION_TOL[mission];
+            if (docking) {
+                bottom = Math.max(bottom, by + lower + dp(64f));
+            } else if (tol > 0f && flying && mission != DOCK && altitude > MISSION_TARGET[mission] - tol * 4f) {
+                bottom = Math.max(bottom, by + lower + dp(32f));
+            }
+            if (orbit) {
+                bottom = Math.max(bottom, by + dp(promoted || trailBest ? 178f : 154f));
+            }
+            if (flying && bestTrailN > 0) {
+                right = cx + dp(372f);   // the ghost pill sits out to the right of the altitude
+            }
+        }
+        float space = Math.min(1f, altitude / 80_000f);
+        drawPanel(c, 4, Math.max(dp(8f), cx - dp(330f)), top, right, bottom, 0xB4121C2C, 0x960A111C,
+                (int) (255 * (1f - 0.55f * space)));
+    }
+
     private void drawFuelBar(Canvas c, float cx, float y, float gained, String unit) {
         float bw = dp(360f);
         float l = cx - bw / 2f;
@@ -1551,7 +2031,12 @@ final class RocketLaunchGame extends GameView {
             col = blend(col, 0xFFFFFFFF, (float) fuelFlash);
         }
         paint.setColor(col);
-        c.drawRoundRect(l, y, l + bw * Math.max(0f, Math.min(1f, f)), y + dp(12f), dp(6f), dp(6f), paint);
+        float fr = l + bw * Math.max(0f, Math.min(1f, f));
+        c.drawRoundRect(l, y, fr, y + dp(12f), dp(6f), dp(6f), paint);
+        if (fr - l > dp(12f)) {
+            paint.setColor(0x48FFFFFF);   // gloss along the top of the fill
+            c.drawRoundRect(l + dp(4f), y + dp(2f), fr - dp(4f), y + dp(5f), dp(2f), dp(2f), paint);
+        }
         // 20% and 35% marks: the two- and three-star lines.
         paint.setColor(0xAAFFFFFF);
         c.drawRect(l + bw * 0.20f - dp(1f), y - dp(3f), l + bw * 0.20f + dp(1f), y + dp(15f), paint);
@@ -1961,8 +2446,11 @@ final class RocketLaunchGame extends GameView {
             int lvl = parts.level(i);
             int cost = parts.cost(i);
             boolean afford = parts.canAfford(i);
-            paint.setColor(afford ? 0xF0123A4A : 0xD00B1830);
-            c.drawRoundRect(l, shopT, l + shopW, shopB, dp(10f), dp(10f), paint);
+            if (afford) {
+                drawPanel(c, 3, l, shopT, l + shopW, shopB, 0xF51A4B5C, 0xF00C2632, 255);
+            } else {
+                drawPanel(c, 2, l, shopT, l + shopW, shopB, 0xE6152539, 0xE00A121F, 255);
+            }
             if (afford) {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
@@ -2001,12 +2489,18 @@ final class RocketLaunchGame extends GameView {
         float barY = h - dp(34f);
         float barL = dp(16f);
         float barR = w - dp(60f);
+        paint.setColor(0x44000000);
+        c.drawRoundRect(barL - dp(2f), barY - dp(2f), barR + dp(2f), barY + dp(14f), dp(8f), dp(8f), paint);
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(barL, barY, barR, barY + dp(12f), dp(6f), dp(6f), paint);
         float scaleMax = hover * 2f;
         paint.setColor(fuelOut ? FAINT : watts >= hover ? ACCENT : BAD);
-        c.drawRoundRect(barL, barY, barL + (barR - barL) * Math.min(1f, watts / scaleMax), barY + dp(12f),
-                dp(6f), dp(6f), paint);
+        float fillR = barL + (barR - barL) * Math.min(1f, watts / scaleMax);
+        c.drawRoundRect(barL, barY, fillR, barY + dp(12f), dp(6f), dp(6f), paint);
+        if (fillR - barL > dp(12f)) {
+            paint.setColor(0x40FFFFFF);   // gloss along the top of the fill
+            c.drawRoundRect(barL + dp(4f), barY + dp(2f), fillR - dp(4f), barY + dp(5f), dp(2f), dp(2f), paint);
+        }
         float hoverX = barL + (barR - barL) * (hover / scaleMax);
         paint.setColor(TEXT);
         c.drawRect(hoverX - dp(2f), barY - dp(5f), hoverX + dp(2f), barY + dp(17f), paint);
@@ -2029,8 +2523,11 @@ final class RocketLaunchGame extends GameView {
             cardL[i] = l;
             boolean open = i <= cleared;
             boolean sel = i == mission;
-            paint.setColor(sel ? 0xF0123A4A : 0xD00B1830);
-            c.drawRoundRect(l, cardT, l + cardW, cardB, dp(10f), dp(10f), paint);
+            if (sel) {
+                drawPanel(c, 1, l, cardT, l + cardW, cardB, 0xF51A4B5C, 0xF00C2632, 255);
+            } else {
+                drawPanel(c, 0, l, cardT, l + cardW, cardB, 0xE6152539, 0xE00A121F, 255);
+            }
             if (sel) {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2.5f));
@@ -2187,15 +2684,10 @@ final class RocketLaunchGame extends GameView {
         }
         if (!over) {
             if (plume > 0.05f) {
-                float len = dp(10f) + plume * dp(60f);
-                paint.setColor(0xFFBFE3FF);
-                path.reset();
-                path.moveTo(lx - dp(7f), ly + dp(12f));
-                path.lineTo(lx + dp(7f), ly + dp(12f));
-                path.lineTo(lx, ly + dp(12f) + len);
-                path.close();
-                c.drawPath(path, paint);
+                float len = (dp(10f) + plume * dp(60f))
+                        * (1f + 0.06f * (float) Math.sin(sessionSeconds * 29.0));
                 Fx.glow(c, lx, ly + dp(20f), dp(40f), 0x557FB6FF);
+                drawFlame(c, lx, ly + dp(10f), len, 0.75f, 0f);
             }
             paint.setColor(0xFFD9A93A);   // gold foil descent stage
             c.drawRect(lx - dp(22f), ly - dp(8f), lx + dp(22f), ly + dp(10f), paint);
@@ -2420,8 +2912,10 @@ final class RocketLaunchGame extends GameView {
             smokeX[i] += (float) Math.sin(i + smokeLife[i] * 6) * dp(10f) * dt
                     - shearVis * dp(220f) * dt;   // the shear blows the trail sideways
             float r = dp(8f) + (1f - smokeLife[i]) * dp(34f);
-            int a = (int) (smokeLife[i] * 150 * (1f - space));
-            paint.setColor((Math.max(0, a) << 24) | 0xE6E6EA);
+            int a = Math.max(0, (int) (smokeLife[i] * 150 * (1f - space)));
+            paint.setColor(((a * 3 / 4) << 24) | 0xA4ABB5);   // shaded underside
+            c.drawCircle(smokeX[i] + r * 0.1f, smokeY[i] + r * 0.18f, r * 0.9f, paint);
+            paint.setColor((a << 24) | 0xE6E6EA);
             c.drawCircle(smokeX[i], smokeY[i], r, paint);
         }
     }

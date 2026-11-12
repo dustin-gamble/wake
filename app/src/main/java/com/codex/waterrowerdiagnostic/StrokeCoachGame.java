@@ -3,10 +3,13 @@ package com.codex.waterrowerdiagnostic;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.view.MotionEvent;
 import android.view.ViewConfiguration;
 
@@ -152,6 +155,25 @@ final class StrokeCoachGame extends GameView {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint bitmapPaint = new Paint();
     private final Path path = new Path();
+
+    // 3.25 graphics pass: the glass-instrument look. Every gradient comes from a small cache keyed
+    // by its geometry and colours, so a steady frame allocates nothing.
+    private final Paint fxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF ovalRect = new RectF();
+    private static final int SHADER_SLOTS = 64;
+    private final long[] shaderKeys = new long[SHADER_SLOTS];
+    private final Shader[] shaderCache = new Shader[SHADER_SLOTS];
+    private int shaderCount;
+    private int shaderNext;
+    private static final int GRAD_TWO = 0;
+    private static final int GRAD_THREE = 1;
+    private static final int GRAD_BAND = 2;
+    private static final int GRAD_RADIAL = 3;
+    private static final int PANEL_TOP = 0xFF142030;
+    private static final int PANEL_MID = 0xFF0D1522;
+    private static final int PANEL_BOT = 0xFF0A101A;
+    /** The score bar, eased so a new score slides in rather than jumping. */
+    private float scoreBarShown;
 
     private final float[] best = new float[SHAPE];
     private boolean hasBest;
@@ -1295,10 +1317,7 @@ final class StrokeCoachGame extends GameView {
 
     private void drawRower(Canvas c, float l, float t, float r, float b, float dt) {
         stepFigure(dt);
-        paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
         label(c, "YOUR STROKE, PHASE BY PHASE", l + dp(14f), t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
         String phase = workingPart == 0 ? "LEGS" : workingPart == 1 ? "BACK" : workingPart == 2 ? "ARMS" : "RECOVERY";
         bold(c, phase, r - dp(14f), t + dp(24f), 16f, workingPart == 3 ? BLUE : ACCENT, Paint.Align.RIGHT);
@@ -1318,29 +1337,73 @@ final class StrokeCoachGame extends GameView {
             legE = Math.max(legE, (1f - reachFrac) * 0.6f);
         }
 
-        // Rail, monitor housing and flywheel.
-        paint.setColor(0xFF2A3648);
-        c.drawRect(footX - 6 * u, railY, originX + 220 * u, railY + 5 * u, paint);
-        c.drawRoundRect(originX, railY - 34 * u, originX + 30 * u, railY + 5 * u, 6 * u, 6 * u, paint);
-        paint.setColor(0xFF1B6F6A);
-        float wheelY = railY - 16 * u;
-        c.drawCircle(originX + 15 * u, wheelY, 11 * u, paint);
-        paint.setColor(0xFF35D0BA);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(2 * u);
-        double spin = (sessionSeconds * (status != null ? status.meter.paddleRate : 0) * 0.05) % (Math.PI * 2);
-        c.drawLine(originX + 15 * u, wheelY, originX + 15 * u + (float) Math.cos(spin) * 10 * u,
-                wheelY + (float) Math.sin(spin) * 10 * u, paint);
+        // Floor: a soft contact shadow under the whole machine, two ovals deep.
+        paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x26000000);
+        ovalRect.set(originX - 16 * u, railY - 2 * u, originX + 236 * u, railY + 15 * u);
+        c.drawOval(ovalRect, paint);
+        paint.setColor(0x38000000);
+        ovalRect.set(originX - 4 * u, railY + 1 * u, originX + 224 * u, railY + 11 * u);
+        c.drawOval(ovalRect, paint);
+
+        // Rail: a lit metal beam with a highlight on its top face, on two small feet.
+        float railL = footX - 6 * u;
+        float railR = originX + 220 * u;
+        paint.setColor(0xFF1A2332);
+        c.drawRoundRect(railR - 8 * u, railY + 3 * u, railR - 2 * u, railY + 10 * u, u, u, paint);
+        c.drawRoundRect(railL + 30 * u, railY + 3 * u, railL + 36 * u, railY + 10 * u, u, u, paint);
+        c.drawRoundRect(railL, railY, railR, railY + 5 * u, 2 * u, 2 * u,
+                shaded(gradient(GRAD_TWO, 0, railY, 0, railY + 5 * u, 0xFF55657D, 0xFF1F2939, 0)));
+        unshade();
+        paint.setColor(0x55FFFFFF);
+        c.drawRect(railL + 2 * u, railY + 0.5f * u, railR - 2 * u, railY + 1.3f * u, paint);
+
+        // Tank housing and the water tank, lit from the upper left, with the paddle turning in it.
+        float wheelX = originX + 15 * u;
+        float wheelY = railY - 16 * u;
+        c.drawRoundRect(originX, railY - 34 * u, originX + 30 * u, railY + 5 * u, 6 * u, 6 * u,
+                shaded(gradient(GRAD_TWO, originX, 0, originX + 30 * u, 0, 0xFF3D4B62, 0xFF1C2534, 0)));
+        unshade();
+        c.drawCircle(wheelX, wheelY, 12.5f * u, shaded(gradient(GRAD_RADIAL, wheelX - 4 * u, wheelY - 5 * u,
+                16 * u, 0, 0xFF3FD8C4, 0xFF0C3A40, 0)));
+        unshade();
+        double spin = (sessionSeconds * (status != null ? status.meter.paddleRate : 0) * 0.05) % (Math.PI * 2);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(2 * u);
+        paint.setColor(0xCCE6FFFA);
+        for (int k = 0; k < 2; k++) {
+            double ang = spin + k * Math.PI / 2;
+            float bx = (float) Math.cos(ang) * 9.5f * u;
+            float by = (float) Math.sin(ang) * 9.5f * u;
+            c.drawLine(wheelX - bx, wheelY - by, wheelX + bx, wheelY + by, paint);
+        }
+        paint.setStrokeWidth(2.2f * u);
+        paint.setColor(0xFF6A7A92);
+        c.drawCircle(wheelX, wheelY, 12.5f * u, paint);
+        paint.setStrokeWidth(1.4f * u);
+        paint.setColor(0x80FFFFFF);
+        arcRect.set(wheelX - 10 * u, wheelY - 10 * u, wheelX + 10 * u, wheelY + 10 * u);
+        c.drawArc(arcRect, 200f, 60f, false, paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFE6FFFA);
+        c.drawCircle(wheelX, wheelY, 2 * u, paint);
         // Foot stretcher.
         paint.setColor(0xFF3A475C);
-        c.drawRect(footX - 4 * u, railY - 18 * u, footX + 2 * u, railY, paint);
+        c.drawRoundRect(footX - 4 * u, railY - 18 * u, footX + 2 * u, railY, u, u, paint);
+        paint.setColor(0x40FFFFFF);
+        c.drawRect(footX - 4 * u, railY - 18 * u, footX - 3 * u, railY, paint);
 
         // Seat: near the feet at the catch, far back at the finish.
         float seatX = footX + (46 + 74 * legE) * u;   // legs straighten exactly at the finish
         float seatY = railY - 12 * u;
-        paint.setColor(0xFF9AA5B1);
-        c.drawRoundRect(seatX - 14 * u, seatY + 2 * u, seatX + 14 * u, seatY + 8 * u, 2 * u, 2 * u, paint);
+        paint.setColor(0xFF2A3446);
+        c.drawRoundRect(seatX - 8 * u, seatY + 6 * u, seatX + 8 * u, railY, u, u, paint);
+        c.drawRoundRect(seatX - 14 * u, seatY + 2 * u, seatX + 14 * u, seatY + 8 * u, 2 * u, 2 * u,
+                shaded(gradient(GRAD_TWO, 0, seatY + 2 * u, 0, seatY + 8 * u, 0xFFC4CDD8, 0xFF66717F, 0)));
+        unshade();
         float hipX = seatX;
         float hipY = seatY - 2 * u;
         // Body: forward at the catch (toward the feet), past vertical at the finish.
@@ -1363,35 +1426,70 @@ final class StrokeCoachGame extends GameView {
         float elbowX = jx;
         float elbowY = jy;
 
+        int legColor = workingPart == 0 ? ACCENT : 0xFF4A5670;
+        int torsoColor = workingPart == 1 ? ACCENT : workingPart == 3 ? 0xFF6F8CFF : 0xFF4A5670;
+        int armColor = workingPart == 2 ? ACCENT : 0xFFF1C27D;
+
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
-        // Chain.
-        paint.setStrokeWidth(2 * u);
-        paint.setColor(0x88BFE3FF);
-        c.drawLine(originX + 15 * u, wheelY, handleX, handleY, paint);
-        // Legs.
-        paint.setStrokeWidth(8 * u);
-        paint.setColor(workingPart == 0 ? ACCENT : 0xFF4A5670);
-        c.drawLine(hipX, hipY, kneeX, kneeY, paint);
-        c.drawLine(kneeX, kneeY, footX, footY, paint);
+        // Chain, with a bright core.
+        paint.setStrokeWidth(3 * u);
+        paint.setColor(0x30BFE3FF);
+        c.drawLine(wheelX, wheelY, handleX, handleY, paint);
+        paint.setStrokeWidth(1.4f * u);
+        paint.setColor(0xAABFE3FF);
+        c.drawLine(wheelX, wheelY, handleX, handleY, paint);
+        // The working part glows: a wide faint stroke of the accent under the limb.
+        paint.setColor(ACCENT);
+        paint.setAlpha(46);
+        if (workingPart == 0) {
+            paint.setStrokeWidth(20 * u);
+            c.drawLine(hipX, hipY, kneeX, kneeY, paint);
+            c.drawLine(kneeX, kneeY, footX, footY, paint);
+        } else if (workingPart == 1) {
+            paint.setStrokeWidth(24 * u);
+            c.drawLine(hipX, hipY, shX, shY, paint);
+        } else if (workingPart == 2) {
+            paint.setStrokeWidth(16 * u);
+            c.drawLine(shX, shY, elbowX, elbowY, paint);
+            c.drawLine(elbowX, elbowY, handleX, handleY, paint);
+        }
+        paint.setAlpha(255);
+        // Legs: a dark outline, the colour, and a highlight along the lit upper edge.
+        limb(c, hipX, hipY, kneeX, kneeY, 8 * u, legColor, u);
+        limb(c, kneeX, kneeY, footX, footY, 7 * u, legColor, u);
+        // Shoe on the stretcher.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF1A2230);
+        c.drawRoundRect(footX - 3 * u, footY - 4 * u, footX + 7 * u, footY + 3 * u, 2 * u, 2 * u, paint);
         // Torso.
-        paint.setStrokeWidth(10 * u);
-        paint.setColor(workingPart == 1 ? ACCENT : workingPart == 3 ? 0xFF6F8CFF : 0xFF4A5670);
-        c.drawLine(hipX, hipY, shX, shY, paint);
+        limb(c, hipX, hipY, shX, shY, 11 * u, torsoColor, u);
         // Arms.
-        paint.setStrokeWidth(6 * u);
-        paint.setColor(workingPart == 2 ? ACCENT : 0xFFF1C27D);
-        c.drawLine(shX, shY, elbowX, elbowY, paint);
-        c.drawLine(elbowX, elbowY, handleX, handleY, paint);
-        // Handle.
+        limb(c, shX, shY, elbowX, elbowY, 6 * u, armColor, u);
+        limb(c, elbowX, elbowY, handleX, handleY, 5.5f * u, armColor, u);
+        // Handle: a bright grip with a little glow, the hand closed over it.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
         paint.setStrokeWidth(4 * u);
         paint.setColor(0xFFE6EDF7);
         c.drawLine(handleX, handleY - 5 * u, handleX, handleY + 5 * u, paint);
-        paint.setStyle(Paint.Style.FILL);
         paint.setStrokeCap(Paint.Cap.BUTT);
-        // Head, tipped with the body.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(armColor);
+        c.drawCircle(handleX + 1.5f * u, handleY, 3.2f * u, paint);
+        // Head, tipped with the body: hair at the back, a lit face, a highlight on the crown.
+        float sinL = (float) Math.sin(lean);
+        float cosL = (float) Math.cos(lean);
+        float headX = shX + sinL * 13 * u;
+        float headY = shY - cosL * 13 * u;
+        paint.setColor(0xFF1E2430);
+        c.drawCircle(headX + 0.5f * u, headY + 1.2f * u, 10.5f * u, paint);
+        paint.setColor(0xFF4A2F22);
+        c.drawCircle(headX + 2.2f * u, headY - 1.4f * u, 10 * u, paint);
         paint.setColor(0xFFF1C27D);
-        c.drawCircle(shX + (float) Math.sin(lean) * 13 * u, shY - (float) Math.cos(lean) * 13 * u, 10 * u, paint);
+        c.drawCircle(headX - 1.2f * u, headY + 0.8f * u, 9 * u, paint);
+        paint.setColor(0x55FFFFFF);
+        c.drawCircle(headX - 3.4f * u, headY - 2.4f * u, 2.6f * u, paint);
 
         // Phase legend: the three parts light up in order through the drive.
         float lx = l + dp(14f);
@@ -1414,10 +1512,237 @@ final class StrokeCoachGame extends GameView {
         label(c, name, x, y, 9f, active ? ACCENT : FAINT, Paint.Align.LEFT);
         float bx = x + dp(40f);
         float bw = dp(90f);
-        paint.setColor(0xFF1A2434);
-        c.drawRoundRect(bx, y - dp(8f), bx + bw, y, dp(3f), dp(3f), paint);
-        paint.setColor(active ? ACCENT : 0xFF4A5670);
-        c.drawRoundRect(bx, y - dp(8f), bx + bw * clamp01(value), y, dp(3f), dp(3f), paint);
+        track(c, bx, y - dp(9f), bx + bw, y);
+        float end = bx + bw * clamp01(value);
+        gloss(c, bx, y - dp(9f), end, y, active ? ACCENT : 0xFF4A5670);
+        if (active && end - bx > dp(6f)) {
+            Fx.glow(c, end - dp(3f), y - dp(4.5f), dp(14f), 0x7035D0BA);
+        }
+    }
+
+    /**
+     * One limb of the figure, given form: a dark outline a little wider than the limb, the limb's
+     * colour, and a highlight shifted toward the light (up and to the left).
+     */
+    private void limb(Canvas c, float x0, float y0, float x1, float y1, float width, int color, float u) {
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(width + 2.4f * u);
+        paint.setColor(0xFF0A0F18);
+        c.drawLine(x0, y0, x1, y1, paint);
+        paint.setStrokeWidth(width);
+        paint.setColor(color);
+        c.drawLine(x0, y0, x1, y1, paint);
+        paint.setStrokeWidth(width * 0.32f);
+        paint.setColor(mix(color, 0xFFFFFFFF, 0.45f));
+        paint.setAlpha(150);
+        float ox = -width * 0.18f;
+        float oy = -width * 0.2f;
+        c.drawLine(x0 + ox, y0 + oy, x1 + ox, y1 + oy, paint);
+        paint.setAlpha(255);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /* ---------- the glass-instrument look (3.25 graphics pass) ---------- */
+
+    /**
+     * A cached gradient. Coordinates are rounded to whole pixels for the key, so a panel that sits
+     * still reuses one shader for its whole life; the cache only refills when the layout changes.
+     */
+    private Shader gradient(int kind, float x0, float y0, float x1, float y1, int c0, int c1, int c2) {
+        int ix0 = Math.round(x0);
+        int iy0 = Math.round(y0);
+        int ix1 = Math.round(x1);
+        int iy1 = Math.round(y1);
+        long k = kind + 1;
+        k = k * 1000003L ^ ix0;
+        k = k * 1000003L ^ iy0;
+        k = k * 1000003L ^ ix1;
+        k = k * 1000003L ^ iy1;
+        k = k * 1000003L ^ c0;
+        k = k * 1000003L ^ c1;
+        k = k * 1000003L ^ c2;
+        for (int i = 0; i < shaderCount; i++) {
+            if (shaderKeys[i] == k) {
+                return shaderCache[i];
+            }
+        }
+        Shader s;
+        if (kind == GRAD_THREE) {
+            s = new LinearGradient(ix0, iy0, ix1, iy1, new int[] {c0, c1, c2}, null, Shader.TileMode.CLAMP);
+        } else if (kind == GRAD_BAND) {
+            // Soft-edged band: transparent edge, full centre, transparent edge.
+            s = new LinearGradient(ix0, iy0, ix1, iy1, new int[] {c0, c1, c1, c0},
+                    new float[] {0f, 0.34f, 0.66f, 1f}, Shader.TileMode.CLAMP);
+        } else if (kind == GRAD_RADIAL) {
+            s = new RadialGradient(ix0, iy0, Math.max(1, ix1), c0, c1, Shader.TileMode.CLAMP);
+        } else {
+            s = new LinearGradient(ix0, iy0, ix1, iy1, c0, c1, Shader.TileMode.CLAMP);
+        }
+        int slot;
+        if (shaderCount < SHADER_SLOTS) {
+            slot = shaderCount++;
+        } else {
+            slot = shaderNext;
+            shaderNext = (shaderNext + 1) % SHADER_SLOTS;
+        }
+        shaderKeys[slot] = k;
+        shaderCache[slot] = s;
+        return s;
+    }
+
+    /** fxPaint ready to fill with {@code s}: opaque white first, or the shader draws at a stale alpha. */
+    private Paint shaded(Shader s) {
+        fxPaint.setStyle(Paint.Style.FILL);
+        fxPaint.setColor(0xFFFFFFFF);
+        fxPaint.setShader(s);
+        return fxPaint;
+    }
+
+    private void unshade() {
+        fxPaint.setShader(null);
+    }
+
+    /**
+     * A dark glass panel: a soft drop shadow, a top-lit vertical gradient, a hairline rim and a
+     * brighter 1px top edge where the light catches it. Every card on this screen uses it.
+     */
+    private void glass(Canvas c, float l, float t, float r, float b, float rad) {
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x50000000);
+        c.drawRoundRect(l + dp(1f), t + dp(4f), r + dp(1f), b + dp(4f), rad, rad, paint);
+        c.drawRoundRect(l, t, r, b, rad, rad,
+                shaded(gradient(GRAD_THREE, 0, t, 0, b, PANEL_TOP, PANEL_MID, PANEL_BOT)));
+        unshade();
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0xFF1C2736);
+        float hw = dp(0.5f);
+        c.drawRoundRect(l + hw, t + hw, r - hw, b - hw, rad, rad, paint);
+        paint.setColor(0x30FFFFFF);
+        c.drawLine(l + rad, t + dp(1f), r - rad, t + dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A recessed bar track: darker than the panel, with a faint lit lower lip. */
+    private void track(Canvas c, float l, float t, float r, float b) {
+        float rad = (b - t) / 2f;
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF070C14);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x16FFFFFF);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A glossy bar fill: the colour, a bright upper sheen and a darker lower half. */
+    private void gloss(Canvas c, float l, float t, float r, float b, int color) {
+        if (r - l < dp(1f)) {
+            return;
+        }
+        float h = b - t;
+        float rad = Math.min(h / 2f, (r - l) / 2f);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(color);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setColor(0x30000000);
+        c.drawRoundRect(l, t + h * 0.55f, r, b, rad, rad, paint);
+        if (r - l > h) {
+            paint.setColor(0x55FFFFFF);
+            c.drawRoundRect(l + rad * 0.6f, t + h * 0.14f, r - rad * 0.6f, t + h * 0.42f,
+                    h * 0.14f, h * 0.14f, paint);
+        }
+    }
+
+    /** A glossy chip: a vertical gradient from a lit top to a deep bottom, with a rim. */
+    private void chip(Canvas c, float l, float t, float r, float b, float rad, int base) {
+        c.drawRoundRect(l, t, r, b, rad, rad, shaded(gradient(GRAD_TWO, 0, t, 0, b,
+                mix(base, 0xFFFFFFFF, 0.10f), mix(base, 0xFF000000, 0.30f), 0)));
+        unshade();
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x1EFFFFFF);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setColor(0x38FFFFFF);
+        c.drawLine(l + rad, t + dp(1f), r - rad, t + dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /**
+     * A line that glows: a wide faint halo, a tighter bloom, the coloured core and a hot near-white
+     * centre. Four strokes of one reused path - no blur filter, which would drop to software.
+     */
+    private void glowStroke(Canvas c, Path p, int color, float core) {
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeJoin(Paint.Join.ROUND);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setColor(color);
+        paint.setAlpha(26);
+        paint.setStrokeWidth(core * 4.4f);
+        c.drawPath(p, paint);
+        paint.setAlpha(60);
+        paint.setStrokeWidth(core * 2.3f);
+        c.drawPath(p, paint);
+        paint.setAlpha(255);
+        paint.setStrokeWidth(core);
+        c.drawPath(p, paint);
+        paint.setColor(mix(color, 0xFFFFFFFF, 0.65f));
+        paint.setAlpha(190);
+        paint.setStrokeWidth(Math.max(dp(1f), core * 0.32f));
+        c.drawPath(p, paint);
+        paint.setAlpha(255);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A lit dot: halo, body, and a small specular highlight up and to the left. */
+    private void litDot(Canvas c, float x, float y, float rad, int color) {
+        Fx.glow(c, x, y, rad * 2.4f, (color & 0x00FFFFFF) | 0x60000000);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(color);
+        c.drawCircle(x, y, rad, paint);
+        paint.setColor(0x40000000);
+        c.drawCircle(x + rad * 0.18f, y + rad * 0.22f, rad * 0.78f, paint);
+        paint.setColor(color);
+        c.drawCircle(x - rad * 0.06f, y - rad * 0.06f, rad * 0.8f, paint);
+        paint.setColor(0xB0FFFFFF);
+        c.drawCircle(x - rad * 0.32f, y - rad * 0.34f, rad * 0.26f, paint);
+    }
+
+    /** The size {@link #label} and {@link #bold} actually draw at - GameView's curve, mirrored. */
+    private static float shownDp(float sizeDp) {
+        float scale;
+        if (sizeDp <= 10f) {
+            scale = 1.35f;
+        } else if (sizeDp >= 30f) {
+            scale = 1.08f;
+        } else {
+            scale = 1.35f + (1.08f - 1.35f) * ((sizeDp - 10f) / 20f);
+        }
+        return sizeDp * scale;
+    }
+
+    /** Width of {@code s} as {@link #label} draws it. */
+    private float labelWidth(String s, float sizeDp) {
+        dimPaint.setTextSize(dp(shownDp(sizeDp)));
+        dimPaint.setFakeBoldText(false);
+        return dimPaint.measureText(s);
+    }
+
+    /** Width of {@code s} as {@link #bold} draws it. */
+    private float boldWidth(String s, float sizeDp) {
+        textPaint.setTextSize(dp(shownDp(sizeDp)));
+        return textPaint.measureText(s);
     }
 
     /* ---------- render ---------- */
@@ -1432,8 +1757,11 @@ final class StrokeCoachGame extends GameView {
         paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
         paint.setAlpha(255);
-        paint.setColor(0xFF070D16);
-        c.drawRect(0, 0, w, h, paint);
+        // Deep backdrop: a top-lit gradient and two faint pools of light behind the glass panels.
+        c.drawRect(0, 0, w, h, shaded(gradient(GRAD_THREE, 0, 0, 0, h, 0xFF0B1422, 0xFF070D16, 0xFF04080E)));
+        unshade();
+        Fx.glow(c, w * 0.28f, h * 0.10f, w * 0.42f, 0x1035D0BA);
+        Fx.glow(c, w * 0.82f, h * 0.88f, w * 0.36f, 0x106F8CFF);
 
         float pad = dp(20f);
         float gapX = dp(14f);
@@ -1457,13 +1785,18 @@ final class StrokeCoachGame extends GameView {
         // Row A right: score, tip, metrics.
         float rx = leftEnd + dp(24f);
         float right = w - pad;
-        bold(c, strokes > 0 ? String.valueOf(Math.round(lastScore)) : "--", rx, dp(66f), 60f,
-                strokes == 0 ? FAINT : lastScore >= 80 ? ACCENT : lastScore >= 60 ? WARN : BAD, Paint.Align.LEFT);
-        label(c, "STROKE SCORE", rx, dp(86f), 10f, FAINT, Paint.Align.LEFT);
+        drawScore(c, rx, dt);
         drawCue(c, rx + dp(140f), dp(10f), right, dp(124f), dt);
         PulseMeter.Stroke s = status == null ? null : status.meter.lastStroke;
         float col = (right - rx) / 4f;
         float gy = dp(150f);
+        // Hairline dividers between the metric columns, fading out top and bottom.
+        Shader divider = gradient(GRAD_THREE, 0, gy - dp(22f), 0, gy + dp(74f), 0x00FFFFFF, 0x1CFFFFFF, 0x00FFFFFF);
+        for (int i = 1; i < 4; i++) {
+            float dx = rx + i * col - dp(14f);
+            c.drawRect(dx, gy - dp(22f), dx + dp(1f), gy + dp(74f), shaded(divider));
+        }
+        unshade();
         metric(c, rx, gy, strokes > 0 ? Math.round(similarity) + "%" : "--", "SHAPE MATCH");
         metric(c, rx + col, gy, strokes > 0 ? Math.round(consistency) + "%" : "--", "CONSISTENCY");
         metric(c, rx + 2 * col, gy, s != null ? String.format(Locale.US, "1:%.1f", s.driveSeconds > 0 ? s.recoverySeconds / s.driveSeconds : 0) : "--", "RATIO (AIM 1:2)");
@@ -1500,9 +1833,13 @@ final class StrokeCoachGame extends GameView {
             c.rotate(-6f);
             c.scale(pop, pop);
             int colr = stampPassed ? ACCENT : BAD;
+            paint.setShader(null);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(6f));
             paint.setColor(colr);
+            paint.setAlpha((int) (45 * a));
+            paint.setStrokeWidth(dp(20f));
+            c.drawRoundRect(-dp(250f), -dp(60f), dp(250f), dp(50f), dp(16f), dp(16f), paint);
+            paint.setStrokeWidth(dp(6f));
             paint.setAlpha((int) (230 * a));
             c.drawRoundRect(-dp(250f), -dp(60f), dp(250f), dp(50f), dp(16f), dp(16f), paint);
             paint.setStyle(Paint.Style.FILL);
@@ -1518,6 +1855,44 @@ final class StrokeCoachGame extends GameView {
         confetti.step(dt, dp(520f));
         confetti.draw(c);
         drawBadgeBanner(c, w, h, dt);
+    }
+
+    /**
+     * The stroke score on its own glass card. A new score lands with a flourish - it pops, a halo
+     * of its colour flares behind it and the bar underneath slides to the new value - then settles.
+     */
+    private void drawScore(Canvas c, float rx, float dt) {
+        float l = rx - dp(8f);
+        float t = dp(10f);
+        float r = rx + dp(130f);
+        float b = dp(124f);
+        glass(c, l, t, r, b, dp(14f));
+        int color = strokes == 0 ? FAINT : lastScore >= 80 ? ACCENT : lastScore >= 60 ? WARN : BAD;
+        float cx = (l + r) / 2f;
+        float f = strokes > 0 ? latestFlash : 0f;
+        if (strokes > 0) {
+            // A steady low halo always, flaring as the score lands.
+            Fx.glow(c, cx, dp(46f), dp(62f), (color & 0x00FFFFFF) | ((int) (0x28 + 0x70 * f) << 24));
+        }
+        float pop = 1f + 0.22f * f * f;
+        c.save();
+        c.scale(pop, pop, cx, dp(44f));
+        bold(c, strokes > 0 ? String.valueOf(Math.round(lastScore)) : "--", cx, dp(66f), 60f, color,
+                Paint.Align.CENTER);
+        c.restore();
+        label(c, "STROKE SCORE", cx, dp(88f), 10f, FAINT, Paint.Align.CENTER);
+        float target = strokes > 0 ? clamp01(lastScore / 100f) : 0f;
+        scoreBarShown += (target - scoreBarShown) * Math.min(1f, dt * 5f);
+        float bx0 = l + dp(12f);
+        float bx1 = r - dp(12f);
+        track(c, bx0, dp(100f), bx1, dp(110f));
+        if (strokes > 0) {
+            float end = bx0 + (bx1 - bx0) * scoreBarShown;
+            gloss(c, bx0, dp(100f), end, dp(110f), color);
+            if (f > 0f) {
+                Fx.glow(c, end, dp(105f), dp(16f), (color & 0x00FFFFFF) | ((int) (0xA0 * f) << 24));
+            }
+        }
     }
 
     /** A badge landing stops the screen for a moment - it is the reward the drills are for. */
@@ -1536,15 +1911,31 @@ final class StrokeCoachGame extends GameView {
         c.save();
         c.translate(w * 0.5f, h * 0.20f + rise);
         paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xF00B1220);
-        paint.setAlpha((int) (240 * a));
+        paint.setStyle(Paint.Style.STROKE);
+        // Bloom around the card: two wide faint rims of the accent under the sharp one.
+        paint.setColor(ACCENT);
+        paint.setAlpha((int) (40 * a));
+        paint.setStrokeWidth(dp(14f));
         c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), paint);
+        paint.setAlpha((int) (80 * a));
+        paint.setStrokeWidth(dp(7f));
+        c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        fxPaint.setColor(0xFFFFFFFF);
+        fxPaint.setShader(gradient(GRAD_THREE, 0, -dp(52f), 0, dp(52f), 0xFF17283A, 0xFF0C1524, 0xFF08101A));
+        fxPaint.setAlpha((int) (245 * a));
+        c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), fxPaint);
+        unshade();
+        fxPaint.setAlpha(255);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(3f));
         paint.setColor(ACCENT);
         paint.setAlpha((int) (255 * a));
         c.drawRoundRect(-dp(260f), -dp(52f), dp(260f), dp(52f), dp(16f), dp(16f), paint);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x50FFFFFF);
+        paint.setAlpha((int) (0x50 * a));
+        c.drawLine(-dp(244f), -dp(49f), dp(244f), -dp(49f), paint);
         paint.setStyle(Paint.Style.FILL);
         paint.setAlpha(255);
         float spin = (float) Math.sin(sessionSeconds * 3) * 0.12f;
@@ -1558,24 +1949,47 @@ final class StrokeCoachGame extends GameView {
         c.restore();
     }
 
-    /** A medal: a ring, a tick and a couple of rays that turn with {@code shine}. */
+    /**
+     * A medal: a domed disc lit from the upper left, a bright ring, a tick, and rays that turn with
+     * {@code shine}. Drawn at the origin so its gradient is cached by radius - callers that animate
+     * a medal's size scale the canvas instead of passing a changing radius.
+     */
     private void drawBadgeMedal(Canvas c, float cx, float cy, float rad, int color, float shine) {
         Fx.glow(c, cx, cy, rad * 2f, (color & 0x00FFFFFF) | 0x60000000);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF10202E);
-        c.drawCircle(cx, cy, rad, paint);
+        c.save();
+        c.translate(cx, cy);
+        c.drawCircle(0, 0, rad, shaded(gradient(GRAD_RADIAL, -rad * 0.35f, -rad * 0.4f, rad * 1.5f, 0,
+                mix(color, 0xFF0E1C28, 0.62f), 0xFF070E16, 0)));
+        unshade();
+        paint.setShader(null);
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(rad * 0.16f);
+        // Ring with a darker outer lip and a bright inner edge, so it reads as raised metal.
+        paint.setStrokeWidth(rad * 0.2f);
+        paint.setColor(mix(color, 0xFF000000, 0.35f));
+        c.drawCircle(0, 0, rad * 0.86f, paint);
+        paint.setStrokeWidth(rad * 0.12f);
         paint.setColor(color);
-        c.drawCircle(cx, cy, rad * 0.84f, paint);
-        // Tick.
-        paint.setStrokeWidth(rad * 0.18f);
+        c.drawCircle(0, 0, rad * 0.84f, paint);
+        paint.setStrokeWidth(Math.max(dp(1f), rad * 0.05f));
+        paint.setColor(mix(color, 0xFFFFFFFF, 0.6f));
+        arcRect.set(-rad * 0.84f, -rad * 0.84f, rad * 0.84f, rad * 0.84f);
+        c.drawArc(arcRect, 190f, 80f, false, paint);
+        // Tick, with a soft shadow under it.
         paint.setStrokeCap(Paint.Cap.ROUND);
-        c.drawLine(cx - rad * 0.38f, cy + rad * 0.02f, cx - rad * 0.08f, cy + rad * 0.34f, paint);
-        c.drawLine(cx - rad * 0.08f, cy + rad * 0.34f, cx + rad * 0.44f, cy - rad * 0.36f, paint);
+        paint.setStrokeWidth(rad * 0.2f);
+        paint.setColor(0x60000000);
+        c.drawLine(-rad * 0.36f, rad * 0.06f, -rad * 0.06f, rad * 0.38f, paint);
+        c.drawLine(-rad * 0.06f, rad * 0.38f, rad * 0.46f, -rad * 0.32f, paint);
+        paint.setStrokeWidth(rad * 0.18f);
+        paint.setColor(color);
+        c.drawLine(-rad * 0.38f, rad * 0.02f, -rad * 0.08f, rad * 0.34f, paint);
+        c.drawLine(-rad * 0.08f, rad * 0.34f, rad * 0.44f, -rad * 0.36f, paint);
         paint.setStrokeCap(Paint.Cap.BUTT);
+        c.restore();
         if (shine > 0f) {
+            paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setStrokeWidth(rad * 0.1f);
+            paint.setColor(color);
             paint.setAlpha((int) (150 * shine));
             for (int i = 0; i < 4; i++) {
                 double ang = sessionSeconds * 1.2 + i * Math.PI / 2;
@@ -1586,6 +2000,7 @@ final class StrokeCoachGame extends GameView {
                 c.drawLine(x0, y0, x1, y1, paint);
             }
             paint.setAlpha(255);
+            paint.setStrokeCap(Paint.Cap.BUTT);
         }
         paint.setStyle(Paint.Style.FILL);
     }
@@ -1606,15 +2021,19 @@ final class StrokeCoachGame extends GameView {
         float slide = smooth(cueArrive) * dp(26f);
         c.save();
         c.translate(slide, 0);
-        paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
-        // A pulsing edge on the side: the cue is the thing to look at.
+        glass(c, l, t, r, b, dp(14f));
+        // The cue's colour washes in from the left edge, stronger once a fault is fixed.
+        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), shaded(gradient(GRAD_TWO, l, 0, l + (r - l) * 0.6f, 0,
+                (color & 0x00FFFFFF) | (fixed ? 0x34000000 : 0x1C000000), color & 0x00FFFFFF, 0)));
+        unshade();
+        // A pulsing edge on the side: the cue is the thing to look at. A wide faint bar under the
+        // sharp one gives it a glow without a blur.
         float pulse = 0.55f + 0.45f * (float) Math.sin(sessionSeconds * (fixed ? 8 : 2.4));
         paint.setColor(color);
+        paint.setAlpha((int) (30 + 50 * pulse));
+        c.drawRoundRect(l + dp(1f), t + dp(4f), l + dp(14f), b - dp(4f), dp(6f), dp(6f), paint);
         paint.setAlpha((int) (90 + 140 * pulse));
-        c.drawRoundRect(l, t + dp(8f), l + dp(6f), b - dp(8f), dp(3f), dp(3f), paint);
+        c.drawRoundRect(l + dp(2f), t + dp(8f), l + dp(7f), b - dp(8f), dp(3f), dp(3f), paint);
         paint.setAlpha(255);
         float x = l + dp(20f);
         if (fixed) {
@@ -1623,7 +2042,12 @@ final class StrokeCoachGame extends GameView {
             label(c, "Three clean strokes in a row. Next cue as soon as one shows up.",
                     x, t + dp(68f), 11f, DIM, Paint.Align.LEFT);
             float mx = r - dp(44f);
-            drawBadgeMedal(c, mx, (t + b) / 2f, dp(24f) * (1f + 0.12f * pulse), ACCENT, pulse);
+            float my = (t + b) / 2f;
+            float grow = 1f + 0.12f * pulse;
+            c.save();
+            c.scale(grow, grow, mx, my);
+            drawBadgeMedal(c, mx, my, dp(24f), ACCENT, pulse);
+            c.restore();
             label(c, cuesFixed + " fixed this session", x, t + dp(88f), 10f, FAINT, Paint.Align.LEFT);
             c.restore();
             return;
@@ -1642,7 +2066,7 @@ final class StrokeCoachGame extends GameView {
         }
         label(c, "WORK ON THIS", x, t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
         bold(c, CUE_TITLE[cue], x, t + dp(48f), 24f, WARN, Paint.Align.LEFT);
-        wrap(c, CUE_BODY[cue], x, t + dp(70f), r - x - dp(150f), 11f, DIM);
+        wrap(c, CUE_BODY[cue], x, t + dp(70f), r - x - dp(160f), 11f, DIM);
         // The three clean strokes it takes to retire this cue.
         float px = r - dp(120f);
         float py = t + dp(34f);
@@ -1650,10 +2074,11 @@ final class StrokeCoachGame extends GameView {
         for (int i = 0; i < CUE_CLEAN_NEEDED; i++) {
             float cx = px + i * dp(32f);
             if (i < cueClean) {
-                paint.setStyle(Paint.Style.FILL);
-                paint.setColor(ACCENT);
-                c.drawCircle(cx, py, dp(11f), paint);
+                litDot(c, cx, py, dp(11f), ACCENT);
             } else {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xFF070C14);
+                c.drawCircle(cx, py, dp(11f), paint);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
                 paint.setColor(i == cueClean ? WARN : 0xFF3A475C);
@@ -1671,24 +2096,30 @@ final class StrokeCoachGame extends GameView {
         float bx0 = r - dp(130f);
         float bx1 = r - dp(16f);
         float by = t + dp(80f);
-        paint.setColor(0xFF1A2434);
-        c.drawRoundRect(bx0, by, bx1, by + dp(8f), dp(4f), dp(4f), paint);
-        paint.setColor(clamp01(cueSeverity / 60f) > 0.6f ? BAD : WARN);
-        c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(cueSeverity / 60f), by + dp(8f), dp(4f), dp(4f), paint);
+        track(c, bx0, by, bx1, by + dp(8f));
+        gloss(c, bx0, by, bx0 + (bx1 - bx0) * clamp01(cueSeverity / 60f), by + dp(8f),
+                clamp01(cueSeverity / 60f) > 0.6f ? BAD : WARN);
         label(c, "HOW FAR OFF", bx1, by + dp(22f), 9f, FAINT, Paint.Align.RIGHT);
         c.restore();
     }
 
-    /** One replay panel: the curve drawn up to a playhead that sweeps at the drive's real speed. */
+    /**
+     * One replay panel: the curve drawn up to a playhead that sweeps at the drive's real speed.
+     * Drawn as a training display: a recessed chart well with a faint grid, the ideal-peak band
+     * with soft edges, earlier strokes as dim afterglow, and the stroke itself as a glowing line
+     * over a gradient fill, brighter than anything else on the chart.
+     */
     private void drawReplay(Canvas c, float l, float t, float r, float b, boolean isBest) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
         if (!isBest && latestFlash > 0f) {
+            // A new stroke: the panel's rim flares and fades.
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3f));
             paint.setColor(ACCENT);
-            paint.setAlpha((int) (200 * latestFlash));
+            paint.setAlpha((int) (60 * latestFlash));
+            paint.setStrokeWidth(dp(9f));
+            c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+            paint.setAlpha((int) (210 * latestFlash));
+            paint.setStrokeWidth(dp(2.5f));
             c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
             paint.setAlpha(255);
             paint.setStyle(Paint.Style.FILL);
@@ -1714,8 +2145,31 @@ final class StrokeCoachGame extends GameView {
         float cr = r - dp(16f);
         float ct = t + dp(40f);
         float cb = b - dp(30f);
-        paint.setColor(0x1A35D0BA);
-        c.drawRect(cl + (cr - cl) * 0.30f, ct, cl + (cr - cl) * 0.55f, cb, paint);
+        // The chart well: darker glass, recessed below the panel.
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        c.drawRoundRect(cl - dp(6f), ct - dp(6f), cr + dp(6f), cb + dp(2f), dp(8f), dp(8f),
+                shaded(gradient(GRAD_TWO, 0, ct - dp(6f), 0, cb + dp(2f), 0xFF060B13, 0xFF0A121D, 0)));
+        unshade();
+        paint.setColor(0x0FFFFFFF);
+        for (int i = 1; i < 4; i++) {
+            float gy = cb - (cb - ct) * i / 4f;
+            c.drawRect(cl, gy, cr, gy + dp(1f), paint);
+        }
+        for (int i = 1; i < 4; i++) {
+            float gx = cl + (cr - cl) * i / 4f;
+            c.drawRect(gx, ct, gx + dp(1f), cb, paint);
+        }
+        // Ideal peak: a soft-edged column of light rather than a hard box.
+        float bandL = cl + (cr - cl) * 0.30f;
+        float bandR = cl + (cr - cl) * 0.55f;
+        float bandPad = (bandR - bandL) * 0.22f;
+        c.drawRect(bandL - bandPad, ct, bandR + bandPad, cb,
+                shaded(gradient(GRAD_BAND, bandL - bandPad, 0, bandR + bandPad, 0, 0x0035D0BA, 0x2E35D0BA, 0)));
+        unshade();
+        // Baseline.
+        paint.setColor(0x38FFFFFF);
+        c.drawRect(cl, cb - dp(1f), cr, cb, paint);
         label(c, "CATCH", cl, cb + dp(18f), 9f, FAINT, Paint.Align.LEFT);
         label(c, "IDEAL PEAK", cl + (cr - cl) * 0.425f, cb + dp(18f), 9f, ACCENT, Paint.Align.CENTER);
         label(c, "FINISH", cr, cb + dp(18f), 9f, FAINT, Paint.Align.RIGHT);
@@ -1724,29 +2178,65 @@ final class StrokeCoachGame extends GameView {
                     (cl + cr) / 2f, (ct + cb) / 2f, 12f, FAINT, Paint.Align.CENTER);
             return;
         }
-        // On the latest panel, the best stroke and the best session's average shape as outlines:
-        // one lucky stroke and the shape you actually held for a whole piece.
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeJoin(Paint.Join.ROUND);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        if (!isBest) {
+            // The strokes before this one as fading afterglow, so the latest reads against its
+            // own recent history.
+            int ghosts = Math.min(recentCount, 4);
+            for (int k = ghosts - 1; k >= 1; k--) {
+                curvePath(recent[k], cl, ct, cr, cb, 1f);
+                paint.setStrokeWidth(dp(1.5f));
+                paint.setColor(ACCENT);
+                paint.setAlpha(46 - k * 10);
+                c.drawPath(path, paint);
+            }
+            paint.setAlpha(255);
+        }
+        // On the latest panel, the best stroke and the best session's average shape as outlines:
+        // one lucky stroke and the shape you actually held for a whole piece.
+        float legendY = ct + dp(14f);
         if (!isBest && hasBest) {
             curvePath(best, cl, ct, cr, cb, 1f);
-            paint.setStrokeWidth(dp(1.5f));
-            paint.setColor(0x806F8CFF);
+            paint.setStrokeWidth(dp(4f));
+            paint.setColor(0x1A6F8CFF);
             c.drawPath(path, paint);
-            label(c, "best stroke", cl + dp(2f), cb - dp(18f), 8f, BLUE, Paint.Align.LEFT);
+            paint.setStrokeWidth(dp(1.75f));
+            paint.setColor(0x996F8CFF);
+            c.drawPath(path, paint);
         }
         if (!isBest && hasBestSession) {
             curvePath(bestSessionShape, cl, ct, cr, cb, 1f);
-            paint.setStrokeWidth(dp(1.5f));
-            paint.setColor(0x99F0B132);
+            paint.setStrokeWidth(dp(4f));
+            paint.setColor(0x1AF0B132);
             c.drawPath(path, paint);
-            label(c, "best session", cl + dp(2f), cb - dp(6f), 8f, WARN, Paint.Align.LEFT);
+            paint.setStrokeWidth(dp(1.75f));
+            paint.setColor(0xA6F0B132);
+            c.drawPath(path, paint);
         }
-        // Whole curve faint, then the replayed part solid.
+        // Legend in the empty top-left of the chart, each with a swatch of its line.
+        if (!isBest && hasBest) {
+            paint.setStrokeWidth(dp(2.5f));
+            paint.setColor(BLUE);
+            c.drawLine(cl + dp(2f), legendY - dp(4f), cl + dp(16f), legendY - dp(4f), paint);
+            label(c, "best stroke", cl + dp(22f), legendY, 8f, BLUE, Paint.Align.LEFT);
+            legendY += dp(15f);
+        }
+        if (!isBest && hasBestSession) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2.5f));
+            paint.setColor(WARN);
+            c.drawLine(cl + dp(2f), legendY - dp(4f), cl + dp(16f), legendY - dp(4f), paint);
+            label(c, "best session", cl + dp(22f), legendY, 8f, WARN, Paint.Align.LEFT);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        // Whole curve faint, then the replayed part glowing.
         curvePath(curve, cl, ct, cr, cb, 1f);
         paint.setStrokeWidth(dp(2f));
         paint.setColor(color);
-        paint.setAlpha(70);
+        paint.setAlpha(64);
         c.drawPath(path, paint);
         paint.setAlpha(255);
         float f = drive > 0 ? clamp01(replayClock / drive) : 1f;
@@ -1756,23 +2246,24 @@ final class StrokeCoachGame extends GameView {
         path.lineTo(px, cb);
         path.lineTo(cl, cb);
         path.close();
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(color);
-        paint.setAlpha(70);
-        c.drawPath(path, paint);
-        paint.setAlpha(255);
+        // Fill: the stroke's colour pooling under the line and fading toward the baseline.
+        c.drawPath(path, shaded(gradient(GRAD_TWO, 0, ct, 0, cb,
+                (color & 0x00FFFFFF) | 0x70000000, (color & 0x00FFFFFF) | 0x08000000, 0)));
+        unshade();
         curvePath(curve, cl, ct, cr, cb, f);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(4f));
-        c.drawPath(path, paint);
+        glowStroke(c, path, color, dp(3.5f));
+        // Playhead: a column of light that fades out at both ends, and a lit bead on the curve.
+        c.drawRect(px - dp(1f), ct, px + dp(1f), cb,
+                shaded(gradient(GRAD_THREE, 0, ct, 0, cb, 0x00E6EDF7, 0x80E6EDF7, 0x10E6EDF7)));
+        unshade();
+        Fx.glow(c, px, py, dp(26f), (color & 0x00FFFFFF) | 0x70000000);
         paint.setStyle(Paint.Style.FILL);
-        // Playhead.
-        paint.setColor(0x55E6EDF7);
-        c.drawRect(px - dp(1f), ct, px + dp(1f), cb, paint);
         paint.setColor(color);
         c.drawCircle(px, py, dp(8f), paint);
         paint.setColor(0xFFE6EDF7);
-        c.drawCircle(px, py, dp(3.5f), paint);
+        c.drawCircle(px, py, dp(4f), paint);
+        paint.setColor(0xFFFFFFFF);
+        c.drawCircle(px - dp(1.2f), py - dp(1.2f), dp(1.6f), paint);
         bold(c, String.format(Locale.US, "%.2f s", Math.min(replayClock, drive)), cr, ct + dp(20f), 16f,
                 f >= 1f ? color : TEXT, Paint.Align.RIGHT);
     }
@@ -1800,10 +2291,7 @@ final class StrokeCoachGame extends GameView {
      * lucky stroke; the best session is the shape you held for a whole piece.
      */
     private void drawCompare(Canvas c, float l, float t, float r, float b, float dt) {
-        paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
         float x = l + dp(14f);
         if (!hasBestSession) {
             label(c, "TODAY vs BEST SESSION", x, t + dp(18f), 10f, FAINT, Paint.Align.LEFT);
@@ -1817,7 +2305,7 @@ final class StrokeCoachGame extends GameView {
         long ago = todayLocal() - bsDay;
         label(c, "TODAY vs BEST SESSION  ·  " + bsStrokes + " strokes, "
                         + (ago <= 0 ? "today" : ago == 1 ? "yesterday" : ago + " days ago"),
-                x, t + dp(16f), 10f, FAINT, Paint.Align.LEFT);
+                x, t + dp(15f), 10f, FAINT, Paint.Align.LEFT);
         float todayScore = strokes > 0 ? scoreSum / strokes : 0f;
         float todayPower = sessionAvgPower();
         float todayCons = Float.isNaN(sessionConsistency) ? 0f : sessionConsistency;
@@ -1848,44 +2336,50 @@ final class StrokeCoachGame extends GameView {
                 : up ? ACCENT : WARN;
         float bx0 = x;
         float bx1 = x + w - dp(16f);
-        label(c, name, x, t + dp(30f), 9f, FAINT, Paint.Align.LEFT);
-        bold(c, known ? Math.round(now) + (target ? "%" : "") : "--", bx1, t + dp(31f), 17f, color,
+        // Name and figure share a baseline clear of the strip's header line above them.
+        label(c, name, x, t + dp(34f), 9f, FAINT, Paint.Align.LEFT);
+        bold(c, known ? Math.round(now) + (target ? "%" : "") : "--", bx1, t + dp(35f), 17f, color,
                 Paint.Align.RIGHT);
-        float by = t + dp(38f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF1A2434);
-        c.drawRoundRect(bx0, by, bx1, by + dp(7f), dp(3f), dp(3f), paint);
+        float by = t + dp(40f);
+        track(c, bx0, by, bx1, by + dp(7f));
         if (known) {
-            paint.setColor(color);
-            c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(now / scale), by + dp(7f), dp(3f), dp(3f), paint);
+            float end = bx0 + (bx1 - bx0) * clamp01(now / scale);
+            gloss(c, bx0, by, end, by + dp(7f), color);
+            if (end - bx0 > dp(6f)) {
+                Fx.glow(c, end - dp(2f), by + dp(3.5f), dp(12f), (color & 0x00FFFFFF) | 0x50000000);
+            }
         }
         if (!known) {
             // The benchmark is still drawn, so the rower can see what they are chasing.
             if (!target && best > 0) {
-                paint.setColor(0xFFE6EDF7);
-                float mx = bx0 + (bx1 - bx0) * clamp01(best / scale);
-                c.drawRect(mx - dp(1f), by - dp(3f), mx + dp(1f), by + dp(10f), paint);
-                label(c, "best " + Math.round(best), bx1, by + dp(20f), 9f, FAINT, Paint.Align.RIGHT);
+                bestMark(c, bx0 + (bx1 - bx0) * clamp01(best / scale), by - dp(3f), by + dp(10f));
+                label(c, "best " + Math.round(best), bx1, by + dp(18f), 9f, FAINT, Paint.Align.RIGHT);
             }
-            label(c, "a few more strokes", bx0, by + dp(20f), 9f, FAINT, Paint.Align.LEFT);
+            label(c, "a few more strokes", bx0, by + dp(18f), 9f, FAINT, Paint.Align.LEFT);
         } else if (!target && best > 0) {
             // The best session marked on the bar: today either clears it or does not.
-            paint.setColor(0xFFE6EDF7);
-            float mx = bx0 + (bx1 - bx0) * clamp01(best / scale);
-            c.drawRect(mx - dp(1f), by - dp(3f), mx + dp(1f), by + dp(10f), paint);
+            bestMark(c, bx0 + (bx1 - bx0) * clamp01(best / scale), by - dp(3f), by + dp(10f));
             label(c, (up ? "+" : "") + Math.round(now - best) + " on your best",
-                    bx0, by + dp(20f), 9f, up ? ACCENT : DIM, Paint.Align.LEFT);
-            label(c, "best " + Math.round(best), bx1, by + dp(20f), 9f, FAINT, Paint.Align.RIGHT);
+                    bx0, by + dp(18f), 9f, up ? ACCENT : DIM, Paint.Align.LEFT);
+            label(c, "best " + Math.round(best), bx1, by + dp(18f), 9f, FAINT, Paint.Align.RIGHT);
         } else {
-            label(c, "average shape against your best session", bx0, by + dp(20f), 9f, DIM, Paint.Align.LEFT);
+            // Shortened from "average shape against your best session", which ran into the next cell.
+            label(c, "avg shape vs best session", bx0, by + dp(18f), 9f, DIM, Paint.Align.LEFT);
         }
     }
 
-    private void drawTraining(Canvas c, float l, float t, float r, float b, float dt) {
+    /** A benchmark tick on a bar: a bright needle with a dark outline so it reads over any fill. */
+    private void bestMark(Canvas c, float mx, float top, float bottom) {
         paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        paint.setColor(0xC0000000);
+        c.drawRoundRect(mx - dp(2.5f), top - dp(1f), mx + dp(2.5f), bottom + dp(1f), dp(2f), dp(2f), paint);
+        paint.setColor(0xFFE6EDF7);
+        c.drawRoundRect(mx - dp(1.2f), top, mx + dp(1.2f), bottom, dp(1f), dp(1f), paint);
+    }
+
+    private void drawTraining(Canvas c, float l, float t, float r, float b, float dt) {
+        glass(c, l, t, r, b, dp(14f));
         float x = l + dp(14f);
         if (b - t < dp(48f)) {
             // Nothing is drawn, so nothing may be tapped: clear the hit rects rather than leave
@@ -1915,18 +2409,20 @@ final class StrokeCoachGame extends GameView {
                 if (isChallenge && ok) {
                     // The challenge chip breathes, so it reads as the thing to go for.
                     float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 2.2);
-                    paint.setColor(0xFF2A2340);
-                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                    chip(c, cl, ct, cl + cw, cb, dp(10f), 0xFF2E2642);
                     paint.setStyle(Paint.Style.STROKE);
-                    paint.setStrokeWidth(dp(2f));
+                    // A breathing gold rim with a soft bloom under it.
                     paint.setColor(WARN);
+                    paint.setAlpha((int) (20 + 40 * pulse));
+                    paint.setStrokeWidth(dp(7f));
+                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                    paint.setStrokeWidth(dp(2f));
                     paint.setAlpha((int) (110 + 130 * pulse));
                     c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
                     paint.setAlpha(255);
                     paint.setStyle(Paint.Style.FILL);
                 } else {
-                    paint.setColor(ok ? 0xFF16324A : 0xFF121A26);
-                    c.drawRoundRect(cl, ct, cl + cw, cb, dp(10f), dp(10f), paint);
+                    chip(c, cl, ct, cl + cw, cb, dp(10f), ok ? 0xFF183A56 : 0xFF121A26);
                 }
                 bold(c, chipName(i), cl + cw / 2f, ct + dp(26f), 13f,
                         ok ? (isChallenge ? WARN : TEXT) : FAINT, Paint.Align.CENTER);
@@ -1950,8 +2446,7 @@ final class StrokeCoachGame extends GameView {
         stopHit[1] = t + dp(8f);
         stopHit[2] = r - dp(12f);
         stopHit[3] = t + dp(40f);
-        paint.setColor(0xFF3A2230);
-        c.drawRoundRect(stopHit[0], stopHit[1], stopHit[2], stopHit[3], dp(8f), dp(8f), paint);
+        chip(c, stopHit[0], stopHit[1], stopHit[2], stopHit[3], dp(8f), 0xFF44242F);
         bold(c, "STOP", (stopHit[0] + stopHit[2]) / 2f, stopHit[3] - dp(10f), 12f, BAD, Paint.Align.CENTER);
         float pipY = t + dp(62f);
         float pipR = dp(11f);
@@ -1960,10 +2455,15 @@ final class StrokeCoachGame extends GameView {
         for (int i = 0; i < DRILL_STROKES; i++) {
             float px = x + pipR + i * step;
             if (i < drillDone) {
-                paint.setColor(drillResults[i] ? ACCENT : BAD);
                 float grow = i == drillDone - 1 ? 1f + lastJudgeTimer * 0.4f : 1f;
-                c.drawCircle(px, pipY, pipR * grow, paint);
+                c.save();
+                c.scale(grow, grow, px, pipY);
+                litDot(c, px, pipY, pipR, drillResults[i] ? ACCENT : BAD);
+                c.restore();
             } else {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xFF070C14);
+                c.drawCircle(px, pipY, pipR, paint);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
                 // The next stroke pulses: it is the one that counts now.
@@ -2015,8 +2515,7 @@ final class StrokeCoachGame extends GameView {
         stopHit[2] = r - dp(12f);
         stopHit[3] = t + dp(40f);
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF3A2230);
-        c.drawRoundRect(stopHit[0], stopHit[1], stopHit[2], stopHit[3], dp(8f), dp(8f), paint);
+        chip(c, stopHit[0], stopHit[1], stopHit[2], stopHit[3], dp(8f), 0xFF44242F);
         bold(c, "STOP", (stopHit[0] + stopHit[2]) / 2f, stopHit[3] - dp(10f), 12f, BAD, Paint.Align.CENTER);
 
         // The chain: twenty links, the next one pulsing.
@@ -2026,15 +2525,22 @@ final class StrokeCoachGame extends GameView {
         for (int i = 0; i < CHALLENGE_TARGET; i++) {
             float cx = x + rad + i * step;
             if (i < challengeRun) {
-                paint.setStyle(Paint.Style.FILL);
-                float grow = i == challengeRun - 1 ? 1f + challengeFlash * 0.5f : 1f;
-                paint.setColor(ACCENT);
-                c.drawCircle(cx, linkY, rad * grow, paint);
                 if (i > 0) {
+                    // The link to the previous one: a lit bar with a bright core.
                     paint.setStyle(Paint.Style.STROKE);
+                    paint.setColor(ACCENT);
+                    paint.setAlpha(70);
+                    paint.setStrokeWidth(dp(7f));
+                    c.drawLine(cx - step + rad, linkY, cx - rad, linkY, paint);
+                    paint.setAlpha(255);
                     paint.setStrokeWidth(dp(3f));
                     c.drawLine(cx - step + rad, linkY, cx - rad, linkY, paint);
                 }
+                float grow = i == challengeRun - 1 ? 1f + challengeFlash * 0.5f : 1f;
+                c.save();
+                c.scale(grow, grow, cx, linkY);
+                litDot(c, cx, linkY, rad, ACCENT);
+                c.restore();
             } else {
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
@@ -2059,15 +2565,11 @@ final class StrokeCoachGame extends GameView {
         float bx0 = x;
         float bx1 = r - dp(150f);
         float by = t + dp(84f);
-        paint.setColor(0xFF1A2434);
-        c.drawRoundRect(bx0, by, bx1, by + dp(12f), dp(5f), dp(5f), paint);
+        track(c, bx0, by, bx1, by + dp(12f));
         int mc = challengeMatchShown >= CHALLENGE_MATCH ? ACCENT : challengeMatchShown >= 80 ? WARN : BAD;
-        paint.setColor(mc);
-        c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(challengeMatchShown / 100f), by + dp(12f),
-                dp(5f), dp(5f), paint);
+        gloss(c, bx0, by, bx0 + (bx1 - bx0) * clamp01(challengeMatchShown / 100f), by + dp(12f), mc);
         float gate = bx0 + (bx1 - bx0) * (CHALLENGE_MATCH / 100f);
-        paint.setColor(0xFFE6EDF7);
-        c.drawRect(gate - dp(1.5f), by - dp(5f), gate + dp(1.5f), by + dp(17f), paint);
+        bestMark(c, gate, by - dp(5f), by + dp(17f));
         label(c, "LAST STROKE'S SHAPE MATCH  " + Math.round(challengeMatchShown) + "%",
                 bx0, by + dp(28f), 10f, mc, Paint.Align.LEFT);
         label(c, Math.round(CHALLENGE_MATCH) + "%", gate, by + dp(28f), 9f, FAINT, Paint.Align.CENTER);
@@ -2084,10 +2586,18 @@ final class StrokeCoachGame extends GameView {
 
     private void drawBottom(Canvas c, float l, float t, float r, float b, float dt) {
         pageAnim = Math.min(1f, pageAnim + dt * 2f);
-        paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
+        // The page first, then the tabs over it: the map's well now runs the full width and its
+        // top edge passes under the tabs.
+        float ct = t + dp(26f);
+        if (page == PAGE_SKILLS) {
+            badgeUnseen = false;
+            drawSkills(c, l, t, r, b, ct, dt);
+        } else if (page == PAGE_REPORT) {
+            drawReport(c, l, t, r, b, ct, dt);
+        } else {
+            drawMap(c, l, t, r, b, ct);
+        }
         // Tabs, top right.
         float tw = dp(92f);
         float th = dp(24f);
@@ -2099,10 +2609,11 @@ final class StrokeCoachGame extends GameView {
             tabR[i] = tl + tw;
             tabB[i] = tabTop + th;
             boolean on = page == i;
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(on ? 0xFF16324A : 0xFF121A26);
-            c.drawRoundRect(tl, tabTop, tl + tw, tabTop + th, dp(8f), dp(8f), paint);
+            chip(c, tl, tabTop, tl + tw, tabTop + th, dp(8f), on ? 0xFF183A56 : 0xFF121A26);
             if (on) {
+                paint.setColor(0x4035D0BA);
+                c.drawRoundRect(tl + dp(6f), tabTop + th - dp(6f), tl + tw - dp(6f), tabTop + th,
+                        dp(3f), dp(3f), paint);
                 paint.setColor(ACCENT);
                 c.drawRoundRect(tl + dp(10f), tabTop + th - dp(4f), tl + tw - dp(10f), tabTop + th - dp(2f),
                         dp(1f), dp(1f), paint);
@@ -2111,18 +2622,8 @@ final class StrokeCoachGame extends GameView {
             // A dot on SKILLS while a badge is newly earned, so the tab asks to be opened.
             bold(c, name, tl + tw / 2f, tabTop + dp(16f), 11f, on ? TEXT : DIM, Paint.Align.CENTER);
             if (i == PAGE_SKILLS && badgeUnseen) {
-                paint.setColor(ACCENT);
-                c.drawCircle(tl + tw - dp(10f), tabTop + dp(8f), dp(3.5f), paint);
+                litDot(c, tl + tw - dp(10f), tabTop + dp(8f), dp(3.5f), ACCENT);
             }
-        }
-        float ct = t + dp(26f);
-        if (page == PAGE_SKILLS) {
-            badgeUnseen = false;
-            drawSkills(c, l, t, r, b, ct, dt);
-        } else if (page == PAGE_REPORT) {
-            drawReport(c, l, t, r, b, ct, dt);
-        } else {
-            drawMap(c, l, t, r, b, ct);
         }
     }
 
@@ -2177,8 +2678,16 @@ final class StrokeCoachGame extends GameView {
                     continue;
                 }
                 boolean lit = hasBadge(p);
+                if (lit) {
+                    // A lit connector glows: a wide faint pass under the line.
+                    paint.setColor(ACCENT);
+                    paint.setAlpha(40);
+                    paint.setStrokeWidth(dp(7f));
+                    c.drawLine(badgeX[p] + rad, badgeY[p], badgeX[i] - rad, badgeY[i], paint);
+                    paint.setStrokeWidth(dp(2f));
+                }
                 paint.setColor(lit ? ACCENT : 0xFF27324A);
-                paint.setAlpha(lit ? 120 : 90);
+                paint.setAlpha(lit ? 150 : 90);
                 c.drawLine(badgeX[p] + rad, badgeY[p], badgeX[i] - rad, badgeY[i], paint);
                 paint.setAlpha(255);
                 if (lit && !hasBadge(i)) {
@@ -2186,9 +2695,7 @@ final class StrokeCoachGame extends GameView {
                     float f = (float) ((sessionSeconds * 0.55 + i * 0.13 + p * 0.07) % 1.0);
                     float sx = badgeX[p] + rad + (badgeX[i] - rad - badgeX[p] - rad) * f;
                     float sy = badgeY[p] + (badgeY[i] - badgeY[p]) * f;
-                    paint.setStyle(Paint.Style.FILL);
-                    paint.setColor(WARN);
-                    c.drawCircle(sx, sy, dp(3f), paint);
+                    litDot(c, sx, sy, dp(3f), WARN);
                     paint.setStyle(Paint.Style.STROKE);
                     paint.setStrokeWidth(dp(2f));
                 }
@@ -2202,11 +2709,18 @@ final class StrokeCoachGame extends GameView {
             float cy = badgeY[i];
             float pop = 1f + badgeFlash[i] * 0.25f;
             if (earned) {
-                drawBadgeMedal(c, cx, cy, rad * pop, ACCENT, badgeFlash[i] > 0f ? 1f : 0f);
+                c.save();
+                c.scale(pop, pop, cx, cy);
+                drawBadgeMedal(c, cx, cy, rad, ACCENT, badgeFlash[i] > 0f ? 1f : 0f);
+                c.restore();
             } else {
+                if (open) {
+                    Fx.glow(c, cx, cy, rad * 1.8f, 0x30F0B132);
+                }
+                c.drawCircle(cx, cy, rad, shaded(gradient(GRAD_TWO, 0, cy - rad, 0, cy + rad,
+                        0xFF1A2536, 0xFF0A1019, 0)));
+                unshade();
                 paint.setStyle(Paint.Style.FILL);
-                paint.setColor(0xFF121A26);
-                c.drawCircle(cx, cy, rad, paint);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(dp(2f));
                 paint.setColor(open ? WARN : 0xFF33405A);
@@ -2267,11 +2781,13 @@ final class StrokeCoachGame extends GameView {
         float gradeW = dp(190f);
         float overall = weekAvg(week, 1);
         float overallLast = haveLast ? weekAvg(prevWeek, 1) : Float.NaN;
-        paint.setShader(null);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF121A26);
-        c.drawRoundRect(l + dp(14f), bandTop, l + dp(14f) + gradeW, b - dp(10f), dp(12f), dp(12f), paint);
+        chip(c, l + dp(14f), bandTop, l + dp(14f) + gradeW, b - dp(10f), dp(12f), 0xFF141E2E);
         float pop = 1f + (1f - smooth(pageAnim)) * 0.5f;
+        if (overall > 0f) {
+            // The grade sits in a pool of its own colour.
+            Fx.glow(c, l + dp(14f) + gradeW * 0.32f, bandTop + bandH * 0.56f, dp(56f),
+                    (gradeColor(overall) & 0x00FFFFFF) | 0x40000000);
+        }
         c.save();
         c.translate(l + dp(14f) + gradeW * 0.32f, bandTop + bandH * 0.56f);
         c.scale(pop, pop);
@@ -2308,16 +2824,11 @@ final class StrokeCoachGame extends GameView {
             float bx0 = rl + dp(140f);
             float bx1 = rr - dp(150f);
             float by = y - dp(6f);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xFF1A2434);
-            c.drawRoundRect(bx0, by, bx1, by + dp(12f), dp(5f), dp(5f), paint);
-            paint.setColor(gradeColor(now));
-            c.drawRoundRect(bx0, by, bx0 + (bx1 - bx0) * clamp01(reportShown[i] / 100f), by + dp(12f),
-                    dp(5f), dp(5f), paint);
+            track(c, bx0, by, bx1, by + dp(12f));
+            gloss(c, bx0, by, bx0 + (bx1 - bx0) * clamp01(reportShown[i] / 100f), by + dp(12f),
+                    gradeColor(now));
             if (!Float.isNaN(was) && was > 0) {
-                paint.setColor(0xFFE6EDF7);
-                float mx = bx0 + (bx1 - bx0) * clamp01(was / 100f);
-                c.drawRect(mx - dp(1f), by - dp(4f), mx + dp(1f), by + dp(16f), paint);
+                bestMark(c, bx0 + (bx1 - bx0) * clamp01(was / 100f), by - dp(4f), by + dp(16f));
             }
             bold(c, String.valueOf(Math.round(now)), bx1 + dp(34f), y + dp(2f), 15f, TEXT, Paint.Align.RIGHT);
             if (!Float.isNaN(was) && was > 0) {
@@ -2339,13 +2850,24 @@ final class StrokeCoachGame extends GameView {
     }
 
     private void drawLength(Canvas c, float l, float t, float r, float b, float dt) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
         label(c, "DRIVE LENGTH", l + dp(14f), t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
         if (!calibrated()) {
             wrap(c, "Calibrate the handle (CALIBRATE on the home screen) and every drive's length shows here against your reach.",
                     l + dp(14f), t + dp(54f), r - l - dp(28f), 13f, DIM);
+            // A ghosted ruler along the bottom: what this card becomes once the handle is measured.
+            float gx0 = l + dp(14f);
+            float gx1 = r - dp(14f);
+            float gy = b - dp(30f);
+            if (gy > t + dp(120f)) {
+                track(c, gx0, gy, gx1, gy + dp(14f));
+                paint.setColor(0x14FFFFFF);
+                for (int i = 1; i < 20; i++) {
+                    float tx = gx0 + (gx1 - gx0) * i / 20f;
+                    float th = i % 5 == 0 ? dp(14f) : dp(6f);
+                    c.drawRect(tx, gy, tx + dp(1f), gy + th, paint);
+                }
+            }
             return;
         }
         float reach = reachTarget();
@@ -2374,18 +2896,33 @@ final class StrokeCoachGame extends GameView {
         float x1 = r - dp(14f);
         float ry = t + dp(84f);
         float rh = Math.max(dp(16f), Math.min(dp(28f), b - ry - dp(34f)));
-        paint.setColor(0xFF1A2434);
-        c.drawRoundRect(x0, ry, x1, ry + rh, dp(6f), dp(6f), paint);
+        track(c, x0, ry, x1, ry + rh);
+        // Ruler ticks every 10 cm, every 50 cm taller.
+        paint.setColor(0x1CFFFFFF);
+        int tick = 1;
+        for (float m = 0.1f; m < scale && tick < 40; m += 0.1f, tick++) {
+            float tx = x0 + (x1 - x0) * m / scale;
+            float th = tick % 5 == 0 ? rh * 0.5f : rh * 0.25f;
+            c.drawRect(tx, ry + rh - th, tx + dp(1f), ry + rh, paint);
+        }
         if (haveReach) {
-            paint.setColor(0x3335D0BA);
-            c.drawRect(x0 + (x1 - x0) * reach * 0.95f / scale, ry, x0 + (x1 - x0) * Math.min(1f, reach * 1.1f / scale), ry + rh, paint);
-            paint.setColor(ACCENT);
+            // The 95-110% band of light, soft at both ends.
+            float zl = x0 + (x1 - x0) * reach * 0.95f / scale;
+            float zr = x0 + (x1 - x0) * Math.min(1f, reach * 1.1f / scale);
+            float zp = (zr - zl) * 0.3f;
+            c.drawRect(zl - zp, ry, zr + zp, ry + rh,
+                    shaded(gradient(GRAD_BAND, zl - zp, 0, zr + zp, 0, 0x0035D0BA, 0x4435D0BA, 0)));
+            unshade();
             float rxp = x0 + (x1 - x0) * reach / scale;
+            paint.setColor(0x4035D0BA);
+            c.drawRect(rxp - dp(4f), ry - dp(6f), rxp + dp(4f), ry + rh + dp(6f), paint);
+            paint.setColor(ACCENT);
             c.drawRect(rxp - dp(1.5f), ry - dp(6f), rxp + dp(1.5f), ry + rh + dp(6f), paint);
             label(c, "REACH " + Math.round(reach * 100), rxp, ry + rh + dp(18f), 9f, ACCENT, Paint.Align.CENTER);
         }
-        paint.setColor(color);
-        c.drawRoundRect(x0, ry + rh * 0.25f, x0 + (x1 - x0) * clamp01(lengthShown / scale), ry + rh * 0.75f, dp(4f), dp(4f), paint);
+        float lenEnd = x0 + (x1 - x0) * clamp01(lengthShown / scale);
+        gloss(c, x0, ry + rh * 0.25f, lenEnd, ry + rh * 0.75f, color);
+        Fx.glow(c, lenEnd, ry + rh * 0.5f, dp(20f), (color & 0x00FFFFFF) | 0x60000000);
         // The last ten strokes as ticks, older ones fainter.
         int n = Math.min(10, lengthCount);
         for (int k = 0; k < n; k++) {
@@ -2406,17 +2943,19 @@ final class StrokeCoachGame extends GameView {
         label(c, head, l + dp(14f), t + dp(18f), 9f, FAINT, Paint.Align.LEFT);
         String summary = Float.isNaN(sessionConsistency) ? "row 3 strokes"
                 : Math.round(sessionConsistency) + "% consistent over " + mapCount + " strokes";
-        // The tabs now own the top right of this band, so the summary sits left of them. Held to a
-        // share of the width as well as a fixed offset, so a narrower band cannot push it under
-        // the tabs or off the panel.
+        // The tabs own the top right of this band, so the summary sits left of them. Placed after
+        // the header's measured width: at the 3.24 text size the old fixed offset put it on top of
+        // the end of the header line.
         float band = r - l;
-        float sx = l + dp(14f) + Math.min(dp(416f), band * 0.30f);
+        float headEnd = l + dp(14f) + labelWidth(head, 9f) + dp(18f);
+        float sx = Math.max(headEnd, l + dp(14f) + Math.min(dp(416f), band * 0.30f));
         bold(c, summary, sx, t + dp(19f), 12f,
                 Float.isNaN(sessionConsistency) ? FAINT : sessionConsistency >= 75 ? ACCENT : sessionConsistency >= 60 ? WARN : BAD,
                 Paint.Align.LEFT);
         if (!Float.isNaN(bestSessionScore)) {
-            label(c, "best session score " + Math.round(bestSessionScore),
-                    l + dp(14f) + Math.min(dp(686f), band * 0.50f), t + dp(18f), 9f,
+            float bx = Math.max(sx + boldWidth(summary, 12f) + dp(24f),
+                    l + dp(14f) + Math.min(dp(686f), band * 0.50f));
+            label(c, "best session score " + Math.round(bestSessionScore), bx, t + dp(18f), 9f,
                     FAINT, Paint.Align.LEFT);
         }
         float ml = l + dp(14f);
@@ -2425,6 +2964,18 @@ final class StrokeCoachGame extends GameView {
         float mb = b - dp(8f);
         if (mb - mt < dp(10f)) {
             return;
+        }
+        // The well the map sits in, full width, with a faint slot every ten strokes so the empty
+        // part of the band reads as the rest of the session still to fill.
+        int shown = Math.max(mapCount, 60);
+        float colW = (mr - ml) / shown;
+        c.drawRoundRect(ml - dp(4f), mt - dp(3f), mr + dp(4f), mb + dp(3f), dp(6f), dp(6f),
+                shaded(gradient(GRAD_TWO, 0, mt, 0, mb, 0xFF060B13, 0xFF0A121D, 0)));
+        unshade();
+        paint.setColor(0x0CFFFFFF);
+        for (int k = 10; k < shown; k += 10) {
+            float gx = ml + colW * k;
+            c.drawRect(gx, mt, gx + dp(1f), mb, paint);
         }
         if (mapCount == 0) {
             label(c, "Each stroke adds a column. Steady strokes make smooth bands.", (ml + mr) / 2f, (mt + mb) / 2f + dp(4f), 11f, FAINT, Paint.Align.CENTER);
@@ -2439,14 +2990,18 @@ final class StrokeCoachGame extends GameView {
             mapDirty = false;
         }
         // Columns fill from the left; each is at least a few pixels wide until the map is full.
-        int shown = Math.max(mapCount, 60);
-        float colW = (mr - ml) / shown;
         mapSrc.set(0, 0, mapCount, MAP_ROWS);
         mapDst.set(ml, mt, ml + colW * mapCount, mb);
         c.drawBitmap(mapBitmap, mapSrc, mapDst, bitmapPaint);
-        // Newest column marker.
-        paint.setColor(0xCCE6EDF7);
+        // Glass over the map: a sheen on the upper part, so it sits under the panel's surface.
+        c.drawRect(ml, mt, ml + colW * mapCount, mt + (mb - mt) * 0.45f,
+                shaded(gradient(GRAD_TWO, 0, mt, 0, mt + (mb - mt) * 0.45f, 0x22FFFFFF, 0x00FFFFFF, 0)));
+        unshade();
+        // Newest column marker: a lit edge with a bloom.
         float nx = ml + colW * mapCount;
+        paint.setColor(0x30E6EDF7);
+        c.drawRect(nx - dp(3f), mt, nx + dp(5f), mb, paint);
+        paint.setColor(0xE6E6EDF7);
         c.drawRect(nx, mt, nx + dp(2f), mb, paint);
     }
 
@@ -2464,34 +3019,50 @@ final class StrokeCoachGame extends GameView {
             traceHead = (traceHead + 1) % trace.length;
             traceCount = Math.min(trace.length, traceCount + 1);
         }
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF0D1420);
-        c.drawRoundRect(l, t, r, b, dp(14f), dp(14f), paint);
+        glass(c, l, t, r, b, dp(14f));
         label(c, "PADDLE  ·  LAST 15 SECONDS", l + dp(14f), t + dp(20f), 10f, FAINT, Paint.Align.LEFT);
+        float top = t + dp(30f);
+        float bottom = b - dp(14f);
+        float gl = l + dp(14f);
+        float gr = r - dp(14f);
+        // Scope graticule: faint lines every quarter of height and every 2.5 s of time.
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x0EFFFFFF);
+        for (int i = 1; i < 4; i++) {
+            float gy = bottom - (bottom - top) * i / 4f;
+            c.drawRect(gl, gy, gr, gy + dp(1f), paint);
+        }
+        for (int i = 1; i < 6; i++) {
+            float gx = gl + (gr - gl) * i / 6f;
+            c.drawRect(gx, top, gx + dp(1f), bottom, paint);
+        }
+        paint.setColor(0x30FFFFFF);
+        c.drawRect(gl, bottom - dp(1f), gr, bottom, paint);
         if (traceCount < 2 || traceMax <= 1f) {
             return;
         }
-        float top = t + dp(30f);
-        float bottom = b - dp(14f);
         float step = (r - l - dp(28f)) / (trace.length - 1f);
         path.rewind();
-        path.moveTo(l + dp(14f), bottom);
+        path.moveTo(gl, bottom);
+        float headX = gl;
+        float headY = bottom;
         for (int i = 0; i < traceCount; i++) {
             int idx = (traceHead - traceCount + i + trace.length) % trace.length;
-            float x = l + dp(14f) + i * step;
-            path.lineTo(x, bottom - (bottom - top) * Math.min(1f, trace[idx] / traceMax));
+            float x = gl + i * step;
+            float y = bottom - (bottom - top) * Math.min(1f, trace[idx] / traceMax);
+            path.lineTo(x, y);
+            headX = x;
+            headY = y;
         }
-        path.lineTo(l + dp(14f) + (traceCount - 1) * step, bottom);
+        path.lineTo(gl + (traceCount - 1) * step, bottom);
         path.close();
-        paint.setColor(0x3335D0BA);
-        c.drawPath(path, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2.5f));
-        paint.setColor(ACCENT);
+        c.drawPath(path, shaded(gradient(GRAD_TWO, 0, top, 0, bottom, 0x6035D0BA, 0x0635D0BA, 0)));
+        unshade();
         path.rewind();
         for (int i = 0; i < traceCount; i++) {
             int idx = (traceHead - traceCount + i + trace.length) % trace.length;
-            float x = l + dp(14f) + i * step;
+            float x = gl + i * step;
             float y = bottom - (bottom - top) * Math.min(1f, trace[idx] / traceMax);
             if (i == 0) {
                 path.moveTo(x, y);
@@ -2499,8 +3070,14 @@ final class StrokeCoachGame extends GameView {
                 path.lineTo(x, y);
             }
         }
-        c.drawPath(path, paint);
-        paint.setStyle(Paint.Style.FILL);
+        glowStroke(c, path, ACCENT, dp(2.5f));
+        // The oldest seconds fade into the glass, so the trace reads as flowing in from the left.
+        float fade = Math.min(dp(90f), (gr - gl) * 0.12f);
+        c.drawRect(gl - dp(4f), top - dp(4f), gl + fade, bottom + dp(1f),
+                shaded(gradient(GRAD_TWO, gl - dp(4f), 0, gl + fade, 0, 0xF00D1522, 0x000D1522, 0)));
+        unshade();
+        // The pen: where the paddle is right now.
+        litDot(c, headX, headY, dp(5f), ACCENT);
     }
 
     private void metric(Canvas c, float x, float y, String value, String caption) {
@@ -2508,16 +3085,53 @@ final class StrokeCoachGame extends GameView {
         label(c, caption, x, y + dp(16f), 9f, FAINT, Paint.Align.LEFT);
     }
 
+    // Wrapped lines, cached: the cue body, the drill rule and the drive-length note are wrapped
+    // every frame, and splitting and re-measuring them allocated a dozen strings a frame.
+    private static final int WRAP_SLOTS = 6;
+    private final String[] wrapText = new String[WRAP_SLOTS];
+    private final int[] wrapWidth = new int[WRAP_SLOTS];
+    private final float[] wrapSize = new float[WRAP_SLOTS];
+    private final String[][] wrapLines = new String[WRAP_SLOTS][];
+    private int wrapNext;
+
     private void wrap(Canvas c, String text, float x, float y, float width, float sizeDp, int color) {
-        textPaint.setTextSize(dp(sizeDp));
+        int w = Math.round(width);
+        String[] lines = null;
+        for (int i = 0; i < WRAP_SLOTS; i++) {
+            if (wrapLines[i] != null && wrapWidth[i] == w && wrapSize[i] == sizeDp && text.equals(wrapText[i])) {
+                lines = wrapLines[i];
+                break;
+            }
+        }
+        if (lines == null) {
+            lines = wrapLinesFor(text, width, sizeDp);
+            int slot = wrapNext;
+            wrapNext = (wrapNext + 1) % WRAP_SLOTS;
+            wrapText[slot] = text;
+            wrapWidth[slot] = w;
+            wrapSize[slot] = sizeDp;
+            wrapLines[slot] = lines;
+        }
+        float step = dp(shownDp(sizeDp)) * 1.3f;
+        for (int i = 0; i < lines.length; i++) {
+            bold(c, lines[i], x, y + i * step, sizeDp, color, Paint.Align.LEFT);
+        }
+    }
+
+    /**
+     * Splits {@code text} into lines no wider than {@code width}, measured at the size bold()
+     * actually draws (the 3.24 text curve) - measured at the nominal size, lines ran long and
+     * spilled out of their panels, as the cue body and the drive-length note both did.
+     */
+    private String[] wrapLinesFor(String text, float width, float sizeDp) {
+        textPaint.setTextSize(dp(shownDp(sizeDp)));
         String[] words = text.split(" ");
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
         StringBuilder line = new StringBuilder();
-        float ly = y;
         for (String word : words) {
             String trial = line.length() == 0 ? word : line + " " + word;
             if (textPaint.measureText(trial) > width && line.length() > 0) {
-                bold(c, line.toString(), x, ly, sizeDp, color, Paint.Align.LEFT);
-                ly += dp(sizeDp) * 1.35f;
+                out.add(line.toString());
                 line.setLength(0);
                 line.append(word);
             } else {
@@ -2525,6 +3139,7 @@ final class StrokeCoachGame extends GameView {
                 line.append(trial);
             }
         }
-        bold(c, line.toString(), x, ly, sizeDp, color, Paint.Align.LEFT);
+        out.add(line.toString());
+        return out.toArray(new String[0]);
     }
 }

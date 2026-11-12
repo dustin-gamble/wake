@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
@@ -306,6 +307,40 @@ final class ZoneRowGame extends GameView {
     private Shader background;
     private Shader splitGradient;
     private Shader rateGradient;
+
+    /* ---------- 3.25.0 graphics pass: cached shaders and eased display state ---------- */
+
+    /** A soft pool of light at the top of the screen, and the edges darkened, over the background. */
+    private Shader topLight;
+    private Shader edgeShade;
+    private Shader headerPanel;
+    /** Inset shading for a bar's track (dark along the top) and gloss for its fill (light on top). */
+    private Shader splitTrackShade;
+    private Shader splitGloss;
+    private Shader rateTrackShade;
+    private Shader rateGloss;
+    /** Zone dividers and the stats rule fade out at their ends instead of stopping dead. */
+    private Shader dividerFade;
+    private Shader ruleFade;
+    private Shader statsPanel;
+    private Shader pillShade;
+    /** The target quarter's tint, per zone, fading from the labels down to the panels. */
+    private final Shader[] tintShaders = new Shader[4];
+    private Shader stepNow;
+    private Shader stepDone;
+    private Shader stepAhead;
+    private Shader coolButton;
+    private Shader coolButtonAccent;
+    private Shader finishButton;
+    /** Eased target quarter, so the tint slides when the target changes rather than jumping. */
+    private float shownTargetPos = -1f;
+    /** How lit each zone is, eased toward the zone the split is in. */
+    private final float[] zoneLit = new float[4];
+    /** Eased cool-down step, so the rower travels down the stair rather than teleporting. */
+    private float shownCoolStep;
+    private float coolIntro = 1f;
+    private boolean wasCooling;
+    private float wheelSpin;
 
     /** Layout kept from the last frame for touch handling. */
     private float x0;
@@ -1150,7 +1185,16 @@ final class ZoneRowGame extends GameView {
         fill.setColor(0xFFFFFFFF);   // a shader draws at the paint's alpha
         fill.setShader(background);
         c.drawRect(0, 0, w, h, fill);
+        fill.setShader(topLight);
+        c.drawRect(0, 0, w, h, fill);
+        fill.setShader(edgeShade);
+        c.drawRect(0, 0, w, h, fill);
         fill.setShader(null);
+
+        // The header sits on its own panel: a lit top edge, fading down into the screen.
+        rect.set(x0 - dp(24f), dp(16f), x1 + dp(24f), h * 0.172f);
+        shadeRect(c, headerPanel, dp(16f));
+        topEdge(c, dp(16f), 0x30A9C4F0);
 
         drawProgress(c, w);
         drawHeader(c, w, h, x0, x1);
@@ -1160,24 +1204,35 @@ final class ZoneRowGame extends GameView {
         float lanesTop = h * 0.21f;
         float lanesBottom = h * 0.745f;
         int currentZone = shownPace > 0f ? zoneAt(shownSplitFrac) : -1;
+        animate(dt, currentZone);
 
-        // The target quarter is tinted all the way down, so both bars read against it.
-        fill.setColor(ZONE_COLORS[targetZone]);
-        fill.setAlpha(22);
-        c.drawRect(x0 + span * targetZone / 4f, lanesTop, x0 + span * (targetZone + 1) / 4f,
-                lanesBottom, fill);
-        fill.setAlpha(255);
+        // The target quarter is tinted all the way down, so both bars read against it. It fades
+        // toward the panels, and slides across when the target changes.
+        float tintLeft = x0 + span * shownTargetPos / 4f;
+        fill.setColor(0xFFFFFFFF);   // a shader draws at the paint's alpha
+        fill.setShader(tintShaders[targetZone]);
+        c.drawRect(tintLeft, lanesTop, tintLeft + span / 4f, lanesBottom, fill);
+        fill.setShader(null);
 
-        line.setShader(null);
-        line.setColor(DIVIDER);
+        line.setColor(0xFFFFFFFF);
+        line.setShader(dividerFade);
         line.setStrokeWidth(dp(1.5f));
         for (int i = 1; i < 4; i++) {
             float x = x0 + span * i / 4f;
             c.drawLine(x, lanesTop, x, lanesBottom, line);
         }
+        line.setShader(null);
         for (int i = 0; i < 4; i++) {
             float cx = x0 + span * (i + 0.5f) / 4f;
-            int color = i == currentZone ? ZONE_COLORS[i] : 0xFF5D6B80;
+            if (zoneLit[i] > 0.04f) {
+                // The zone the split is in glows behind its name: a wide, flat pool of its colour.
+                c.save();
+                c.translate(cx, h * 0.252f);
+                c.scale(2.1f, 0.62f);
+                Fx.glow(c, 0, 0, dp(74f), ((int) (110 * zoneLit[i]) << 24) | (ZONE_COLORS[i] & 0x00FFFFFF));
+                c.restore();
+            }
+            int color = mix(0xFF5D6B80, ZONE_COLORS[i], zoneLit[i]);
             text(c, ZONES[i], cx, h * 0.265f, h * 0.034f, color, Paint.Align.CENTER,
                     i == currentZone ? numbers : labels, 0.3f);
             if (i == targetZone) {
@@ -1216,6 +1271,125 @@ final class ZoneRowGame extends GameView {
                 new float[]{0f, 0.36f, 0.64f, 1f}, Shader.TileMode.CLAMP);
         rateGradient = new LinearGradient(left, 0, right, 0, 0xFF3A5BD9, 0xFF7FC6EE,
                 Shader.TileMode.CLAMP);
+
+        // Everything below is fixed against the view's height, exactly like the layout it shades.
+        topLight = new RadialGradient(w / 2f, -h * 0.05f, Math.max(w, h) * 0.62f,
+                new int[]{0x2A4A7BC8, 0x0E2A4C86, 0x00000000}, new float[]{0f, 0.45f, 1f},
+                Shader.TileMode.CLAMP);
+        edgeShade = new RadialGradient(w / 2f, h * 0.5f, Math.max(w, h) * 0.72f,
+                new int[]{0x00000000, 0x00000000, 0x70000000}, new float[]{0f, 0.62f, 1f},
+                Shader.TileMode.CLAMP);
+        headerPanel = new LinearGradient(0, dp(16f), 0, h * 0.172f, 0xC0172C4E, 0x700C182B,
+                Shader.TileMode.CLAMP);
+
+        float sTop = h * 0.415f;
+        float sBottom = sTop + h * 0.075f;
+        splitTrackShade = new LinearGradient(0, sTop, 0, sBottom,
+                new int[]{0x80000000, 0x18000000, 0x00000000, 0x14FFFFFF}, new float[]{0f, 0.35f, 0.75f, 1f},
+                Shader.TileMode.CLAMP);
+        splitGloss = new LinearGradient(0, sTop, 0, sBottom,
+                new int[]{0x66FFFFFF, 0x22FFFFFF, 0x00FFFFFF, 0x00000000, 0x38000000},
+                new float[]{0f, 0.38f, 0.5f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+        float rTop = h * 0.585f;
+        float rBottom = rTop + h * 0.05f;
+        rateTrackShade = new LinearGradient(0, rTop, 0, rBottom,
+                new int[]{0x80000000, 0x18000000, 0x00000000, 0x14FFFFFF}, new float[]{0f, 0.35f, 0.75f, 1f},
+                Shader.TileMode.CLAMP);
+        rateGloss = new LinearGradient(0, rTop, 0, rBottom,
+                new int[]{0x60FFFFFF, 0x1EFFFFFF, 0x00FFFFFF, 0x00000000, 0x38000000},
+                new float[]{0f, 0.38f, 0.5f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+
+        float lanesTop = h * 0.21f;
+        float lanesBottom = h * 0.745f;
+        dividerFade = new LinearGradient(0, lanesTop, 0, lanesBottom,
+                new int[]{0x00000000, DIVIDER, DIVIDER, 0x00000000}, new float[]{0f, 0.15f, 0.8f, 1f},
+                Shader.TileMode.CLAMP);
+        for (int z = 0; z < 4; z++) {
+            int rgb = ZONE_COLORS[z] & 0x00FFFFFF;
+            tintShaders[z] = new LinearGradient(0, lanesTop, 0, lanesBottom,
+                    new int[]{0x34000000 | rgb, 0x1E000000 | rgb, 0x14000000 | rgb, 0x00000000 | rgb},
+                    new float[]{0f, 0.3f, 0.75f, 1f}, Shader.TileMode.CLAMP);
+        }
+
+        float rowTop = h * 0.80f;
+        float rowBottom = h * 0.98f;
+        ruleFade = new LinearGradient(left, 0, right, 0,
+                new int[]{0x00000000, DIVIDER, DIVIDER, 0x00000000}, new float[]{0f, 0.12f, 0.88f, 1f},
+                Shader.TileMode.CLAMP);
+        statsPanel = new LinearGradient(0, rowTop, 0, rowBottom, 0x50132644, 0x100A1424,
+                Shader.TileMode.CLAMP);
+        float size = Math.min(rowBottom - rowTop, dp(88f));
+        float cy = (rowTop + rowBottom) / 2f;
+        pillShade = new LinearGradient(0, cy - size / 2f, 0, cy + size / 2f, 0xFF19305A, 0xFF0B1729,
+                Shader.TileMode.CLAMP);
+
+        float topY = h * 0.345f;
+        float floorY = h * 0.486f;
+        stepNow = new LinearGradient(0, topY, 0, floorY, 0xFF5BE6D2, 0xFF1F9C8C, Shader.TileMode.CLAMP);
+        stepDone = new LinearGradient(0, topY, 0, floorY, 0xFF267E74, 0xFF154943, Shader.TileMode.CLAMP);
+        stepAhead = new LinearGradient(0, topY, 0, floorY, 0xFF1A2F52, 0xFF0E1A2E, Shader.TileMode.CLAMP);
+        float btnY = h * 0.505f;
+        float btnH = h * 0.048f;
+        coolButton = new LinearGradient(0, btnY, 0, btnY + btnH, 0xFF19305A, 0xFF0B1729, Shader.TileMode.CLAMP);
+        coolButtonAccent = new LinearGradient(0, btnY, 0, btnY + btnH, 0xFF5BE6D2, 0xFF22A896,
+                Shader.TileMode.CLAMP);
+        float fTop = h * 0.665f;
+        finishButton = new LinearGradient(0, fTop, 0, fTop + h * 0.058f, 0xFF5BE6D2, 0xFF22A896,
+                Shader.TileMode.CLAMP);
+    }
+
+    /** Linear blend of two opaque colours, without allocating. */
+    private static int mix(int a, int b, float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+        return 0xFF000000 | ((int) (ar + (br - ar) * t) << 16) | ((int) (ag + (bg - ag) * t) << 8)
+                | (int) (ab + (bb - ab) * t);
+    }
+
+    /** Fill {@link #rect} with a cached shader, at full paint alpha. */
+    private void shadeRect(Canvas c, Shader s, float radius) {
+        fill.setColor(0xFFFFFFFF);   // a shader draws at the paint's alpha
+        fill.setShader(s);
+        c.drawRoundRect(rect, radius, radius, fill);
+        fill.setShader(null);
+    }
+
+    /** A 1px lighter line along the top of {@link #rect}, inside its corners: the lit edge. */
+    private void topEdge(Canvas c, float radius, int color) {
+        line.setShader(null);
+        line.setColor(color);
+        line.setStrokeWidth(dp(1f));
+        float inset = Math.min(radius, (rect.right - rect.left) / 2f);
+        c.drawLine(rect.left + inset, rect.top + dp(0.5f), rect.right - inset, rect.top + dp(0.5f), line);
+    }
+
+    /** Eases the purely visual state: where the target tint sits, which zone is lit, the stair. */
+    private void animate(float dt, int currentZone) {
+        float k = Math.min(1f, dt * 9f);
+        if (shownTargetPos < 0f) {
+            shownTargetPos = targetZone;
+        }
+        shownTargetPos += (targetZone - shownTargetPos) * k;
+        for (int z = 0; z < 4; z++) {
+            float goal = z == currentZone ? 1f : 0f;
+            zoneLit[z] += (goal - zoneLit[z]) * Math.min(1f, dt * 6f);
+        }
+        if (cooling && !wasCooling) {
+            coolIntro = 0f;
+            shownCoolStep = coolStep;
+        }
+        wasCooling = cooling;
+        coolIntro = Math.min(1f, coolIntro + dt / 0.6f);
+        shownCoolStep += (coolStep - shownCoolStep) * Math.min(1f, dt * 4f);
+        if (Math.abs(coolStep - shownCoolStep) < 0.002f) {
+            shownCoolStep = coolStep;
+        }
+        // The rower's flywheel turns with the real rate while rowing, and spins down when resting.
+        wheelSpin += dt * (isClockRunning() ? 2f + Math.max(0f, shownRate) * 0.35f : 0.6f);
+        if (wheelSpin > 628.3185f) {
+            wheelSpin -= 628.3185f;   // a hundred whole turns, so the wrap is invisible
+        }
     }
 
     private void drawProgress(Canvas c, float w) {
@@ -1331,13 +1505,36 @@ final class ZoneRowGame extends GameView {
         fill.setAlpha(50);
         c.drawRoundRect(rect, radius, radius, fill);
         fill.setAlpha(255);
+        // Sunk into the panel: shaded along the top edge, as if lit from above.
+        fill.setShader(splitTrackShade);
+        c.drawRoundRect(rect, radius, radius, fill);
+        fill.setShader(splitGradient);
         if (fillX > left + 1f) {
             c.save();
             c.clipRect(left, top - dp(2f), fillX, bottom + dp(2f));
             c.drawRoundRect(rect, radius, radius, fill);
+            // Gloss: a lit upper half and a shaded lower edge make the fill read as a rounded tube.
+            fill.setShader(splitGloss);
+            c.drawRoundRect(rect, radius, radius, fill);
             c.restore();
         }
         fill.setShader(null);
+        // Quarter notches, so the bar reads as a scale.
+        line.setShader(null);
+        line.setColor(0x50050D19);
+        line.setStrokeWidth(dp(2f));
+        for (int i = 1; i < 4; i++) {
+            float nx = left + (right - left) * i / 4f;
+            c.drawLine(nx, top + dp(6f), nx, bottom - dp(6f), line);
+        }
+        line.setColor(0x26FFFFFF);
+        line.setStrokeWidth(dp(1f));
+        c.drawRoundRect(rect, radius, radius, line);
+        if (shownPace > 0f && zone >= 0) {
+            // The head of the fill glows in its zone's colour.
+            Fx.glow(c, fillX, (top + bottom) / 2f, (bottom - top) * 1.15f,
+                    0x90000000 | (ZONE_COLORS[zone] & 0x00FFFFFF));
+        }
 
         if (shownLastFrac >= 0f && rescueLeft <= 0f) {
             // The last piece of this length, at the same moment: a hollow post and a tag beneath.
@@ -1366,8 +1563,13 @@ final class ZoneRowGame extends GameView {
         }
 
         if (shownPace > 0f) {
+            // The marker: a dark keyline either side so it reads against any zone colour.
+            fill.setColor(0x80050D19);
+            rect.set(fillX - dp(4f), top - dp(13f), fillX + dp(4f), bottom + dp(13f));
+            c.drawRoundRect(rect, dp(3f), dp(3f), fill);
             fill.setColor(TEXT);
-            c.drawRect(fillX - dp(2f), top - dp(12f), fillX + dp(2f), bottom + dp(12f), fill);
+            rect.set(fillX - dp(2f), top - dp(12f), fillX + dp(2f), bottom + dp(12f));
+            c.drawRoundRect(rect, dp(2f), dp(2f), fill);
         }
 
         if (rescueLeft > 0f) {
@@ -1427,6 +1629,7 @@ final class ZoneRowGame extends GameView {
         rect.set(left, top, right, bottom);
         fill.setColor(TRACK);
         c.drawRoundRect(rect, radius, radius, fill);
+        shadeRect(c, rateTrackShade, radius);
 
         rect.set(left + band[0] * scale, top - dp(7f), left + band[1] * scale, bottom + dp(7f));
         fill.setColor(cooling ? 0x5535D0BA : 0x553A5BD9);
@@ -1435,6 +1638,7 @@ final class ZoneRowGame extends GameView {
         line.setColor(cooling ? 0xAA35D0BA : 0xAA6F8CFF);
         line.setStrokeWidth(dp(1.5f));
         c.drawRoundRect(rect, dp(4f), dp(4f), line);
+        topEdge(c, dp(4f), cooling ? 0x9035D0BA : 0x90A9BCFF);
 
         if (rateX > left + 1f) {
             rect.set(left, top, right, bottom);
@@ -1443,11 +1647,25 @@ final class ZoneRowGame extends GameView {
             c.save();
             c.clipRect(left, top - dp(2f), rateX, bottom + dp(2f));
             c.drawRoundRect(rect, radius, radius, fill);
+            fill.setShader(rateGloss);
+            c.drawRoundRect(rect, radius, radius, fill);
             c.restore();
             fill.setShader(null);
+            if (inBand) {
+                Fx.glow(c, rateX, (top + bottom) / 2f, (bottom - top) * 1.3f, 0x8035D0BA);
+            }
+            fill.setColor(0x80050D19);
+            rect.set(rateX - dp(4f), top - dp(11f), rateX + dp(4f), bottom + dp(11f));
+            c.drawRoundRect(rect, dp(3f), dp(3f), fill);
             fill.setColor(inBand ? ACCENT : TEXT);
-            c.drawRect(rateX - dp(2f), top - dp(10f), rateX + dp(2f), bottom + dp(10f), fill);
+            rect.set(rateX - dp(2f), top - dp(10f), rateX + dp(2f), bottom + dp(10f));
+            c.drawRoundRect(rect, dp(2f), dp(2f), fill);
         }
+        rect.set(left, top, right, bottom);
+        line.setShader(null);
+        line.setColor(0x22FFFFFF);
+        line.setStrokeWidth(dp(1f));
+        c.drawRoundRect(rect, radius, radius, line);
 
         String rate = shownRate >= 1f ? String.format(java.util.Locale.US, "%.1f", shownRate) : "--";
         // Sits below the two panels added in 3.23.0, so the figure clears them at any rate.
@@ -1479,13 +1697,16 @@ final class ZoneRowGame extends GameView {
         rect.set(left, top, right, bottom);
         fill.setColor(TRACK);
         c.drawRoundRect(rect, radius, radius, fill);
+        shadeRect(c, rateTrackShade, radius);
         rect.set(left + (bandLo - lo) * scale, top - dp(7f), left + (bandHi - lo) * scale, bottom + dp(7f));
         fill.setColor(0x55F0655D);
         c.drawRoundRect(rect, dp(4f), dp(4f), fill);
+        topEdge(c, dp(4f), 0x90FFB0A8);
         if (shownHeart > lo) {
             fill.setColor(0xFFF0655D);
             rect.set(left, top, hx, bottom);
             c.drawRoundRect(rect, radius, radius, fill);
+            shadeRect(c, rateGloss, radius);
             fill.setColor(inBand ? ACCENT : TEXT);
             c.drawRect(hx - dp(2f), top - dp(10f), hx + dp(2f), bottom + dp(10f), fill);
         }
@@ -1509,7 +1730,15 @@ final class ZoneRowGame extends GameView {
         float weekLeft = left + width * 0.34f;
         text(c, "WEEK IN ZONE", weekLeft, top + h * 0.021f, h * 0.022f, FAINT, Paint.Align.LEFT,
                 labels, 0.25f);
-        drawWeekZones(c, h, weekLeft + dp(118f), right, top, bottom);
+        // The cells start after the caption as it is actually drawn. A fixed 118dp offset assumed
+        // a narrower caption: at this size and spacing it measures ~200 px on the tablet, and
+        // "WEEK IN ZONE" ran straight into "GLIDE" (seen at y~722 on a 3.24 frame). Neither text
+        // changes size; the four cells give up a little width instead.
+        ink.setTypeface(labels);
+        ink.setTextSize(h * 0.022f);
+        ink.setLetterSpacing(0.25f);
+        float captionRight = weekLeft + ink.measureText("WEEK IN ZONE");
+        drawWeekZones(c, h, Math.max(weekLeft + dp(118f), captionRight + dp(26f)), right, top, bottom);
     }
 
     /**
@@ -1641,6 +1870,9 @@ final class ZoneRowGame extends GameView {
             rect.set(cx, barTop, cr, barTop + barH);
             fill.setColor(TRACK);
             c.drawRoundRect(rect, barH / 2f, barH / 2f, fill);
+            // Sunk track: a darker upper half.
+            fill.setColor(0x40000000);
+            c.drawRect(cx + barH / 2f, barTop, cr - barH / 2f, barTop + barH * 0.4f, fill);
             if (frac > 0.005f) {
                 rect.right = cx + Math.max(barH, (cr - cx) * frac);
                 fill.setColor(ZONE_COLORS[z]);
@@ -1648,8 +1880,20 @@ final class ZoneRowGame extends GameView {
                 fill.setAlpha(z == targetZone ? 255 : 170);
                 c.drawRoundRect(rect, barH / 2f, barH / 2f, fill);
                 fill.setAlpha(255);
+                // A lit line along the top of the fill, so it reads as a rounded bar.
+                if (rect.right - rect.left > barH) {
+                    line.setShader(null);
+                    line.setColor(z == targetZone ? 0x70FFFFFF : 0x40FFFFFF);
+                    line.setStrokeWidth(dp(1.5f));
+                    c.drawLine(rect.left + barH / 2f, barTop + dp(2f), rect.right - barH / 2f, barTop + dp(2f), line);
+                }
+                if (z == targetZone) {
+                    Fx.glow(c, rect.right - barH / 2f, barTop + barH / 2f, dp(16f),
+                            0x70000000 | (ZONE_COLORS[z] & 0x00FFFFFF));
+                }
             }
             if (met) {
+                Fx.glow(c, cr + dp(7f), barTop + barH / 2f, dp(11f), 0x80000000 | (ZONE_COLORS[z] & 0x00FFFFFF));
                 fill.setColor(ZONE_COLORS[z]);
                 c.drawCircle(cr + dp(7f), barTop + barH / 2f, dp(3.5f), fill);
             }
@@ -1747,6 +1991,10 @@ final class ZoneRowGame extends GameView {
                     fill.setColor(slipping ? WARN : color);
                     rect.right = px + pipW * part;
                     c.drawRoundRect(rect, dp(3f), dp(3f), fill);
+                    // Glossy upper half.
+                    fill.setColor(0x38FFFFFF);
+                    c.drawRect(rect.left + dp(2f), rect.top + dp(1f), Math.max(rect.left + dp(2f), rect.right - dp(2f)),
+                            rect.top + pipH * 0.42f, fill);
                 }
             }
             if (lockBreak > 0f) {
@@ -1811,10 +2059,19 @@ final class ZoneRowGame extends GameView {
         float size = Math.min(rowBottom - rowTop, dp(88f));
         float cy = (rowTop + rowBottom) / 2f;
 
-        line.setShader(null);
-        line.setColor(DIVIDER);
+        line.setColor(0xFFFFFFFF);
+        line.setShader(ruleFade);
         line.setStrokeWidth(dp(1f));
         c.drawLine(left, rowTop - dp(6f), right, rowTop - dp(6f), line);
+        line.setShader(null);
+
+        // The figures sit on one long panel between the two buttons, split into columns by faint
+        // rules, with the SPLIT column washed in the colour of the zone it is in.
+        float panelLeft = left + size + dp(14f);
+        float panelRight = right - size - dp(14f);
+        rect.set(panelLeft, rowTop + dp(4f), panelRight, rowBottom - dp(2f));
+        shadeRect(c, statsPanel, dp(16f));
+        topEdge(c, dp(16f), 0x24A9C4F0);
 
         pill(c, left, cy, size, restartHit);
         drawRestartIcon(c, left + size / 2f, cy, size * 0.22f);
@@ -1844,6 +2101,22 @@ final class ZoneRowGame extends GameView {
         float col = (statsRight - statsLeft) / values.length;
         float valueY = cy + h * 0.012f;
         float nameY = valueY + h * 0.045f;
+        line.setShader(null);
+        line.setColor(0x1CA9C4F0);
+        line.setStrokeWidth(dp(1f));
+        for (int i = 1; i < values.length; i++) {
+            float sx = statsLeft + col * i;
+            // Beside the figures only: the captions below run nearly the full column width.
+            c.drawLine(sx, rowTop + dp(22f), sx, nameY - h * 0.03f, line);
+        }
+        if (zone >= 0) {
+            float sx = statsLeft + col * 3.5f;
+            c.save();
+            c.translate(sx, cy);
+            c.scale(1f, 0.62f);
+            Fx.glow(c, 0, 0, col * 0.62f, 0x30000000 | (ZONE_COLORS[zone] & 0x00FFFFFF));
+            c.restore();
+        }
         for (int i = 0; i < values.length; i++) {
             float x = statsLeft + col * (i + 0.5f);
             boolean isSplit = i == 3;
@@ -1871,12 +2144,17 @@ final class ZoneRowGame extends GameView {
     private void pill(Canvas c, float left, float cy, float size, RectF hit) {
         rect.set(left, cy - size / 2f, left + size, cy + size / 2f);
         hit.set(rect.left - dp(12f), rect.top - dp(12f), rect.right + dp(12f), rect.bottom + dp(12f));
-        fill.setColor(PILL);
+        // A soft contact shadow, then a lit button face: lighter at the top, darker at the foot.
+        fill.setColor(0x50000000);
+        rect.offset(0, dp(3f));
         c.drawRoundRect(rect, size * 0.3f, size * 0.3f, fill);
+        rect.offset(0, -dp(3f));
+        shadeRect(c, pillShade, size * 0.3f);
         line.setShader(null);
         line.setColor(PILL_EDGE);
         line.setStrokeWidth(dp(1.5f));
         c.drawRoundRect(rect, size * 0.3f, size * 0.3f, line);
+        topEdge(c, size * 0.3f, 0x40C8DAF5);
     }
 
     private void drawRestartIcon(Canvas c, float cx, float cy, float r) {
@@ -1918,8 +2196,7 @@ final class ZoneRowGame extends GameView {
      * blocks, taller for a harder zone; the top timeline shows them at their true lengths.
      */
     private void drawEditor(Canvas c, float w, float h, float left, float right) {
-        fill.setColor(0xE6050D19);
-        c.drawRect(0, h * 0.18f, w, h * 0.77f, fill);
+        overlayPanel(c, h * 0.18f, h * 0.77f, 0xE6050D19);
         float cx = w / 2f;
         text(c, "TAP A BLOCK TO SELECT IT  ·  TAP IT AGAIN TO CHANGE ZONE", cx, h * 0.235f, h * 0.024f,
                 FAINT, Paint.Align.CENTER, labels, 0.2f);
@@ -2076,8 +2353,7 @@ final class ZoneRowGame extends GameView {
      * screen is covered - the bar, the panels and the figures keep working underneath.
      */
     private void drawCooldown(Canvas c, float w, float h, float left, float right) {
-        fill.setColor(0xF2050D19);
-        c.drawRect(0, h * 0.18f, w, h * 0.578f, fill);
+        overlayPanel(c, h * 0.18f, h * 0.578f, 0xFF071121);
         float cx = w / 2f;
         float target = coolTargetRate(coolStep);
         float[] band = activeRateBand();
@@ -2099,16 +2375,29 @@ final class ZoneRowGame extends GameView {
         float topY = h * 0.345f;
         float dropY = h * 0.036f;
         float floorY = h * 0.486f;
+        // A soft floor shadow under the whole stair, so it stands on something.
+        c.save();
+        c.translate((stairsLeft + stairsRight) / 2f, floorY + dp(4f));
+        c.scale(1f, 0.06f);
+        Fx.glow(c, 0, 0, (stairsRight - stairsLeft) * 0.55f, 0xB0000000);
+        c.restore();
         for (int i = 0; i < COOL_STEPS; i++) {
             float sx = stairsLeft + stepW * i;
-            float sy = topY + dropY * i;
+            // On opening, the steps rise into place one after another.
+            float rise = Math.max(0f, Math.min(1f, coolIntro * 1.6f - i * 0.3f));
+            rise = 1f - (1f - rise) * (1f - rise) * (1f - rise);
+            float sy = floorY - (floorY - (topY + dropY * i)) * rise;
             rect.set(sx + dp(6f), sy, sx + stepW - dp(6f), floorY);
             boolean done = i < coolStep || (coolDone && i <= coolStep);
             boolean now = i == coolStep && !coolDone;
-            fill.setColor(now ? ACCENT : done ? 0xFF1E6F66 : TRACK);
-            fill.setAlpha(now ? 255 : done ? 220 : 255);
-            c.drawRoundRect(rect, dp(10f), dp(10f), fill);
-            fill.setAlpha(255);
+            if (now) {
+                Fx.glow(c, rect.centerX(), (rect.top + rect.bottom) / 2f, stepW * 0.62f, 0x4035D0BA);
+            }
+            shadeRect(c, now ? stepNow : done ? stepDone : stepAhead, dp(10f));
+            topEdge(c, dp(10f), now ? 0xA0FFFFFF : done ? 0x5080F0E0 : 0x30A9C4F0);
+            // The riser's shaded right edge: light comes from the upper left.
+            fill.setColor(0x30000000);
+            c.drawRect(rect.right - dp(8f), rect.top + dp(10f), rect.right, rect.bottom - dp(10f), fill);
             if (now) {
                 line.setShader(null);
                 line.setColor(ACCENT);
@@ -2119,40 +2408,51 @@ final class ZoneRowGame extends GameView {
                 line.setAlpha(255);
             }
             float mx = sx + stepW / 2f;
+            boolean rising = rise < 1f;
+            if (rising) {
+                // While a step is still rising its captions ride inside it, never below the floor.
+                c.save();
+                c.clipRect(sx + dp(6f), sy, sx + stepW - dp(6f), floorY);
+            }
             text(c, Math.round(coolTargetRate(i)) + " SPM", mx, sy + h * 0.034f, h * 0.032f,
                     now ? 0xFF05101E : done ? TEXT : DIM, Paint.Align.CENTER, numbers, 0.1f);
             text(c, i < coolStep || coolDone ? "DONE" : i == coolStep ? clock(Math.ceil(coolLeft)) : "0:45",
                     mx, sy + h * 0.064f, h * 0.026f, now ? 0xFF05101E : FAINT, Paint.Align.CENTER,
                     labels, 0.15f);
+            if (rising) {
+                c.restore();
+            }
         }
 
-        // The rower on the current step: bobs with the stroke, green when the rate is in band.
-        float px = stairsLeft + stepW * (coolStep + 0.5f);
-        float py = topY + dropY * coolStep - dp(8f) - (float) Math.abs(Math.sin(coolBob * 2.0)) * dp(6f);
+        // The rower on the current step, rowing a little erg with the real stroke, green when the
+        // rate is in band. When a step ends it hops down to the next one rather than appearing there.
+        float px = stairsLeft + stepW * (shownCoolStep + 0.5f);
+        float stepFrac = shownCoolStep - (float) Math.floor(shownCoolStep);
+        float hop = (float) Math.sin(stepFrac * Math.PI) * dp(26f);
+        float riseNow = Math.max(0f, Math.min(1f, coolIntro * 1.6f - coolStep * 0.3f));
+        riseNow = 1f - (1f - riseNow) * (1f - riseNow) * (1f - riseNow);
+        float stepTop = topY + dropY * shownCoolStep;
+        float py = floorY - (floorY - stepTop) * riseNow - dp(2f) - hop;
         drawCoolRower(c, px, py, h, inBand);
 
-        float btnW = dp(230f);
+        // Both buttons are as wide as their longest caption needs: "END COOL DOWN" ran over the
+        // edge of a fixed 230dp button on the tablet. The text is unchanged; the face grows.
+        ink.setTypeface(numbers);
+        ink.setTextSize(h * 0.028f);
+        ink.setLetterSpacing(0.15f);
+        float btnW = Math.max(dp(230f), Math.max(ink.measureText(coolDone ? "ROW AGAIN" : "SKIP STEP"),
+                ink.measureText(coolDone ? "FINISH" : "END COOL DOWN")) + dp(36f));
         float btnH = h * 0.048f;
         float btnY = h * 0.505f;
         rect.set(cx - btnW - dp(10f), btnY, cx - dp(10f), btnY + btnH);
         skipHit.set(rect.left, rect.top - dp(8f), rect.right, rect.bottom + dp(8f));
-        fill.setColor(PILL);
-        c.drawRoundRect(rect, dp(12f), dp(12f), fill);
-        line.setShader(null);
-        line.setColor(PILL_EDGE);
-        line.setStrokeWidth(dp(1.5f));
-        c.drawRoundRect(rect, dp(12f), dp(12f), line);
+        coolButtonFace(c, false);
         text(c, coolDone ? "ROW AGAIN" : "SKIP STEP", cx - btnW / 2f - dp(10f), btnY + btnH * 0.66f,
                 h * 0.028f, TEXT, Paint.Align.CENTER, numbers, 0.15f);
 
         rect.set(cx + dp(10f), btnY, cx + dp(10f) + btnW, btnY + btnH);
         coolHit.set(rect.left, rect.top - dp(8f), rect.right, rect.bottom + dp(8f));
-        fill.setColor(coolDone ? ACCENT : PILL);
-        c.drawRoundRect(rect, dp(12f), dp(12f), fill);
-        if (!coolDone) {
-            line.setColor(PILL_EDGE);
-            c.drawRoundRect(rect, dp(12f), dp(12f), line);
-        }
+        coolButtonFace(c, coolDone);
         text(c, coolDone ? "FINISH" : "END COOL DOWN", cx + dp(10f) + btnW / 2f, btnY + btnH * 0.66f,
                 h * 0.028f, coolDone ? 0xFF05101E : TEXT, Paint.Align.CENTER, numbers, 0.15f);
 
@@ -2167,34 +2467,203 @@ final class ZoneRowGame extends GameView {
         }
     }
 
-    /** A little rower on the staircase: head, body, and an oar that sweeps with the real stroke. */
-    private void drawCoolRower(Canvas c, float x, float footY, float h, boolean inBand) {
-        float unit = h * 0.018f;
-        int body = inBand ? ACCENT : TEXT;
-        float lean = (strokePhase() - 0.5f) * unit * 1.1f;
-        fill.setColor(body);
-        c.drawCircle(x + lean, footY - unit * 3.4f, unit * 0.78f, fill);
+    /**
+     * The card the cool-down, editor and finish screens are drawn on: the same band as before, as a
+     * rounded panel with a lit top edge. The cool-down's is opaque - at 95% the split figure and
+     * zone names behind it ghosted through on the tablet, which read as a rendering fault.
+     */
+    private void overlayPanel(Canvas c, float top, float bottom, int color) {
+        float r = dp(18f);
+        rect.set(x0 - dp(24f), top, x0 + span + dp(24f), bottom);
+        // No drop shadow: the cool-down card ends right on the rate band's top edge.
+        fill.setShader(null);
+        fill.setColor(color);
+        c.drawRoundRect(rect, r, r, fill);
         line.setShader(null);
+        line.setColor(0xFF1C2736);
+        line.setStrokeWidth(dp(1.5f));
+        c.drawRoundRect(rect, r, r, line);
+        topEdge(c, r, 0x38A9C4F0);
+    }
+
+    /** A cool-down button face in {@link #rect}: contact shadow, lit gradient, edge. */
+    private void coolButtonFace(Canvas c, boolean accent) {
+        float r = dp(12f);
+        fill.setColor(0x50000000);
+        rect.offset(0, dp(3f));
+        c.drawRoundRect(rect, r, r, fill);
+        rect.offset(0, -dp(3f));
+        shadeRect(c, accent ? coolButtonAccent : coolButton, r);
+        if (!accent) {
+            line.setShader(null);
+            line.setColor(PILL_EDGE);
+            line.setStrokeWidth(dp(1.5f));
+            c.drawRoundRect(rect, r, r, line);
+        }
+        topEdge(c, r, accent ? 0xA0FFFFFF : 0x40C8DAF5);
+    }
+
+    /**
+     * A rower on a little water rower, standing on the current step and facing down the stair. The
+     * pose follows {@link #strokePhase()}, the real stroke: legs drive first, then the body swings
+     * back, then the arms draw in - and the recovery unwinds it in reverse because the phase runs
+     * back down. The tank's paddle turns with the live rate. Green when the rate is in band.
+     */
+    private void drawCoolRower(Canvas c, float x, float footY, float h, boolean inBand) {
+        float u = h * 0.018f;
+        int body = inBand ? ACCENT : TEXT;
+        int far = mix(body, 0xFF050D19, 0.45f);
+        // Set a little left of the step's centre so the head clears the subtitle above step one.
+        float ox = x - u * 1.8f;
+        float railY = footY - u * 0.55f;
+
+        // Contact shadow, and a glow behind the rower when the rate is in band.
+        c.save();
+        c.translate(ox + u * 0.4f, footY);
+        c.scale(1f, 0.16f);
+        Fx.glow(c, 0, 0, u * 4.6f, 0x90000000);
+        c.restore();
+        if (inBand) {
+            Fx.glow(c, ox + u * 0.3f, railY - u * 1.8f, u * 4.4f, 0x3035D0BA);
+        }
+
+        // The machine: rail on two feet, tank at the front with water in it, footplate.
+        fill.setShader(null);
+        fill.setColor(0xFF33476A);
+        rect.set(ox - u * 2.9f, railY - u * 0.12f, ox + u * 3.0f, railY + u * 0.26f);
+        c.drawRoundRect(rect, u * 0.18f, u * 0.18f, fill);
+        topEdge(c, u * 0.18f, 0x60C8DAF5);
+        fill.setColor(0xFF253652);
+        rect.set(ox - u * 2.8f, railY + u * 0.2f, ox - u * 2.3f, footY);
+        c.drawRoundRect(rect, u * 0.12f, u * 0.12f, fill);
+        float tankX = ox + u * 3.75f;
+        float tankY = footY - u * 1.05f;
+        float tankR = u * 0.95f;
+        fill.setColor(0xFF132845);
+        c.drawCircle(tankX, tankY, tankR, fill);
+        fill.setColor(0xB02F7FC0);
+        rect.set(tankX - tankR, tankY - tankR, tankX + tankR, tankY + tankR);
+        c.drawArc(rect, 10f, 160f, false, fill);   // the water: a chord below the centre line
+        line.setShader(null);
+        line.setColor(0xFF8FB4E8);
+        line.setStrokeWidth(u * 0.14f);
+        for (int i = 0; i < 2; i++) {
+            double a = wheelSpin + i * Math.PI / 2.0;
+            float dx = (float) Math.cos(a) * tankR * 0.78f;
+            float dy = (float) Math.sin(a) * tankR * 0.78f;
+            c.drawLine(tankX - dx, tankY - dy, tankX + dx, tankY + dy, line);
+        }
+        line.setColor(0xFF4A6690);
+        line.setStrokeWidth(u * 0.22f);
+        c.drawCircle(tankX, tankY, tankR, line);
+        fill.setColor(0x55FFFFFF);
+        c.drawCircle(tankX - tankR * 0.38f, tankY - tankR * 0.42f, tankR * 0.16f, fill);
+        line.setColor(0xFF4A5E7E);
+        line.setStrokeWidth(u * 0.28f);
+        c.drawLine(ox + u * 2.3f, railY - u * 0.05f, ox + u * 2.6f, railY - u * 1.1f, line);
+
+        // The stroke, in its three overlapping parts.
+        float p = strokePhase();
+        float legs = smooth(p / 0.6f);
+        float swing = smooth((p - 0.25f) / 0.55f);
+        float arms = smooth((p - 0.55f) / 0.45f);
+
+        float seatX = ox + u * (0.75f + (-1.0f - 0.75f) * legs);
+        fill.setColor(0xFF4A5E7E);
+        rect.set(seatX - u * 0.6f, railY - u * 0.4f, seatX + u * 0.6f, railY - u * 0.08f);
+        c.drawRoundRect(rect, u * 0.15f, u * 0.15f, fill);
+
+        float hipX = seatX;
+        float hipY = railY - u * 0.62f;
+        float ankleX = ox + u * 2.35f;
+        float ankleY = railY - u * 0.6f;
+
+        // Legs: thigh and shin solved to the footplate, knee up.
+        float thigh = u * 1.7f;
+        float shin = u * 1.6f;
+        double la = Math.atan2(ankleY - hipY, ankleX - hipX);
+        float ld = clampReach((float) Math.hypot(ankleX - hipX, ankleY - hipY), thigh, shin);
+        double lb = Math.acos((thigh * thigh + ld * ld - shin * shin) / (2.0 * thigh * ld));
+        float kneeX = hipX + thigh * (float) Math.cos(la - lb);
+        float kneeY = hipY + thigh * (float) Math.sin(la - lb);
+
+        // Torso: forward at the catch, back past upright at the finish.
+        double lean = Math.toRadians(22.0 + (-24.0 - 22.0) * swing);
+        float torso = u * 2.0f;
+        float shX = hipX + torso * (float) Math.sin(lean);
+        float shY = hipY - torso * (float) Math.cos(lean);
+        double neck = lean * 0.8;
+        float headX = shX + u * 0.74f * (float) Math.sin(neck);
+        float headY = shY - u * 0.74f * (float) Math.cos(neck);
+
+        // Arms: straight out at the catch, drawn into the ribs at the finish, elbows down and back.
+        double reach = Math.toRadians(12.0);
+        float handX = shX + u * (1.8f * (float) Math.cos(reach) * (1f - arms) + 0.55f * arms);
+        float handY = shY + u * (1.8f * (float) Math.sin(reach) * (1f - arms) + 1.0f * arms);
+        float upper = u * 1.0f;
+        float fore = u * 0.95f;
+        double aa = Math.atan2(handY - shY, handX - shX);
+        float ad = clampReach((float) Math.hypot(handX - shX, handY - shY), upper, fore);
+        double ab = Math.acos((upper * upper + ad * ad - fore * fore) / (2.0 * upper * ad));
+        float elX = shX + upper * (float) Math.cos(aa + ab);
+        float elY = shY + upper * (float) Math.sin(aa + ab);
+
+        // The chain, from the handle to the front of the tank.
+        line.setColor(DIM);
+        line.setStrokeWidth(u * 0.1f);
+        c.drawLine(handX, handY, tankX - tankR * 0.55f, tankY - tankR * 0.72f, line);
+
+        // Far side first, a shade darker and a touch behind, for volume.
+        float offX = -u * 0.14f;
+        float offY = -u * 0.08f;
+        line.setColor(far);
+        line.setStrokeWidth(u * 0.5f);
+        c.drawLine(hipX + offX, hipY + offY, kneeX + offX, kneeY + offY, line);
+        c.drawLine(kneeX + offX, kneeY + offY, ankleX + offX, ankleY + offY, line);
+        line.setStrokeWidth(u * 0.36f);
+        c.drawLine(shX + offX, shY + offY, elX + offX, elY + offY, line);
+        c.drawLine(elX + offX, elY + offY, handX, handY, line);
+
+        // Then the torso, a shade back from the near limbs, then the near leg over it - at the
+        // catch the thigh lies against the chest, and drawn behind it the knee vanished.
+        line.setColor(mix(body, 0xFF050D19, 0.14f));
+        line.setStrokeWidth(u * 0.86f);
+        c.drawLine(hipX, hipY, shX, shY, line);
         line.setColor(body);
-        line.setStrokeWidth(unit * 0.5f);
-        c.drawLine(x, footY, x + lean, footY - unit * 2.6f, line);
-        // Legs, planted, knees bending a little with the bob.
-        c.drawLine(x, footY, x - unit * 0.8f, footY - unit * 0.1f, line);
-        c.drawLine(x, footY, x + unit * 0.9f, footY - unit * 0.1f, line);
-        // The oar: sweeps through the drive, feathers back through the recovery.
-        float angle = (float) Math.toRadians(-20 + 70 * strokePhase());
-        float ox = (float) Math.cos(angle) * unit * 2.6f;
-        float oy = (float) Math.sin(angle) * unit * 2.6f;
+        line.setStrokeWidth(u * 0.6f);
+        c.drawLine(hipX, hipY, kneeX, kneeY, line);
+        line.setStrokeWidth(u * 0.5f);
+        c.drawLine(kneeX, kneeY, ankleX, ankleY, line);
+        line.setStrokeWidth(u * 0.4f);
+        c.drawLine(shX, shY, elX, elY, line);
+        c.drawLine(elX, elY, handX, handY, line);
+        fill.setColor(body);
+        c.drawCircle(headX, headY, u * 0.6f, fill);
+        // Lit from the upper left: a highlight on the head and along the back.
+        fill.setColor(0x55FFFFFF);
+        c.drawCircle(headX - u * 0.2f, headY - u * 0.22f, u * 0.22f, fill);
+        line.setColor(0x40FFFFFF);
+        line.setStrokeWidth(u * 0.18f);
+        c.drawLine(hipX - u * 0.28f, hipY - u * 0.1f, shX - u * 0.28f, shY + u * 0.05f, line);
+        // The handle.
         line.setColor(inBand ? ACCENT : DIM);
-        line.setStrokeWidth(unit * 0.35f);
-        c.drawLine(x + lean - ox, footY - unit * 2.1f - oy, x + lean + ox, footY - unit * 2.1f + oy, line);
-        fill.setColor(inBand ? ACCENT : DIM);
-        c.drawCircle(x + lean + ox, footY - unit * 2.1f + oy, unit * 0.42f, fill);
+        line.setStrokeWidth(u * 0.3f);
+        c.drawLine(handX, handY - u * 0.32f, handX, handY + u * 0.32f, line);
+    }
+
+    /** Smoothstep on 0..1, clamped. */
+    private static float smooth(float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        return t * t * (3f - 2f * t);
+    }
+
+    /** Keeps a two-bone reach inside what the bones can span, so acos never sees a bad value. */
+    private static float clampReach(float d, float a, float b) {
+        return Math.max(Math.abs(a - b) + 0.01f, Math.min(a + b - 0.01f, d));
     }
 
     private void drawFinished(Canvas c, float w, float h) {
-        fill.setColor(0xD8050D19);
-        c.drawRect(0, h * 0.18f, w, h * 0.77f, fill);
+        overlayPanel(c, h * 0.18f, h * 0.77f, 0xD8050D19);
         float cx = w * 0.29f;
         text(c, "PIECE COMPLETE", cx, h * 0.28f, h * 0.045f, ACCENT, Paint.Align.CENTER, numbers, 0.3f);
         String headline;
@@ -2243,8 +2712,18 @@ final class ZoneRowGame extends GameView {
         float btnTop = h * 0.665f;
         rect.set(cx - btnW / 2f, btnTop, cx + btnW / 2f, btnTop + btnH);
         coolHit.set(rect.left - dp(10f), rect.top - dp(10f), rect.right + dp(10f), rect.bottom + dp(10f));
-        fill.setColor(coolDone ? PILL : ACCENT);
+        fill.setColor(0x50000000);
+        rect.offset(0, dp(3f));
         c.drawRoundRect(rect, dp(14f), dp(14f), fill);
+        rect.offset(0, -dp(3f));
+        if (coolDone) {
+            fill.setColor(PILL);
+            c.drawRoundRect(rect, dp(14f), dp(14f), fill);
+        } else {
+            Fx.glow(c, rect.centerX(), rect.centerY(), btnW * 0.6f, 0x3035D0BA);
+            shadeRect(c, finishButton, dp(14f));
+        }
+        topEdge(c, dp(14f), coolDone ? 0x40C8DAF5 : 0xA0FFFFFF);
         if (coolDone) {
             line.setShader(null);
             line.setColor(PILL_EDGE);
@@ -2296,6 +2775,13 @@ final class ZoneRowGame extends GameView {
                 rect.right = barLeft + Math.max(barH, (barRight - barLeft) * frac);
                 fill.setColor(ZONE_COLORS[z]);
                 c.drawRoundRect(rect, barH / 2f, barH / 2f, fill);
+                // Gloss on the upper half and a shaded foot, so each bar reads as a rounded rod.
+                fill.setColor(0x34FFFFFF);
+                c.drawRect(rect.left + barH / 2f, rect.top + dp(2f), Math.max(rect.left + barH / 2f, rect.right - barH / 2f),
+                        rect.top + barH * 0.42f, fill);
+                fill.setColor(0x26000000);
+                c.drawRect(rect.left + barH / 2f, rect.bottom - barH * 0.25f, Math.max(rect.left + barH / 2f, rect.right - barH / 2f),
+                        rect.bottom - dp(1f), fill);
             }
             int pct = total > 0 ? (int) Math.round(100.0 * zoneSeconds[z] / total) : 0;
             text(c, clock(zoneSeconds[z] * ease) + "  " + pct + "%", right, cy + h * 0.011f, h * 0.026f,

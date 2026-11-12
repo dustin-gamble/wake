@@ -1,8 +1,10 @@
 package com.codex.waterrowerdiagnostic;
 
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Shader;
 
 /**
  * The parts of CANYON that both modes share: the medal maths, the route tiers unlocked by score,
@@ -123,6 +125,14 @@ final class CanyonRouteMap {
     /** Cached "TAKEN: ..." line and the number of forks it was built from. */
     private String takenText;
     private int takenCount = -1;
+    /** The map panel's gradient, cached by its rows (they change only when it is tapped open). */
+    private LinearGradient panelShader;
+    private float panelTop = -1f;
+    private float panelBottom = -1f;
+    /** The photo print's sky, cached by the print's rows. */
+    private LinearGradient printShader;
+    private float printTop = -1f;
+    private float printBottom = -1f;
     /** Bounds of the last drawn map, for the tap test. */
     private float hx;
     private float hy;
@@ -184,10 +194,29 @@ final class CanyonRouteMap {
         hw = aw;
         hh = dp(40f) + panelH;
 
+        // The panel: rounded, a vertical gradient, a hairline border and a lighter top edge.
+        float pl = ax - dp(8f);
+        float pt = ay - dp(10f);
+        float pr = ax + aw + dp(8f);
+        float pb = ay + hh;
+        if (panelShader == null || panelTop != pt || panelBottom != pb) {
+            panelTop = pt;
+            panelBottom = pb;
+            panelShader = new LinearGradient(0, pt, 0, pb, 0xE8182232, 0xE80A0F17, Shader.TileMode.CLAMP);
+        }
+        float rad = dp(8f);
         p.setStyle(Paint.Style.FILL);
+        p.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        p.setShader(panelShader);
+        c.drawRoundRect(pl, pt, pr, pb, rad, rad, p);
         p.setShader(null);
-        p.setColor(0xAA0A0E14);
-        c.drawRoundRect(ax - dp(8f), ay - dp(10f), ax + aw + dp(8f), ay + hh, dp(6f), dp(6f), p);
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(dp(1f));
+        p.setColor(0xFF1C2736);
+        c.drawRoundRect(pl, pt, pr, pb, rad, rad, p);
+        p.setStyle(Paint.Style.FILL);
+        p.setColor(0x30FFFFFF);
+        c.drawRect(pl + rad, pt + dp(1f), pr - rad, pt + dp(2f), p);
 
         text(c, "ROUTE", ax, ay + dp(4f), 8.5f, 0xFF8D9BB0, Paint.Align.LEFT, true);
         int open = tiers(bestScore);
@@ -198,11 +227,13 @@ final class CanyonRouteMap {
 
         // The line of the run.
         p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(dp(3f));
-        p.setColor(0xFF2A3648);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeWidth(dp(4f));
+        p.setColor(0xFF1C2736);
         c.drawLine(ax, rowY, ax + aw, rowY, p);
         p.setColor(0xFF35D0BA);
         c.drawLine(ax, rowY, ax + aw * Math.max(0f, Math.min(1f, progress01)), rowY, p);
+        p.setStrokeCap(Paint.Cap.BUTT);
         p.setStyle(Paint.Style.FILL);
 
         // Checkpoint ticks.
@@ -227,6 +258,7 @@ final class CanyonRouteMap {
         }
         // You.
         float px = ax + aw * Math.max(0f, Math.min(1f, progress01));
+        Fx.glow(c, px, rowY, dp(14f), 0x6635D0BA);
         p.setColor(0xFFE6EDF7);
         c.drawCircle(px, rowY, dp(5f), p);
         p.setColor(0xFF35D0BA);
@@ -321,24 +353,44 @@ final class CanyonRouteMap {
         float iy = cy + dp(14f);
         float iw = cw - dp(28f);
         float ih = ch - dp(86f);
-        p.setColor(0xFF1B1526);
+        // The image: a sunset sky down to the canyon floor, cached by the print's rows.
+        if (printShader == null || printTop != iy || printBottom != iy + ih) {
+            printTop = iy;
+            printBottom = iy + ih;
+            printShader = new LinearGradient(0, iy, 0, iy + ih, new int[] {0xFF1E1A40, 0xFF6A2E4C, 0xFFD9553A,
+                    0xFF3A1A22}, new float[] {0f, 0.42f, 0.7f, 0.71f}, Shader.TileMode.CLAMP);
+        }
+        p.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        p.setShader(printShader);
         c.drawRect(ix, iy, ix + iw, iy + ih, p);
-        // Canyon walls in silhouette either side of the line.
-        p.setColor(0xFF2E1D28);
-        path.reset();
-        path.moveTo(ix, iy + ih);
-        path.lineTo(ix, iy + ih * 0.35f);
-        path.lineTo(ix + iw * 0.22f, iy + ih * 0.55f);
-        path.lineTo(ix + iw * 0.3f, iy + ih);
-        path.close();
-        c.drawPath(path, p);
-        path.reset();
-        path.moveTo(ix + iw, iy + ih);
-        path.lineTo(ix + iw, iy + ih * 0.3f);
-        path.lineTo(ix + iw * 0.76f, iy + ih * 0.52f);
-        path.lineTo(ix + iw * 0.7f, iy + ih);
-        path.close();
-        c.drawPath(path, p);
+        p.setShader(null);
+        // Canyon walls either side of the line: dark rock, with the last light on their rims.
+        for (int side = 0; side < 2; side++) {
+            path.reset();
+            if (side == 0) {
+                path.moveTo(ix, iy + ih);
+                path.lineTo(ix, iy + ih * 0.35f);
+                path.lineTo(ix + iw * 0.22f, iy + ih * 0.55f);
+                path.lineTo(ix + iw * 0.3f, iy + ih);
+            } else {
+                path.moveTo(ix + iw, iy + ih);
+                path.lineTo(ix + iw, iy + ih * 0.3f);
+                path.lineTo(ix + iw * 0.76f, iy + ih * 0.52f);
+                path.lineTo(ix + iw * 0.7f, iy + ih);
+            }
+            path.close();
+            p.setColor(side == 0 ? 0xFF3A1A2A : 0xFF2A1424);
+            c.drawPath(path, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(2f));
+            p.setColor(0x99FF9A6A);
+            if (side == 0) {
+                c.drawLine(ix, iy + ih * 0.35f, ix + iw * 0.22f, iy + ih * 0.55f, p);
+            } else {
+                c.drawLine(ix + iw, iy + ih * 0.3f, ix + iw * 0.76f, iy + ih * 0.52f, p);
+            }
+            p.setStyle(Paint.Style.FILL);
+        }
         // The line itself: a chequered post down the middle of the frame.
         float lx = ix + iw * 0.5f;
         for (int i = 0; i < 12; i++) {
@@ -363,6 +415,8 @@ final class CanyonRouteMap {
         c.drawCircle(mxp - dp(34f), cy + ch - dp(34f), dp(15f), p);
         p.setColor(0x33000000);
         c.drawCircle(mxp - dp(34f), cy + ch - dp(34f), dp(9f), p);
+        p.setColor(0x66FFFFFF);
+        c.drawCircle(mxp - dp(39f), cy + ch - dp(39f), dp(4f), p);
         text(c, MEDAL_NAME[Math.max(0, Math.min(3, medal))], mxp, cy + ch - dp(38f), 13f, 0xFF12161C,
                 Paint.Align.RIGHT, true);
         text(c, medal == NO_MEDAL ? "no medal this time" : "split " + time(seconds), mxp, cy + ch - dp(22f), 9f,

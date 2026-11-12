@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.view.MotionEvent;
@@ -130,6 +131,65 @@ final class NightGridGame extends GameView {
     private LinearGradient sky;
     private float skyH;
 
+    /* 3.25.0 graphics pass: cached gradients and geometry, rebuilt only when the view size changes. */
+    private static final float GLOW_R = 100f;
+    private static final int PULSES = 12;
+    private static final int REFL_BINS = 40;
+    private static final float JOIN_FLASH = 2.5f;
+    /** Pylons along the valley line, as a share of the width. The first is the old corner. */
+    private static final float[] PYLON_X = {0.26f, 0.40f, 0.545f, 0.685f, 0.815f, 0.955f};
+    /* House palettes: three wall finishes and three roofs, front face and the receding side. */
+    private static final int[] WALL_LIT = {0xFF3A3F52, 0xFF4A3F3C, 0xFF46506A};
+    private static final int[] WALL_DARK = {0xFF2A3346, 0xFF2D2B38, 0xFF283247};
+    private static final int[] SIDE_LIT = {0xFF262A38, 0xFF322A28, 0xFF2E3548};
+    private static final int[] SIDE_DARK = {0xFF1C2232, 0xFF1F1D27, 0xFF1B2232};
+    private static final int[] ROOF_LIT = {0xFF5A3A36, 0xFF34405A, 0xFF4A3424};
+    private static final int[] ROOF_DARK = {0xFF3A2E33, 0xFF262E40, 0xFF2E2628};
+    private static final int[] ROOFSIDE_LIT = {0xFF452C2A, 0xFF283146, 0xFF38281C};
+    private static final int[] ROOFSIDE_DARK = {0xFF2C2328, 0xFF1D2331, 0xFF231D1F};
+    private static final int[] WINDOW_LIT = {0xFFFFE08A, 0xFFFFD070, 0xFFFFEBB0, 0xFFFFC862};
+
+    /** Own paint for the cached soft glows, so a shader never rides along on {@code paint}. */
+    private final Paint glowP = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private RadialGradient warmG;
+    private RadialGradient hotG;
+    private RadialGradient coolG;
+    private RadialGradient redG;
+    private LinearGradient farG;
+    private LinearGradient hillG;
+    private LinearGradient waterG;
+    private LinearGradient panelG;
+    private float sceneW = -1f;
+    private float sceneH = -1f;
+    private final Path pylonPath = new Path();
+    private final Path wirePath = new Path();
+    private final Path earthPath = new Path();
+    private final Path treePath = new Path();
+    private final Path reedPath = new Path();
+    private final RectF arcR = new RectF();
+    /** The power route: generator insulator, then each pylon, then off the right edge. */
+    private final float[] rX = new float[PYLON_X.length + 2];
+    private final float[] rY = new float[PYLON_X.length + 2];
+    private final float[] rSag = new float[PYLON_X.length + 2];
+    private final float[] rCum = new float[PYLON_X.length + 3];
+    private int rN;
+    private float ptX;
+    private float ptY;
+    private float genX0;
+    private float genX1;
+    private float genWallTop;
+    private float genPeakY;
+    private float genGround;
+    private float insX;
+    private float insY;
+    private final float[] reflBin = new float[REFL_BINS];
+    /** Per-house variety, from a hash of the index: width, roof pitch and a palette/feature word. */
+    private final float[] houseWide = new float[MAX_HOUSES];
+    private final float[] housePitch = new float[MAX_HOUSES];
+    private final int[] houseVar = new int[MAX_HOUSES];
+    /** A town's moment of joining the grid: a flare that fades over JOIN_FLASH seconds. */
+    private final float[] joinFlash = new float[3];
+
     private double lifetimeJoules;
     private double lastWork = -1;
     private int houses;
@@ -224,6 +284,34 @@ final class NightGridGame extends GameView {
             }
             connectHit[k] = new RectF();
         }
+        // Visual variety only, from a hash so the town's layout (Random 404 above) is untouched.
+        for (int i = 0; i < MAX_HOUSES; i++) {
+            int v = mix(i + 17);
+            houseVar[i] = v;
+            houseWide[i] = 0.9f + ((v >>> 4) & 15) / 15f * 0.35f;
+            housePitch[i] = 0.34f + ((v >>> 8) & 15) / 15f * 0.18f;
+        }
+    }
+
+    /** Integer hash for deterministic per-object detail; never Random per frame. */
+    private static int mix(int x) {
+        x *= 0x9E3779B1;
+        x ^= x >>> 15;
+        x *= 0x85EBCA6B;
+        x ^= x >>> 13;
+        return x & 0x7FFFFFFF;
+    }
+
+    private static int mixColor(int a, int b, float f) {
+        f = Math.max(0f, Math.min(1f, f));
+        int r = (int) (((a >> 16) & 255) + (((b >> 16) & 255) - ((a >> 16) & 255)) * f);
+        int g = (int) (((a >> 8) & 255) + (((b >> 8) & 255) - ((a >> 8) & 255)) * f);
+        int bl = (int) ((a & 255) + ((b & 255) - (a & 255)) * f);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    private static int alpha(float a, int rgb) {
+        return (((int) (255 * Math.max(0f, Math.min(1f, a)))) << 24) | (rgb & 0xFFFFFF);
     }
 
     private float dist(int i) {
@@ -342,6 +430,7 @@ final class NightGridGame extends GameView {
             return;
         }
         battery -= CONNECT_COST;
+        joinFlash[k] = JOIN_FLASH;
         townsConnected++;
         startFestival(NEIGHBOUR[k] + " JOINS THE GRID");
     }
@@ -819,12 +908,16 @@ final class NightGridGame extends GameView {
             float cx = x0 + k * (cellW + gap);
             paint.setColor(0xFF1E2636);
             c.drawRoundRect(cx, top, cx + cellW, top + cellH, dp(3f), dp(3f), paint);
+            paint.setColor(0x22A8C4E8); // moonlit edge of the case
+            c.drawRect(cx + cellW - dp(2.5f), top + dp(2f), cx + cellW - dp(1f), top + cellH - dp(2f), paint);
             paint.setColor(0xFF4A5468);
             c.drawRect(cx + cellW * 0.3f, top - dp(4f), cx + cellW * 0.7f, top, paint);
             float fill = Math.max(0f, Math.min(1f, battery * 4 - k));
             if (fill > 0) {
                 paint.setColor(phase == BLACKOUT && !blackoutFailed ? 0xFFF0B132 : 0xFF6FD8FF);
                 c.drawRect(cx + dp(3f), top + cellH - dp(3f) - (cellH - dp(6f)) * fill, cx + cellW - dp(3f), top + cellH - dp(3f), paint);
+                paint.setColor(0x40FFFFFF); // glass highlight down the left of the charge
+                c.drawRect(cx + dp(4f), top + cellH - dp(3f) - (cellH - dp(6f)) * fill, cx + dp(7f), top + cellH - dp(3f), paint);
             }
         }
         if (battery > 0.02f) {
@@ -854,6 +947,7 @@ final class NightGridGame extends GameView {
         }
         paint.setColor(live ? 0xDD1E3A4A : ready ? 0xDD16283C : 0x55202838);
         c.drawRoundRect(dischargeHit, dp(8f), dp(8f), paint);
+        gloss(c, dischargeHit.left, dischargeHit.top, dischargeHit.right, dischargeHit.bottom, dp(7f));
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.4f));
         paint.setColor(live ? 0xFFF0B132 : ready ? 0xFF6FD8FF : 0xFF3A4254);
@@ -878,8 +972,10 @@ final class NightGridGame extends GameView {
     }
 
     private void drawFarRidge(Canvas c, float w, float h) {
-        paint.setColor(0xFF0D1730);
-        path.reset();
+        // Hazier and bluer at the crest than below it: the far side of the valley sits in air.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(farG);
+        path.rewind();
         path.moveTo(0, farHillY(0, h));
         for (float x = dp(50f); x <= w + dp(50f); x += dp(50f)) {
             path.lineTo(x, farHillY(x, h));
@@ -888,58 +984,84 @@ final class NightGridGame extends GameView {
         path.lineTo(0, h * 0.62f);
         path.close();
         c.drawPath(path, paint);
+        paint.setShader(null);
+        // Moonlight along the crest.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(0x30A8C4E8);
+        path.rewind();
+        path.moveTo(0, farHillY(0, h));
+        for (float x = dp(50f); x <= w + dp(50f); x += dp(50f)) {
+            path.lineTo(x, farHillY(x, h));
+        }
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
     }
 
     /**
-     * A neighbouring town: a hamlet on the far ridge, its spur line climbing from the valley's
-     * power line, its windows lit from whatever the home town does not take.
+     * A neighbouring town: a hamlet on the far ridge among pines, its windows lit from whatever the
+     * home town does not take. Once wired in it throws a warm glow into the sky above it that swells
+     * as its homes come on, and flares the moment it joins. Its spur line is {@link #drawSpurs}.
      */
     private void drawNeighbourTown(Canvas c, float w, float h, int k, int litHere, boolean connected) {
         double t = sessionSeconds;
         float cx = w * NEIGHBOUR_X[k];
-        float lineY = h * 0.48f;
-        if (connected) {
-            float baseY = farHillY(cx, h) + dp(20f);
-            paint.setColor(0xFF2A3648);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(1.6f));
-            c.drawLine(cx, baseY, cx, lineY, paint);
-            // A little pylon where the spur meets the valley line.
-            c.drawLine(cx - dp(7f), lineY, cx, lineY - dp(16f), paint);
-            c.drawLine(cx + dp(7f), lineY, cx, lineY - dp(16f), paint);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(litHere > 0 ? 0xFFF5C518 : 0xFF6A7488);
-            for (int d = 0; d < 4; d++) {
-                float f = (float) (((townFlow + d / 4f) % 1.0 + 1.0) % 1.0);
-                c.drawCircle(cx, lineY - f * (lineY - baseY), dp(2f), paint);
-            }
+        float ridge = farHillY(cx, h);
+        float litF = litHere / (float) NEIGH_HOUSES;
+        if (litHere > 0) {
+            soft(c, warmG, cx, ridge + dp(2f), dp(200f), dp(74f), 0.18f + 0.55f * litF);
         }
+        if (joinFlash[k] > 0f) {
+            float f = joinFlash[k] / JOIN_FLASH;
+            soft(c, hotG, cx, ridge, dp(150f) + dp(170f) * (1f - f), dp(70f) + dp(60f) * (1f - f), f * 0.9f);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(alpha(f * 0.8f, 0xFFE6A8));
+            c.drawCircle(cx, ridge, dp(30f) + dp(160f) * (1f - f), paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
+        // Pines either side of the hamlet, in the ridge's haze.
+        path.rewind();
+        for (int p = 0; p < 4; p++) {
+            float px = cx + w * (p < 2 ? -0.064f + p * 0.009f : 0.056f + (p - 2) * 0.011f);
+            float base = farHillY(px, h) + dp(16f);
+            float ht = dp(17f) + (p % 2) * dp(6f);
+            path.moveTo(px, base - ht);
+            path.lineTo(px + ht * 0.32f, base);
+            path.lineTo(px - ht * 0.32f, base);
+            path.close();
+        }
+        paint.setColor(0xFF142040);
+        c.drawPath(path, paint);
         for (int j = 0; j < NEIGH_HOUSES; j++) {
             int i = k * NEIGH_HOUSES + j;
             float hx = cx + nhDX[i] * w;
             float hy = farHillY(hx, h) + dp(nhDY[i]);
-            float s = dp(nhS[i]);
+            float s = dp(nhS[i]) * 1.2f;
+            int v = mix(i + 331);
             // Not named `on`: that is the home town's lit array, and a local of the same name
             // shadowing it is one edit away from a bug that still compiles.
             boolean alight = j < litHere;
-            paint.setColor(alight ? 0xFF313A50 : 0xFF1C2438);
+            paint.setColor(alight ? ((v & 1) == 0 ? 0xFF3C3C52 : 0xFF443A40) : 0xFF1F2B46);
             c.drawRect(hx - s * 0.5f, hy - s * 0.62f, hx + s * 0.5f, hy, paint);
-            path.reset();
+            path.rewind();
             path.moveTo(hx - s * 0.6f, hy - s * 0.62f);
             path.lineTo(hx, hy - s * 1.0f);
             path.lineTo(hx + s * 0.6f, hy - s * 0.62f);
             path.close();
-            paint.setColor(alight ? 0xFF4A3330 : 0xFF2A2230);
+            paint.setColor(alight ? ((v & 2) == 0 ? 0xFF5A3A36 : 0xFF38445E) : 0xFF26304C);
             c.drawPath(path, paint);
+            paint.setStrokeWidth(dp(1.2f));
+            paint.setColor(0x40A8C4E8); // the moon on the right-hand slope
+            c.drawLine(hx, hy - s, hx + s * 0.6f, hy - s * 0.62f, paint);
             if (alight) {
                 float flicker = 0.8f + 0.2f * (float) Math.sin(t * 2.6 + i * 1.7);
                 glow(c, hx, hy - s * 0.35f, s * 1.5f, (((int) (0x55 * flicker)) << 24) | 0xFFD37A);
-                paint.setColor(0xFFFFE08A);
-                c.drawRect(hx - s * 0.22f, hy - s * 0.46f, hx + s * 0.06f, hy - s * 0.18f, paint);
+                paint.setColor(WINDOW_LIT[v & 3]);
             } else {
                 paint.setColor(0xFF121926);
-                c.drawRect(hx - s * 0.22f, hy - s * 0.46f, hx + s * 0.06f, hy - s * 0.18f, paint);
             }
+            c.drawRect(hx - s * 0.22f, hy - s * 0.46f, hx + s * 0.06f, hy - s * 0.18f, paint);
         }
         String tag = connected ? "  " + litHere + "/" + NEIGH_HOUSES
                 : lifetimeJoules < NEIGHBOUR_J[k]
@@ -974,6 +1096,7 @@ final class NightGridGame extends GameView {
         }
         paint.setColor(can ? 0xEE13312B : 0xCC1A2030);
         c.drawRoundRect(connectHit[k], dp(14f), dp(14f), paint);
+        gloss(c, connectHit[k].left, connectHit[k].top, connectHit[k].right, connectHit[k].bottom, dp(12f));
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.4f));
         paint.setColor(can ? ACCENT : 0xFF3A4254);
@@ -1063,8 +1186,12 @@ final class NightGridGame extends GameView {
         float y0 = dp(66f);
         float ph = dp(58f);
         boolean urgent = contractLeft < 30;
-        paint.setColor(0x99101B2C);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(panelG);
         c.drawRoundRect(x0, y0, x0 + pw, y0 + ph, dp(10f), dp(10f), paint);
+        paint.setShader(null);
+        paint.setColor(0x33FFFFFF); // lit top edge
+        c.drawRect(x0 + dp(10f), y0 + dp(0.6f), x0 + pw - dp(10f), y0 + dp(1.6f), paint);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.2f));
         float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 5);
@@ -1085,6 +1212,7 @@ final class NightGridGame extends GameView {
         c.drawRoundRect(x0 + dp(10f), by, x0 + pw - dp(10f), by + dp(8f), dp(4f), dp(4f), paint);
         paint.setColor(f > 0.66f ? ACCENT : f > 0.33f ? WARN : BLUE);
         c.drawRoundRect(x0 + dp(10f), by, x0 + dp(10f) + (pw - dp(20f)) * f, by + dp(8f), dp(4f), dp(4f), paint);
+        gloss(c, x0 + dp(10f), by, x0 + dp(10f) + (pw - dp(20f)) * f, by + dp(8f), dp(3f));
     }
 
     /** Landmarks on the hill, built at lifetime energy milestones. */
@@ -1267,7 +1395,7 @@ final class NightGridGame extends GameView {
             c.drawRect(x0, y0, x0 + ww, y0 + wh, paint);
             return;
         }
-        paint.setColor(0xFFFFE08A);
+        paint.setColor(WINDOW_LIT[houseVar[i] & 3]);
         c.drawRect(x0, y0, x0 + ww, y0 + wh, paint);
         boolean arms = cheer > 0f;
         if (arms || occupied(i, win)) {
@@ -1289,24 +1417,25 @@ final class NightGridGame extends GameView {
     }
 
     /** Season decorations on one house: snow and holiday bulbs, pumpkins. */
-    private void decorateHouse(Canvas c, int i, float hx, float hy, float s, float wallTop, boolean litHouse) {
+    private void decorateHouse(Canvas c, int i, float hx, float hy, float s, float wallTop,
+            float eave, float pitch, boolean litHouse) {
         int season = season();
         if (season == WINTER) {
             paint.setColor(0xFFE8EEF8);
-            path.reset();
-            path.moveTo(hx - s * 0.62f, wallTop);
-            path.lineTo(hx, wallTop - s * 0.42f);
-            path.lineTo(hx + s * 0.62f, wallTop);
-            path.lineTo(hx + s * 0.48f, wallTop - s * 0.04f);
-            path.lineTo(hx, wallTop - s * 0.34f);
-            path.lineTo(hx - s * 0.48f, wallTop - s * 0.04f);
+            path.rewind();
+            path.moveTo(hx - eave, wallTop);
+            path.lineTo(hx, wallTop - pitch);
+            path.lineTo(hx + eave, wallTop);
+            path.lineTo(hx + eave * 0.78f, wallTop - s * 0.04f);
+            path.lineTo(hx, wallTop - pitch * 0.81f);
+            path.lineTo(hx - eave * 0.78f, wallTop - s * 0.04f);
             path.close();
             c.drawPath(path, paint);
             if (litHouse) {
                 for (int b = 0; b < 6; b++) {
                     float f = b / 5f;
-                    float bx = hx - s * 0.58f + f * s * 1.16f;
-                    float by = wallTop - (1f - Math.abs(f - 0.5f) * 2f) * s * 0.40f + s * 0.02f;
+                    float bx = hx - eave * 0.94f + f * eave * 1.88f;
+                    float by = wallTop - (1f - Math.abs(f - 0.5f) * 2f) * pitch * 0.95f + s * 0.02f;
                     boolean twinkle = ((int) (sessionSeconds * 2.5) + b + i) % 3 != 0;
                     paint.setColor(!twinkle ? 0xFF6A5A40 : (b % 3 == 0 ? 0xFFFF5A5A : b % 3 == 1 ? 0xFF6AE68A : 0xFFFFD27A));
                     c.drawCircle(bx, by, Math.max(dp(1.4f), s * 0.05f), paint);
@@ -1420,6 +1549,496 @@ final class NightGridGame extends GameView {
         }
     }
 
+    /* ---------------- 3.25.0 scene: light, the mill, the line, the water ---------------- */
+
+    private static RadialGradient radial(int col) {
+        int rgb = col & 0xFFFFFF;
+        return new RadialGradient(0, 0, GLOW_R,
+                new int[] {col, 0x70000000 | rgb, 0x18000000 | rgb, rgb},
+                new float[] {0f, 0.3f, 0.65f, 1f}, Shader.TileMode.CLAMP);
+    }
+
+    /**
+     * A soft glow from one of four cached gradients, scaled to any size and squashed to an ellipse,
+     * at {@code a} 0..1. Unlike Fx.glow this never allocates, whatever the radius or alpha, so it is
+     * safe for glows that change every frame (the current pulses, the generator hum).
+     */
+    private void soft(Canvas c, RadialGradient g, float x, float y, float rx, float ry, float a) {
+        if (a <= 0.01f || rx < 1f || ry < 1f) {
+            return;
+        }
+        glowP.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        glowP.setAlpha((int) (255 * Math.min(1f, a)));
+        glowP.setShader(g);
+        c.save();
+        c.translate(x, y);
+        c.scale(rx / GLOW_R, ry / GLOW_R);
+        c.drawCircle(0, 0, GLOW_R, glowP);
+        c.restore();
+        glowP.setShader(null);
+    }
+
+    /** The straight valley line the pylons stand on, as it always ran: 0.26w to 0.98w, falling 10dp. */
+    private float lineAt(float x, float w, float h) {
+        return h * 0.48f + (x - w * 0.26f) / (w * 0.72f) * dp(10f);
+    }
+
+    /** Where the sagging conductor is at {@code x}, between the pylons. */
+    private float conductorY(float x, float h) {
+        for (int i = 1; i < rN - 1; i++) {
+            if (x >= rX[i] && x <= rX[i + 1]) {
+                float t = (x - rX[i]) / Math.max(1f, rX[i + 1] - rX[i]);
+                return rY[i] + (rY[i + 1] - rY[i]) * t + 4f * rSag[i] * t * (1f - t);
+            }
+        }
+        return h * 0.48f;
+    }
+
+    /** A point {@code u} pixels along the power route, into ptX/ptY. */
+    private void routePoint(float u) {
+        int i = 0;
+        while (i < rN - 2 && u > rCum[i + 1]) {
+            i++;
+        }
+        float t = Math.max(0f, Math.min(1f, (u - rCum[i]) / Math.max(1f, rCum[i + 1] - rCum[i])));
+        ptX = rX[i] + (rX[i + 1] - rX[i]) * t;
+        ptY = rY[i] + (rY[i + 1] - rY[i]) * t + 4f * rSag[i] * t * (1f - t);
+    }
+
+    /** Builds every gradient and every static path for this view size. Never runs per frame. */
+    private void ensureScene(float w, float h) {
+        if (warmG == null) {
+            warmG = radial(0xFFFFC870);
+            hotG = radial(0xFFFFF0C0);
+            coolG = radial(0xFF8FD8FF);
+            redG = radial(0xFFFF6A5A);
+            panelG = new LinearGradient(0, dp(66f), 0, dp(124f), 0xE41A273C, 0xD00C1320, Shader.TileMode.CLAMP);
+        }
+        if (w == sceneW && h == sceneH) {
+            return;
+        }
+        sceneW = w;
+        sceneH = h;
+        farG = new LinearGradient(0, h * 0.40f, 0, h * 0.62f, new int[] {0xFF1D2D50, 0xFF111C38, 0xFF0C1630},
+                new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP);
+        hillG = new LinearGradient(0, h * 0.46f, 0, h, new int[] {0xFF17253F, 0xFF0C1629, 0xFF070D1B},
+                new float[] {0f, 0.3f, 1f}, Shader.TileMode.CLAMP);
+        waterG = new LinearGradient(0, h * 0.90f, 0, h, new int[] {0xFF1E4466, 0xFF102B45, 0xFF061424},
+                new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP);
+
+        // The generator house, right of the wheel, and the insulator the line leaves from.
+        float wx = w * 0.12f;
+        float wy = h * 0.84f;
+        float wr = dp(40f);
+        genX0 = wx + wr * 0.6f;
+        genX1 = wx + wr * 2.3f;
+        genGround = wy + dp(12f);
+        genWallTop = wy - dp(34f);
+        genPeakY = wy - dp(60f);
+        float gcx = (genX0 + genX1) / 2f;
+        insX = genX1 - dp(10f);
+        insY = genPeakY + (insX - gcx) / (genX1 + dp(5f) - gcx) * (genWallTop - genPeakY) - dp(9f);
+
+        // The route: insulator, the pylons, then on past the right edge to the next valley.
+        rN = 0;
+        rX[rN] = insX;
+        rY[rN++] = insY;
+        for (float px : PYLON_X) {
+            rX[rN] = px * w;
+            rY[rN++] = lineAt(px * w, w, h);
+        }
+        rX[rN] = w + dp(40f);
+        rY[rN++] = lineAt(w + dp(40f), w, h);
+        rCum[0] = 0f;
+        for (int i = 0; i < rN - 1; i++) {
+            float len = (float) Math.hypot(rX[i + 1] - rX[i], rY[i + 1] - rY[i]);
+            rSag[i] = len * (i == 0 ? 0.02f : 0.035f);
+            rCum[i + 1] = rCum[i] + len;
+        }
+        wirePath.rewind();
+        wirePath.moveTo(rX[0], rY[0]);
+        for (int i = 0; i < rN - 1; i++) {
+            wirePath.quadTo((rX[i] + rX[i + 1]) / 2f, (rY[i] + rY[i + 1]) / 2f + 2f * rSag[i], rX[i + 1], rY[i + 1]);
+        }
+        // Earth wire over the pylon peaks, and the lattice towers themselves.
+        earthPath.rewind();
+        pylonPath.rewind();
+        float peakUp = dp(15f);
+        earthPath.moveTo(rX[1], rY[1] - peakUp);
+        for (int i = 1; i < rN - 1; i++) {
+            earthPath.quadTo((rX[i] + rX[i + 1]) / 2f, (rY[i] + rY[i + 1]) / 2f - peakUp + 1.6f * rSag[i],
+                    rX[i + 1], rY[i + 1] - peakUp);
+        }
+        for (int i = 1; i < rN - 1; i++) {
+            float x = rX[i];
+            float arm = rY[i];
+            float peak = arm - peakUp;
+            float base = Math.max(arm + dp(42f), hillY(x, h) + dp(30f));
+            float wb = dp(9f);
+            float wt = dp(3.5f);
+            pylonPath.moveTo(x - wb, base);
+            pylonPath.lineTo(x - wt, arm);
+            pylonPath.lineTo(x, peak);
+            pylonPath.lineTo(x + wt, arm);
+            pylonPath.lineTo(x + wb, base);
+            pylonPath.moveTo(x - dp(13f), arm - dp(2f));
+            pylonPath.lineTo(x + dp(13f), arm - dp(2f));
+            pylonPath.moveTo(x - dp(8f), peak + dp(5f));
+            pylonPath.lineTo(x + dp(8f), peak + dp(5f));
+            for (int p = 0; p < 3; p++) {
+                float y0 = base + (arm - base) * p / 3f;
+                float y1 = base + (arm - base) * (p + 1) / 3f;
+                float h0 = wb + (wt - wb) * p / 3f;
+                float h1 = wb + (wt - wb) * (p + 1) / 3f;
+                pylonPath.moveTo(x - h0, y0);
+                pylonPath.lineTo(x + h1, y1);
+                pylonPath.moveTo(x + h0, y0);
+                pylonPath.lineTo(x - h1, y1);
+            }
+        }
+
+        // Pines along the near crest, kept clear of the hamlets on the far ridge behind it.
+        treePath.rewind();
+        float step = dp(21f);
+        for (int n = 0; n * step < w + step; n++) {
+            int v = mix(n + 977);
+            if ((v & 3) == 0) {
+                continue;
+            }
+            float x = n * step + (((v >>> 9) & 7) - 3.5f) * dp(1.5f);
+            boolean clear = true;
+            for (float nx : NEIGHBOUR_X) {
+                if (Math.abs(x - nx * w) < w * 0.075f) {
+                    clear = false;
+                }
+            }
+            if (!clear) {
+                continue;
+            }
+            float ht = dp(10f) + ((v >>> 4) & 15) / 15f * dp(14f);
+            float base = hillY(x, h) + dp(5f);
+            treePath.moveTo(x, base - ht);
+            treePath.lineTo(x + ht * 0.24f, base - ht * 0.45f);
+            treePath.lineTo(x - ht * 0.24f, base - ht * 0.45f);
+            treePath.close();
+            treePath.moveTo(x, base - ht * 0.72f);
+            treePath.lineTo(x + ht * 0.36f, base);
+            treePath.lineTo(x - ht * 0.36f, base);
+            treePath.close();
+        }
+
+        // Reeds at the water's edge, sparse, and nowhere near the mill race.
+        reedPath.rewind();
+        float rstep = dp(17f);
+        float by = h * 0.90f + dp(3f);
+        for (int n = 0; n * rstep < w; n++) {
+            int v = mix(n + 4421);
+            float x = n * rstep;
+            if ((v & 3) != 0 || (x > w * 0.04f && x < w * 0.22f)) {
+                continue;
+            }
+            for (int b = -1; b <= 1; b++) {
+                float lean = b * dp(3f) + (((v >>> (6 + 2 * (b + 1))) & 3) - 1.5f) * dp(1f);
+                float len = dp(9f) + ((v >>> (12 + 3 * (b + 1))) & 7) * dp(1.6f);
+                reedPath.moveTo(x + b * dp(2f), by);
+                reedPath.lineTo(x + b * dp(2f) + lean, by - len);
+            }
+        }
+    }
+
+    /**
+     * The mill: a flume on a trestle pouring the race onto an overshot wheel, the wheel itself with
+     * buckets and rims, water spilling off it into the river, and the generator house whose window
+     * and hum follow the power going out on the line.
+     */
+    private void drawMill(Canvas c, float w, float h, float level, boolean discharging, float juice) {
+        double t = sessionSeconds;
+        float wx = w * 0.12f;
+        float wy = h * 0.84f;
+        float wr = dp(40f);
+        float waterTop = h * 0.90f;
+        float spd = Math.max(0f, Math.min(1f, boat.value() / 4f));
+        float wet = 0.25f + 0.75f * spd;
+        float gx0 = genX0;
+        float gx1 = genX1;
+        float gcx = (gx0 + gx1) / 2f;
+
+        // The generator house, behind the wheel. Its hum first: a glow that follows the line.
+        soft(c, discharging ? coolG : hotG, gcx, wy - dp(14f), dp(130f), dp(96f), 0.06f + 0.42f * level);
+        paint.setColor(0xFF353C4A);
+        c.drawRect(gx0, genWallTop, gx1, genGround, paint);
+        paint.setColor(0x26A8C4E8); // moonlit corner
+        c.drawRect(gx1 - dp(5f), genWallTop, gx1, genGround, paint);
+        paint.setColor(0x30000000); // stone courses
+        for (float y = genWallTop + dp(9f); y < genGround - dp(2f); y += dp(9f)) {
+            c.drawRect(gx0, y, gx1, y + dp(1f), paint);
+        }
+        path.rewind();
+        path.moveTo(gx0 - dp(5f), genWallTop);
+        path.lineTo(gcx, genPeakY);
+        path.lineTo(gx1 + dp(5f), genWallTop);
+        path.close();
+        paint.setColor(0xFF232A38);
+        c.drawPath(path, paint);
+        paint.setStrokeWidth(dp(1.4f));
+        paint.setColor(0x55A8C4E8);
+        c.drawLine(gcx, genPeakY, gx1 + dp(5f), genWallTop, paint);
+        // The arched window, lit by what you are making.
+        float wl = gcx - dp(10f);
+        float wrt = gcx + dp(10f);
+        float wtop = wy - dp(20f);
+        float wbot = wy + dp(3f);
+        paint.setColor(mixColor(0xFF161C28, discharging ? 0xFFBFEFFF : 0xFFFFE3A0, 0.1f + 0.9f * level));
+        c.drawRect(wl, wtop, wrt, wbot, paint);
+        c.drawCircle(gcx, wtop, dp(10f), paint);
+        paint.setColor(0xFF1A1E28);
+        paint.setStrokeWidth(dp(1.4f));
+        c.drawLine(gcx, wtop - dp(10f), gcx, wbot, paint);
+        c.drawLine(wl, wtop + dp(4f), wrt, wtop + dp(4f), paint);
+        soft(c, discharging ? coolG : warmG, gcx, wtop + dp(4f), dp(42f), dp(42f), level * 0.75f);
+        paint.setColor(0xFF1E222C);
+        c.drawRect(gx1 - dp(14f), genGround - dp(18f), gx1 - dp(5f), genGround, paint);
+        // The insulator on the roof that the line leaves from, arcing when you run a surplus.
+        paint.setColor(0xFF8A93A6);
+        c.drawRect(insX - dp(1.2f), insY, insX + dp(1.2f), insY + dp(9f), paint);
+        paint.setColor(0xFFB8C0CC);
+        c.drawCircle(insX, insY + dp(2f), dp(2.6f), paint);
+        if (juice > 1.15f && ((int) (t * 14)) % 3 == 0) {
+            int v = mix((int) (t * 14));
+            paint.setStrokeWidth(dp(1.4f));
+            paint.setColor(discharging ? 0xFFBFEFFF : 0xFFFFF4C8);
+            float ax = insX + (((v >>> 3) & 7) - 3.5f) * dp(2f);
+            float ay = insY - dp(8f);
+            c.drawLine(insX, insY, ax, ay, paint);
+            c.drawLine(ax, ay, ax + (((v >>> 7) & 7) - 3.5f) * dp(2f), ay - dp(7f), paint);
+        }
+
+        // Stone pier under the axle, standing in the river.
+        paint.setColor(0xFF1A202C);
+        path.rewind();
+        path.moveTo(wx - dp(9f), wy);
+        path.lineTo(wx + dp(9f), wy);
+        path.lineTo(wx + dp(16f), waterTop + dp(6f));
+        path.lineTo(wx - dp(16f), waterTop + dp(6f));
+        path.close();
+        c.drawPath(path, paint);
+
+        // The flume on its trestle, carrying the race in from upstream, glinting as it runs.
+        float fy = wy - wr - dp(12f);
+        float fEnd = wx + dp(4f);
+        paint.setColor(0xFF2A2219);
+        paint.setStrokeWidth(dp(3f));
+        c.drawLine(wx - wr - dp(14f), fy + dp(8f), wx - wr - dp(22f), wy + dp(14f), paint);
+        c.drawLine(dp(36f), fy + dp(8f), dp(28f), wy + dp(14f), paint);
+        float brace = (fy + wy) / 2f + dp(10f);
+        c.drawLine(dp(32f), brace, wx - wr - dp(18f), brace, paint);
+        paint.setColor(0xFF4A3A28);
+        c.drawRect(-dp(2f), fy, fEnd, fy + dp(9f), paint);
+        paint.setColor(alpha(0.75f * wet, 0x3C7FB0));
+        c.drawRect(-dp(2f), fy - dp(2.5f), fEnd, fy + dp(1f), paint);
+        paint.setColor(0x40FFE6B0);
+        c.drawRect(-dp(2f), fy + dp(1f), fEnd, fy + dp(2.2f), paint);
+        paint.setColor(alpha(0.65f * wet, 0xCFE8FF));
+        float run = fEnd + dp(2f);
+        for (int g = 0; g < 7; g++) {
+            float gx = (g * dp(37f) + wheel * dp(22f)) % run;
+            c.drawRect(gx, fy - dp(2f), gx + dp(9f), fy - dp(0.8f), paint);
+        }
+        paint.setColor(alpha(0.6f * wet, 0x6FB8E8));
+        paint.setStrokeWidth(dp(4f));
+        c.drawLine(fEnd, fy, fEnd + dp(5f), wy - wr * 0.86f, paint);
+
+        // The wheel: buckets, two rims, spokes. Clockwise, so the right side falls full of water.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(4.5f));
+        paint.setColor(0xFF4A3826);
+        for (int b = 0; b < 16; b++) {
+            double a = wheel + b * Math.PI / 8;
+            float ca = (float) Math.cos(a);
+            float sa = (float) Math.sin(a);
+            c.drawLine(wx + ca * wr * 0.70f, wy + sa * wr * 0.70f, wx + ca * wr * 1.08f, wy + sa * wr * 1.08f, paint);
+        }
+        paint.setColor(0xFF6E5638);
+        paint.setStrokeWidth(dp(4f));
+        c.drawCircle(wx, wy, wr, paint);
+        paint.setColor(0xFF5A4630);
+        paint.setStrokeWidth(dp(3f));
+        c.drawCircle(wx, wy, wr * 0.70f, paint);
+        paint.setColor(0xFF6E5638);
+        for (int s = 0; s < 8; s++) {
+            double a = wheel + s * Math.PI / 4 + Math.PI / 16;
+            c.drawLine(wx, wy, wx + (float) Math.cos(a) * wr * 0.70f, wy + (float) Math.sin(a) * wr * 0.70f, paint);
+        }
+        arcR.set(wx - wr, wy - wr, wx + wr, wy + wr);
+        paint.setColor(0x66FFE6B0);
+        paint.setStrokeWidth(dp(1.6f));
+        c.drawArc(arcR, -80f, 70f, false, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(alpha(0.8f * wet, 0x5FA8DA));
+        for (int b = 0; b < 16; b++) {
+            double a = wheel + b * Math.PI / 8 + Math.PI / 16;
+            float ca = (float) Math.cos(a);
+            if (ca > 0.15f) {
+                c.drawCircle(wx + ca * wr * 0.9f, wy + (float) Math.sin(a) * wr * 0.9f, dp(2.6f), paint);
+            }
+        }
+        paint.setColor(0xFF22262F);
+        c.drawCircle(wx, wy, dp(8f), paint);
+        paint.setColor(0xFF8A93A6);
+        c.drawCircle(wx - dp(2f), wy - dp(2f), dp(2.4f), paint);
+
+        // Water spilling off the bottom of the wheel, and the foam where it lands.
+        float sx = wx + wr * 0.5f;
+        float sy = wy + wr * 0.75f;
+        paint.setStrokeWidth(dp(2f));
+        for (int k = 0; k < 4; k++) {
+            float p = (float) ((t * 2.2 + k * 0.25) % 1.0);
+            float y0 = sy + p * (waterTop - sy);
+            paint.setColor(alpha(0.7f * wet * (1f - p * 0.5f), 0x9FD0F0));
+            c.drawLine(sx + k * dp(3f), y0, sx + k * dp(3f) + dp(1f), Math.min(waterTop, y0 + dp(10f)), paint);
+        }
+        soft(c, coolG, sx + dp(6f), waterTop + dp(3f), dp(36f), dp(9f), 0.35f * wet);
+        paint.setColor(alpha(0.55f * wet, 0xE8F4FF));
+        for (int k = 0; k < 3; k++) {
+            float fw = dp(7f) + (float) Math.abs(Math.sin(t * 5 + k * 2)) * dp(9f);
+            float fx0 = sx + k * dp(8f) - dp(4f);
+            c.drawOval(fx0 - fw, waterTop, fx0 + fw, waterTop + dp(3.5f), paint);
+        }
+    }
+
+    /**
+     * The valley line: lattice pylons, an earth wire, and the conductor carrying current from the
+     * generator to the town as bright pulses. Speed and brightness follow your supply; they run red
+     * when you are under demand, and cyan pulses are the bank's share while it discharges.
+     */
+    private void drawPowerLine(Canvas c, float level, boolean shortfall, float juice) {
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setColor(0xFF36445F);
+        paint.setStrokeWidth(dp(1.7f));
+        c.drawPath(pylonPath, paint);
+        paint.setColor(0xFF2A364E);
+        paint.setStrokeWidth(dp(1.2f));
+        c.drawPath(earthPath, paint);
+        paint.setColor(0xFF34405A);
+        paint.setStrokeWidth(dp(2.2f));
+        c.drawPath(wirePath, paint);
+        int rgb = shortfall ? 0xF0655D : 0xF5C518;
+        if (level > 0.03f) {
+            // The line itself hums: a faint wide glow and a brighter core, both with your watts.
+            paint.setStrokeWidth(dp(7f));
+            paint.setColor(alpha(0.14f * level, rgb));
+            c.drawPath(wirePath, paint);
+            paint.setStrokeWidth(dp(1.4f));
+            paint.setColor(alpha(0.6f * level, rgb));
+            c.drawPath(wirePath, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF8A93A6);
+        for (int i = 1; i < rN - 1; i++) {
+            c.drawCircle(rX[i] - dp(13f), rY[i] - dp(1f), dp(1.8f), paint);
+            c.drawCircle(rX[i] + dp(13f), rY[i] - dp(1f), dp(1.8f), paint);
+        }
+
+        float total = rCum[rN - 1];
+        float bankShare = gridSupply > 1f ? Math.min(1f, boostW / gridSupply) : 0f;
+        float a = 0.18f + 0.82f * level;
+        float surplus = Math.max(0f, Math.min(1f, juice - 1f));
+        float r = dp(14f) * (1f + 0.6f * surplus);
+        double base = flow * 0.07;
+        paint.setStrokeWidth(dp(3f));
+        for (int d = 0; d < PULSES; d++) {
+            float u = (float) ((((base + d / (double) PULSES) % 1.0) + 1.0) % 1.0) * total;
+            boolean fromBank = !shortfall && ((d * 5) % PULSES) < bankShare * PULSES;
+            RadialGradient g = shortfall ? redG : fromBank ? coolG : hotG;
+            int core = shortfall ? 0xFFB0A8 : fromBank ? 0xD8F6FF : 0xFFF6D8;
+            routePoint(Math.max(0f, u - dp(38f)));
+            float tx = ptX;
+            float ty = ptY;
+            routePoint(u);
+            paint.setColor(alpha(0.55f * a, core));
+            c.drawLine(tx, ty, ptX, ptY, paint);
+            soft(c, g, ptX, ptY, r, r, a);
+            paint.setColor(alpha(a, core));
+            c.drawCircle(ptX, ptY, dp(2.6f), paint);
+        }
+    }
+
+    /** Spur lines from the valley line up to every connected town, current climbing them. */
+    private void drawSpurs(Canvas c, float w, float h, int spill, float level) {
+        for (int k = 0; k < townsConnected; k++) {
+            int litHere = Math.max(0, Math.min(NEIGH_HOUSES, spill - k * NEIGH_HOUSES));
+            float cx = w * NEIGHBOUR_X[k];
+            float baseY = farHillY(cx, h) + dp(20f);
+            float lineY = conductorY(cx, h);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setColor(0xFF34405A);
+            paint.setStrokeWidth(dp(1.8f));
+            c.drawLine(cx, baseY, cx, lineY, paint);
+            paint.setStrokeWidth(dp(1.6f));
+            paint.setColor(0xFF36445F);
+            c.drawLine(cx - dp(7f), lineY, cx, lineY - dp(16f), paint);
+            c.drawLine(cx + dp(7f), lineY, cx, lineY - dp(16f), paint);
+            c.drawLine(cx - dp(5f), baseY + dp(10f), cx, baseY - dp(2f), paint);
+            c.drawLine(cx + dp(5f), baseY + dp(10f), cx, baseY - dp(2f), paint);
+            paint.setStyle(Paint.Style.FILL);
+            float a = litHere > 0 ? 0.3f + 0.6f * level : 0.2f;
+            for (int d = 0; d < 4; d++) {
+                float f = (float) (((townFlow + d / 4f) % 1.0 + 1.0) % 1.0);
+                float py = lineY - f * (lineY - baseY);
+                if (litHere > 0) {
+                    soft(c, hotG, cx, py, dp(9f), dp(9f), a);
+                }
+                paint.setColor(litHere > 0 ? alpha(a + 0.1f, 0xFFF0C0) : 0xFF6A7488);
+                c.drawCircle(cx, py, dp(2f), paint);
+            }
+        }
+    }
+
+    /** The lit town, the mill window and the moon, broken up in the river. */
+    private void drawReflections(Canvas c, float w, float h, float share, float level) {
+        double t = sessionSeconds;
+        float top = h * 0.90f;
+        soft(c, coolG, w * 0.82f, top + dp(16f), dp(96f), dp(14f), 0.22f * (1f - stormAmt * 0.7f));
+        if (share > 0.01f) {
+            soft(c, warmG, w * 0.6f, top + dp(8f), w * 0.36f, dp(26f), 0.28f * share);
+        }
+        java.util.Arrays.fill(reflBin, 0f);
+        for (int i = 0; i < MAX_HOUSES; i++) {
+            if (on[i] && rank[i] < houses) {
+                int b = Math.min(REFL_BINS - 1, Math.max(0, (int) (houseX[i] * REFL_BINS)));
+                reflBin[b] += 0.4f + (houseY[i] - 0.52f) * 2.2f;
+            }
+        }
+        int gb = Math.min(REFL_BINS - 1, Math.max(0, (int) ((genX0 + genX1) / 2f / w * REFL_BINS)));
+        reflBin[gb] += level * 1.5f;
+        float bw = w / REFL_BINS;
+        for (int b = 0; b < REFL_BINS; b++) {
+            float v = reflBin[b];
+            if (v < 0.05f) {
+                continue;
+            }
+            float a = Math.min(1f, v / 2.5f);
+            float x = (b + 0.5f) * bw;
+            for (int k = 0; k < 4; k++) {
+                float y = top + dp(7f) + k * dp(9f);
+                float wob = (float) Math.sin(t * 1.7 + b * 1.3 + k * 2.1) * dp(4f);
+                float len = (dp(10f) + dp(12f) * a) * (1f - k * 0.16f);
+                float shimmer = 0.7f + 0.3f * (float) Math.sin(t * 3.1 + b * 0.7 + k);
+                paint.setColor(alpha(0.8f * a * (1f - k * 0.2f) * shimmer, 0xFFD27A));
+                c.drawRect(x + wob - len / 2f, y, x + wob + len / 2f, y + dp(2.2f), paint);
+            }
+        }
+    }
+
+    /** A glossy top half on a filled bar or chip, so it reads as a lit surface, not a debug box. */
+    private void gloss(Canvas c, float l, float t, float r, float b, float radius) {
+        if (r - l < dp(6f)) {
+            return;
+        }
+        paint.setColor(0x2EFFFFFF);
+        c.drawRoundRect(l + dp(1f), t + dp(1f), r - dp(1f), t + (b - t) * 0.48f, radius, radius, paint);
+    }
+
     /* ---------------- frame ---------------- */
 
     @Override
@@ -1429,6 +2048,7 @@ final class NightGridGame extends GameView {
         if (w == 0 || h == 0) {
             return;
         }
+        ensureScene(w, h);
         int watts = status == null ? 0 : status.watts;
         supply += (watts - supply) * Math.min(1f, dt / 4f);
         // The bank, spent on the rower's own word. It drains DISCHARGE_DRAIN over DISCHARGE_SECONDS
@@ -1539,9 +2159,18 @@ final class NightGridGame extends GameView {
             c.drawCircle((i * 197) % starW, (i * 89) % starH, dp(1.1f), paint);
         }
         paint.setAlpha(255);
-        Fx.glow(c, w * 0.82f, h * 0.14f, dp(80f), 0x44E9EEF5);
+        // The moon: a wide cool halo, the old glow, and a few maria so it is not a flat disc.
+        float mx = w * 0.82f;
+        float my = h * 0.14f;
+        soft(c, coolG, mx, my, dp(200f), dp(200f), 0.10f * (1f - stormAmt));
+        Fx.glow(c, mx, my, dp(80f), 0x44E9EEF5);
         paint.setColor(0xFFE9EEF5);
-        c.drawCircle(w * 0.82f, h * 0.14f, dp(26f), paint);
+        c.drawCircle(mx, my, dp(26f), paint);
+        paint.setColor(0x223A4A66);
+        c.drawCircle(mx - dp(8f), my - dp(5f), dp(7f), paint);
+        c.drawCircle(mx + dp(7f), my + dp(7f), dp(5f), paint);
+        c.drawCircle(mx + dp(9f), my - dp(10f), dp(3.5f), paint);
+        c.drawCircle(mx - dp(3f), my + dp(13f), dp(3f), paint);
         drawNightSky(c, w, h);
 
         // The far ridge and the neighbouring towns on it, behind everything in the valley.
@@ -1555,11 +2184,15 @@ final class NightGridGame extends GameView {
             int litHere = connected
                     ? Math.max(0, Math.min(NEIGH_HOUSES, spill - k * NEIGH_HOUSES)) : 0;
             drawNeighbourTown(c, w, h, k, litHere, connected);
+            joinFlash[k] = Math.max(0f, joinFlash[k] - dt);
         }
+        // Mist lying in the valley between the ridges.
+        soft(c, coolG, w * 0.5f, h * 0.475f, w * 0.62f, dp(34f), 0.12f);
 
-        // Hills.
-        paint.setColor(0xFF0B1426);
-        path.reset();
+        // Hills: lit at the crest by the moon, falling into shadow toward the river.
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(hillG);
+        path.rewind();
         path.moveTo(0, h * 0.58f);
         for (float x = 0; x <= w; x += dp(40f)) {
             path.lineTo(x, hillY(x, h));
@@ -1568,66 +2201,66 @@ final class NightGridGame extends GameView {
         path.lineTo(0, h);
         path.close();
         c.drawPath(path, paint);
-        if (season() == WINTER) {
-            // A dusting of snow along the ridge.
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3f));
-            paint.setColor(0x66E8EEF8);
-            path.reset();
-            path.moveTo(0, hillY(0, h));
-            for (float x = dp(40f); x <= w; x += dp(40f)) {
-                path.lineTo(x, hillY(x, h));
-            }
-            c.drawPath(path, paint);
-            paint.setStyle(Paint.Style.FILL);
+        paint.setShader(null);
+        paint.setColor(0xFF0A1322);
+        c.drawPath(treePath, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        boolean winter = season() == WINTER;
+        // A moonlit rim along the ridge, or in winter a dusting of snow.
+        paint.setStrokeWidth(dp(winter ? 3f : 1.5f));
+        paint.setColor(winter ? 0x66E8EEF8 : 0x2EA8C4E8);
+        path.rewind();
+        path.moveTo(0, hillY(0, h));
+        for (float x = dp(40f); x <= w; x += dp(40f)) {
+            path.lineTo(x, hillY(x, h));
         }
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
         drawLandmarks(c, w, h, homeLit);
         drawTrain(c, w, h);
         // 3.19.6: the right half of the tablet screen was bare. A wind farm turning with your rate,
         // a road with headlights, and an aurora when the town is fully lit.
         drawValleyLife(c, w, h, share);
-        drawBattery(c, w, h);
-        drawDischarge(c, w, h);
 
-        // River and the water wheel generator.
-        paint.setColor(0xFF12304A);
-        c.drawRect(0, h * 0.90f, w, h, paint);
-        drawRiverLife(c, w, h);
-        float wx = w * 0.12f;
-        float wy = h * 0.84f;
-        float wr = dp(40f);
-        paint.setColor(0xFF5A4B3A);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(4f));
-        c.drawCircle(wx, wy, wr, paint);
-        for (int s = 0; s < 8; s++) {
-            double a = wheel + s * Math.PI / 4;
-            c.drawLine(wx, wy, wx + (float) Math.cos(a) * wr, wy + (float) Math.sin(a) * wr, paint);
-        }
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFF3A3A44);
-        c.drawRect(wx + wr * 0.6f, wy - dp(40f), wx + wr * 1.8f, wy + dp(10f), paint);
-
-        // Power line to the town with current flowing along it.
-        float lineY = h * 0.48f;
-        paint.setColor(0xFF2A3648);
-        paint.setStrokeWidth(dp(2f));
-        c.drawLine(wx + wr * 1.2f, wy - dp(40f), w * 0.26f, lineY, paint);
-        c.drawLine(w * 0.26f, lineY, w * 0.98f, lineY + dp(10f), paint);
+        // What the line is carrying: supply against the line it must hold right now.
         float need = phase == BLACKOUT || phase == WARNING ? blackoutNeed() : demand;
-        paint.setColor(gridSupply >= need ? 0xFFF5C518 : 0xFFF0655D);
-        for (int d = 0; d < 14; d++) {
-            float f = (float) (((flow + d / 14f) % 1.0 + 1.0) % 1.0);
-            float px = w * 0.26f + f * w * 0.72f;
-            float py = lineY + f * dp(10f);
-            c.drawCircle(px, py, dp(2.5f), paint);
-        }
-
-        // Houses, far rows first; a house exists once the town has grown to its place in the
-        // lighting order. (Was a search of the whole order for every house, every frame.)
+        float juice = gridSupply / Math.max(1f, need);
+        float level = Math.max(0f, Math.min(1f, juice));
+        boolean shortfall = gridSupply < need;
+        boolean discharging = boostW > 1f;
+        // Which houses are lit, needed by the river's reflections before the houses are drawn.
+        // A house exists once the town has grown to its place in the lighting order.
         for (int i = 0; i < MAX_HOUSES; i++) {
             on[i] = rank[i] < homeLit;
         }
+
+        // River: deep at the bottom, holding the sky's light at the bank, the town shining in it.
+        float waterTop = h * 0.90f;
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(waterG);
+        c.drawRect(0, waterTop, w, h, paint);
+        paint.setShader(null);
+        drawReflections(c, w, h, share, level);
+        drawRiverLife(c, w, h);
+        paint.setColor(0xFF09121D);
+        c.drawRect(0, waterTop - dp(3f), w, waterTop + dp(1f), paint);
+        paint.setColor(0x40A8C4E8);
+        c.drawRect(0, waterTop + dp(1f), w, waterTop + dp(2f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0xFF1E3240);
+        c.drawPath(reedPath, paint);
+        paint.setStyle(Paint.Style.FILL);
+        drawMill(c, w, h, level, discharging, juice);
+        drawBattery(c, w, h);
+        drawDischarge(c, w, h);
+
+        // The power line from the generator to the town, current pulsing along it.
+        drawPowerLine(c, level, shortfall, juice);
+        drawSpurs(c, w, h, spill, level);
+
+        // Houses, far rows first.
+        int season = season();
         for (int pass = 0; pass < MAX_HOUSES; pass++) {
             int i = order[MAX_HOUSES - 1 - pass];
             if (rank[i] >= houses) {
@@ -1637,22 +2270,77 @@ final class NightGridGame extends GameView {
             float hy = houseY[i] * h;
             float s = houseS[i] * dp(22f);
             boolean tall = rank[i] < storeys;
+            int v = houseVar[i];
+            float half = s * 0.5f * houseWide[i];
+            float eave = half + s * 0.12f;
+            float pitch = s * housePitch[i];
+            float dx = -s * 0.34f;          // the side wall recedes up and to the left
+            float dy = -s * 0.15f;
             float grow = bornAt[i] >= 0 ? Math.min(1f, (float) (sessionSeconds - bornAt[i]) / 1.2f) : 1f;
+            // On the ground: a soft contact shadow and, when lit, a pool of window light.
+            paint.setColor(0x50020610);
+            c.drawOval(hx - half + dx - s * 0.1f, hy - s * 0.07f, hx + half + s * 0.18f, hy + s * 0.11f, paint);
+            if (on[i]) {
+                soft(c, warmG, hx, hy + s * 0.04f, s * 1.5f, s * 0.32f, 0.5f);
+            }
             if (grow < 1f) {
                 c.save();
                 c.scale(1f, grow * (2f - grow), hx, hy); // rises out of the ground, easing in
             }
             float wallTop = hy - s * (tall ? 1.0f : 0.6f);
-            // Walls and roof in moonlit tones, so the unlit town still reads as a town.
-            paint.setColor(on[i] ? 0xFF3A3F52 : 0xFF2A3346);
-            c.drawRect(hx - s * 0.5f, wallTop, hx + s * 0.5f, hy, paint);
-            path.reset();
-            path.moveTo(hx - s * 0.62f, wallTop);
-            path.lineTo(hx, wallTop - s * 0.42f);
-            path.lineTo(hx + s * 0.62f, wallTop);
+            float peakY = wallTop - pitch;
+            int wallC = (on[i] ? WALL_LIT : WALL_DARK)[v % 3];
+            int sideC = (on[i] ? SIDE_LIT : SIDE_DARK)[v % 3];
+            int roofC = (on[i] ? ROOF_LIT : ROOF_DARK)[(v >>> 2) % 3];
+            int roofSideC = winter ? (on[i] ? 0xFF98A3B8 : 0xFF7C879C)
+                    : (on[i] ? ROOFSIDE_LIT : ROOFSIDE_DARK)[(v >>> 2) % 3];
+            // The side wall, in shadow, then the long roof over it.
+            path.rewind();
+            path.moveTo(hx - half, hy);
+            path.lineTo(hx - half, wallTop);
+            path.lineTo(hx - half + dx, wallTop + dy);
+            path.lineTo(hx - half + dx, hy + dy);
             path.close();
-            paint.setColor(on[i] ? 0xFF5A3A36 : 0xFF3A2E33);
+            paint.setColor(sideC);
             c.drawPath(path, paint);
+            path.rewind();
+            path.moveTo(hx, peakY);
+            path.lineTo(hx - eave, wallTop + s * 0.02f);
+            path.lineTo(hx - eave + dx, wallTop + s * 0.02f + dy);
+            path.lineTo(hx + dx, peakY + dy);
+            path.close();
+            paint.setColor(roofSideC);
+            c.drawPath(path, paint);
+            if ((v & 16) != 0) {
+                // A chimney through the long roof, smoking when someone is home and it is cold.
+                float chx = hx - eave * 0.45f + dx * 0.5f;
+                float chb = peakY + pitch * 0.45f + dy * 0.5f;
+                paint.setColor(sideC);
+                c.drawRect(chx - s * 0.06f, chb - pitch * 0.85f, chx + s * 0.06f, chb, paint);
+                if (on[i] && season != SUMMER && (v & 32) != 0) {
+                    for (int p = 0; p < 2; p++) {
+                        float f = (float) (((sessionSeconds * 0.35 + i * 0.137 + p * 0.5) % 1.0));
+                        paint.setColor(alpha(0.22f * (1f - f), 0x8A93A6));
+                        c.drawCircle(chx + f * s * 0.5f, chb - pitch * 0.85f - f * s * 0.9f,
+                                s * (0.07f + 0.12f * f), paint);
+                    }
+                }
+            }
+            // The gable end, facing the moon.
+            paint.setColor(wallC);
+            c.drawRect(hx - half, wallTop, hx + half, hy, paint);
+            path.rewind();
+            path.moveTo(hx - eave, wallTop);
+            path.lineTo(hx, peakY);
+            path.lineTo(hx + eave, wallTop);
+            path.close();
+            paint.setColor(roofC);
+            c.drawPath(path, paint);
+            paint.setStrokeWidth(Math.max(1f, s * 0.05f));
+            paint.setColor(0x50A8C4E8); // moonlight on the right-hand slope and along the ridge
+            c.drawLine(hx, peakY, hx + eave, wallTop, paint);
+            paint.setColor(0x36A8C4E8);
+            c.drawLine(hx, peakY, hx + dx, peakY + dy, paint);
             paint.setColor(on[i] ? 0xFF6A4A30 : 0xFF1A2030);
             c.drawRect(hx - s * 0.08f, hy - s * 0.28f, hx + s * 0.08f, hy, paint);   // door
             if (on[i]) {
@@ -1661,21 +2349,24 @@ final class NightGridGame extends GameView {
             }
             float ww = s * 0.28f;
             float wh = s * 0.26f;
-            drawWindow(c, i, 0, hx - s * 0.42f, hy - s * 0.54f, ww, wh, on[i]);
-            drawWindow(c, i, 1, hx + s * 0.14f, hy - s * 0.54f, ww, wh, on[i]);
+            float lx = hx - half + s * 0.08f;
+            float rx = hx + half - s * 0.08f - ww;
+            drawWindow(c, i, 0, lx, hy - s * 0.54f, ww, wh, on[i]);
+            drawWindow(c, i, 1, rx, hy - s * 0.54f, ww, wh, on[i]);
             if (tall) {
-                drawWindow(c, i, 2, hx - s * 0.42f, hy - s * 0.92f, ww, wh, on[i]);
-                drawWindow(c, i, 3, hx + s * 0.14f, hy - s * 0.92f, ww, wh, on[i]);
+                drawWindow(c, i, 2, lx, hy - s * 0.92f, ww, wh, on[i]);
+                drawWindow(c, i, 3, rx, hy - s * 0.92f, ww, wh, on[i]);
             }
             if (on[i]) {
                 // A street lamp beside every lit house.
+                float lampX = hx + eave + s * 0.12f;
                 paint.setColor(0xFF8A93A6);
-                c.drawRect(hx + s * 0.72f, hy - s * 0.9f, hx + s * 0.76f, hy, paint);
-                glow(c, hx + s * 0.74f, hy - s * 0.92f, s * 0.6f, 0x88FFE8A0);
+                c.drawRect(lampX - s * 0.02f, hy - s * 0.9f, lampX + s * 0.02f, hy, paint);
+                glow(c, lampX, hy - s * 0.92f, s * 0.6f, 0x88FFE8A0);
                 paint.setColor(0xFFFFF2C0);
-                c.drawCircle(hx + s * 0.74f, hy - s * 0.92f, s * 0.07f, paint);
+                c.drawCircle(lampX, hy - s * 0.92f, s * 0.07f, paint);
             }
-            decorateHouse(c, i, hx, hy, s, wallTop, on[i]);
+            decorateHouse(c, i, hx, hy, s, wallTop, eave, pitch, on[i]);
             if (grow < 1f) {
                 c.restore();
             }
@@ -1721,6 +2412,7 @@ final class NightGridGame extends GameView {
         }
         paint.setColor(gridSupply >= need ? ACCENT : BAD);
         c.drawRoundRect(bx, by, bx + bw * Math.min(1f, supply / max), by + dp(14f), dp(7f), dp(7f), paint);
+        gloss(c, bx, by, bx + bw * Math.min(1f, Math.max(supply, gridSupply) / max), by + dp(14f), dp(6f));
         float dx = bx + bw * Math.min(1f, need / max);
         paint.setColor(phase == BLACKOUT || phase == WARNING || phase == PEAK ? BAD : TEXT);
         c.drawRect(dx - dp(2f), by - dp(6f), dx + dp(2f), by + dp(20f), paint);
@@ -1735,6 +2427,7 @@ final class NightGridGame extends GameView {
         seasonHit.set(w - cw - dp(12f), dp(14f), w - dp(12f), dp(42f));
         paint.setColor(0x33FFFFFF);
         c.drawRoundRect(seasonHit, dp(14f), dp(14f), paint);
+        gloss(c, seasonHit.left, seasonHit.top, seasonHit.right, seasonHit.bottom, dp(12f));
         label(c, SEASON[season()] + (seasonOverride >= 0 ? " *" : ""), seasonHit.centerX(), seasonHit.centerY() + dp(4f), 11f, TEXT, Paint.Align.CENTER);
         label(c, heldTotal + " blackouts held", seasonHit.centerX(), seasonHit.bottom + dp(14f), 9f, FAINT, Paint.Align.CENTER);
 
@@ -1801,6 +2494,7 @@ final class NightGridGame extends GameView {
             c.drawRoundRect(bx, by, bx + bw, by + dp(12f), dp(6f), dp(6f), paint);
             paint.setColor(f >= 1f ? ACCENT : WARN_COLOR);
             c.drawRoundRect(bx, by, bx + bw * f, by + dp(12f), dp(6f), dp(6f), paint);
+            gloss(c, bx, by, bx + bw * f, by + dp(12f), dp(5f));
             label(c, f >= 1f ? "PEAK IN THE BAG - KEEP IT LIT"
                             : covering ? "covering the peak - hold it" : "short - row harder or DISCHARGE the bank",
                     cx, by + dp(26f), 10f, covering ? TEXT : BAD, Paint.Align.CENTER);
@@ -1825,6 +2519,7 @@ final class NightGridGame extends GameView {
             c.drawRoundRect(bx, by, bx + bw, by + dp(12f), dp(6f), dp(6f), paint);
             paint.setColor(reserve > 0.5f ? ACCENT : reserve > 0.25f ? WARN : BAD);
             c.drawRoundRect(bx, by, bx + bw * reserve, by + dp(12f), dp(6f), dp(6f), paint);
+            gloss(c, bx, by, bx + bw * reserve, by + dp(12f), dp(5f));
             label(c, "GRID RESERVE" + (boostW > 1f ? "  ·  the bank is covering you"
                             : battery > 0.05f && gridSupply < blackoutNeed() ? "  ·  DISCHARGE the bank" : ""),
                     cx, by + dp(26f), 10f, boostW > 1f ? 0xFF9FD8FF : TEXT, Paint.Align.CENTER);

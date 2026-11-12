@@ -2,8 +2,10 @@ package com.codex.waterrowerdiagnostic;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.view.MotionEvent;
 
 /**
@@ -307,6 +309,41 @@ final class CollectorGame extends GameView {
     private final RectF modeBtn = new RectF();
     private final RectF panel = new RectF();
     private final RectF[] cardRect = {new RectF(), new RectF(), new RectF()};
+
+    /* ---------- 3.25.0 graphics pass: cached shaders and reusable buffers ----------
+     * Everything here is built when the view size (or the place) changes, never per frame. */
+    /** Each lane's own water: calm green, flowing blue, white rapids. */
+    private static final int[] LANE_COLOR = {0xFF46D8A8, 0xFF6F95FF, 0xFFD8F2FF};
+    private final LinearGradient[] laneShader = new LinearGradient[LANES];
+    private final LinearGradient[] laneShaderOn = new LinearGradient[LANES];
+    private LinearGradient dangerShader;
+    private float laneShaderH = -1f;
+    private final LinearGradient[] shoreShader = new LinearGradient[4];
+    private float shoreShaderTop = -1f;
+    private float shoreShaderBottom = -1f;
+    private LinearGradient rushBandShader;
+    private float rushBandY = -1f;
+    /** HUD panel gradients, keyed by height and colour pair; drawn translated so one fits all. */
+    private static final int PANEL_CACHE = 20;
+    private final LinearGradient[] panelShader = new LinearGradient[PANEL_CACHE];
+    private final int[] panelKeyH = new int[PANEL_CACHE];
+    private final int[] panelKeyTop = new int[PANEL_CACHE];
+    private final int[] panelKeyBottom = new int[PANEL_CACHE];
+    private int panelCount;
+    private int panelNext;
+    private static final int PANEL_TOP = 0xDC1A2738;
+    private static final int PANEL_BOTTOM = 0xD00A111B;
+    /** Batched reed and foam strokes: one drawLines call per colour instead of hundreds of draws. */
+    private final Lines linesA = new Lines(512);
+    private final Lines linesB = new Lines(512);
+    private final Lines linesC = new Lines(512);
+    /** HUD strings cached on change rather than formatted every frame. */
+    private String speedText = "0.0 m/s";
+    private int speedTenths = Integer.MIN_VALUE;
+    private String logsText = "LOGS HIT  ·  0 DODGED";
+    private int logsTextDodged = -1;
+    private String placeText = "";
+    private int placeTextKey = -1;
 
     CollectorGame(Context context, PersonalBests bests) {
         super(context);
@@ -813,9 +850,7 @@ final class CollectorGame extends GameView {
             c.drawRect(0, waterTop, w, waterBottom, paint);
         }
         drawBank(c, w, bankTop, waterTop, ppm);
-        drawNearShore(c, w, h, waterBottom, ppm);
         fx.step(dt, dp(300f));
-        drawFish(c, w, waterTop, waterBottom);
 
         float boatX = w * 0.22f;
         float laneH = (waterBottom - waterTop) / LANES;
@@ -838,6 +873,13 @@ final class CollectorGame extends GameView {
         // The lane the hull is physically in - what a log hits.
         int boatLane = Math.max(0, Math.min(LANES - 1, (int) ((boatY - waterTop) / laneH)));
         boolean magnet = sessionSeconds < magnetUntil;
+
+        // 3.25.0: each lane drawn as its own water - calm, flowing, rapids - before anything
+        // floats on it, then the near bank over the bottom edge and whatever is jumping.
+        int dangerLane = logLive && logLane == boatLane && logX * w > boatX ? logLane : -1;
+        drawLanes(c, w, waterTop, laneH, inLane, dangerLane, speed, ppm);
+        drawNearShore(c, w, h, waterBottom, ppm);
+        drawFish(c, w, waterTop, waterBottom);
 
         // Chain timer: a chain lives only while catches keep coming.
         if (playing && combo > 0 && gameSeconds - lastCatchAt > chainSeconds()) {
@@ -906,19 +948,10 @@ final class CollectorGame extends GameView {
         updateLabels();
         for (int i = 0; i < LANES; i++) {
             float ly = waterTop + laneH * (i + 0.5f);
-            // Lane band label and highlight when you are in it; red pulse if a log is coming down it.
-            boolean danger = logLive && i == logLane && i == boatLane && logX * w > boatX;
-            if (danger) {
-                int a = 30 + (int) (40 * Math.abs(Math.sin(sessionSeconds * 8)));
-                paint.setColor((a << 24) | 0x00F0655D);
-            } else {
-                paint.setColor(i == inLane ? 0x2235D0BA : 0x00000000);
-            }
-            paint.setStyle(Paint.Style.FILL);
-            c.drawRect(0, waterTop + laneH * i, w, waterTop + laneH * (i + 1), paint);
+            // Lane band label; the lane's water, highlight and log warning are drawn in drawLanes.
             label(c, laneCaption[i] != null ? laneCaption[i] : NAMES[i],
-                    w - dp(14f), waterTop + laneH * i + dp(20f), 11f, i == inLane ? ACCENT : DIM,
-                    Paint.Align.RIGHT);
+                    w - dp(14f), waterTop + laneH * i + dp(20f), 11f,
+                    i == inLane ? ACCENT : mix(LANE_COLOR[i], DIM, 0.55f), Paint.Align.RIGHT);
             if (i > 0) {
                 scenery.drawBuoys(c, w, waterTop + laneH * i, sessionMeters, ppm, sessionSeconds, 8f);
             }
@@ -969,7 +1002,7 @@ final class CollectorGame extends GameView {
                     drawGoldFish(c, bx, py, i);
                     bold(c, "+" + GOLD_POINTS, bx, py - dp(46f), 14f, GOLD, Paint.Align.CENTER);
                 } else {
-                    drawPrize(c, i, bx, py + (float) Math.sin(sessionSeconds * 3 + i) * dp(3f));
+                    drawPrize(c, i, bx, py, (float) Math.sin(sessionSeconds * 3 + i) * dp(3f));
                     bold(c, prizeLabel[i] != null ? prizeLabel[i] : PLUS[i], bx, py - dp(30f), 12f,
                             rushActive ? GOLD : TEXT, Paint.Align.CENTER);
                 }
@@ -1130,24 +1163,28 @@ final class CollectorGame extends GameView {
         }
 
         // 3.19.5: the sky is light now (the shader-alpha fix), so the HUD sits on dark pills.
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x990A1420);
-        c.drawRoundRect(w / 2f - dp(90f), h * 0.15f - dp(40f), w / 2f + dp(90f), h * 0.15f + dp(28f), dp(14f), dp(14f), paint);
-        c.drawRoundRect(dp(6f), h * 0.15f - dp(28f), dp(190f), h * 0.15f + dp(24f), dp(12f), dp(12f), paint);
-        c.drawRoundRect(dp(6f), h * 0.15f + dp(30f), dp(190f), h * 0.15f + dp(62f), dp(12f), dp(12f), paint);
-        c.drawRoundRect(w - dp(150f), h * 0.15f - dp(28f), w - dp(6f), h * 0.15f + dp(24f), dp(12f), dp(12f), paint);
+        // 3.25.0: one panel style for every HUD box - gradient, hairline, lit top edge.
+        hudPanel(c, w / 2f - dp(90f), h * 0.15f - dp(40f), w / 2f + dp(90f), h * 0.15f + dp(28f), dp(14f));
+        hudPanel(c, dp(6f), h * 0.15f - dp(28f), dp(190f), h * 0.15f + dp(24f), dp(12f));
+        if (inLane >= 0) {
+            // The lane you are in, as a coloured edge on the speed pill.
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(LANE_COLOR[inLane]);
+            c.drawRoundRect(dp(7f), h * 0.15f - dp(18f), dp(11f), h * 0.15f + dp(14f), dp(2f), dp(2f), paint);
+        }
+        hudPanel(c, dp(6f), h * 0.15f + dp(30f), dp(190f), h * 0.15f + dp(62f), dp(12f));
+        hudPanel(c, w - dp(150f), h * 0.15f - dp(28f), w - dp(6f), h * 0.15f + dp(24f), dp(12f));
         bold(c, String.valueOf(score), w / 2f, h * 0.15f, 44f, ACCENT, Paint.Align.CENTER);
         label(c, !started ? "TAKE A STROKE TO START" : over ? "TIME - TAP TO PLAY AGAIN"
-                : PLACE_NAMES[place] + "  ·  " + clock(GAME_LENGTH - gameSeconds) + " LEFT",
-                w / 2f, h * 0.15f + dp(20f), 10f, DIM, Paint.Align.CENTER);
-        bold(c, String.format(java.util.Locale.US, "%.1f m/s", speed), dp(16f), h * 0.15f, 22f,
+                : placeText(), w / 2f, h * 0.15f + dp(20f), 10f, DIM, Paint.Align.CENTER);
+        bold(c, speedText(speed), dp(16f), h * 0.15f, 22f,
                 inLane >= 0 ? ACCENT : DIM, Paint.Align.LEFT);
         label(c, inLane >= 0 ? NAMES[inLane] + " LANE" : "TOO SLOW FOR A LANE", dp(16f),
                 h * 0.15f + dp(16f), 9f, DIM, Paint.Align.LEFT);
         drawChargeHud(c, h * 0.15f + dp(46f), magnet);
         drawHoldHud(c, h * 0.15f + dp(80f));
         bold(c, String.valueOf(logsHit), w - dp(16f), h * 0.15f, 22f, logsHit > 0 ? BAD : DIM, Paint.Align.RIGHT);
-        label(c, "LOGS HIT  ·  " + dodged + " DODGED", w - dp(16f), h * 0.15f + dp(16f), 9f, DIM, Paint.Align.RIGHT);
+        label(c, logsText(), w - dp(16f), h * 0.15f + dp(16f), 9f, DIM, Paint.Align.RIGHT);
         drawMultiplier(c, w / 2f + dp(190f), h * 0.15f - dp(6f));
         drawRouteRibbon(c, w, h);
         drawBadges(c, w, h);
@@ -1162,18 +1199,14 @@ final class CollectorGame extends GameView {
             // Long banners are scaled to stay inside the pill rather than running off it.
             float fit = banner.length() > 34 ? 34f / banner.length() : 1f;
             float size = (18f + 10f * pop) * fit;
-            paint.setColor(0xAA0A1420);
-            c.drawRoundRect(w / 2f - dp(300f), waterTop + dp(8f), w / 2f + dp(300f), waterTop + dp(52f),
-                    dp(12f), dp(12f), paint);
+            hudPanel(c, w / 2f - dp(300f), waterTop + dp(8f), w / 2f + dp(300f), waterTop + dp(52f), dp(12f));
             bold(c, banner, w / 2f, waterTop + dp(40f), Math.min(size, 26f), bannerColor, Paint.Align.CENTER);
         }
 
         float fy = h - dp(14f);
         float col = w / 4f;
         // The footer sits on bright grass since the sky/shore pass: give it a dark band to read on.
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x990A1420);
-        c.drawRect(0, fy - dp(34f), w, h, paint);
+        hudPanel(c, 0, fy - dp(34f), w, h, 0f);
         stat(c, col * 0.5f, fy, status == null ? "0" : String.valueOf(status.strokeRate), "SPM");
         stat(c, col * 1.5f, fy, status == null ? "0" : String.valueOf(status.watts), "WATTS");
         stat(c, col * 2.5f, fy, goldCaught + " / " + rareCaught, "GOLD / RARE");
@@ -1194,10 +1227,18 @@ final class CollectorGame extends GameView {
     /** The day's layout, drawn: logs, golden fish, the golden minute band, and where you are. */
     private void drawRouteRibbon(Canvas c, float w, float h) {
         float y = h * 0.055f;
-        paint.setStyle(Paint.Style.FILL);
         modeBtn.set(dp(16f), y - dp(20f), dp(208f), y + dp(20f));
-        paint.setColor(dailyMode ? 0xCC13324A : 0xCC0A1420);
-        c.drawRoundRect(modeBtn, dp(12f), dp(12f), paint);
+        if (dailyMode) {
+            hudPanel(c, modeBtn.left, modeBtn.top, modeBtn.right, modeBtn.bottom, dp(12f),
+                    0xE0204560, 0xD80E2236, 255);
+            // A gold edge marks the daily route as the one that counts.
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(GOLD);
+            c.drawRoundRect(modeBtn.left, modeBtn.top + dp(8f), modeBtn.left + dp(4f), modeBtn.bottom - dp(8f),
+                    dp(2f), dp(2f), paint);
+        } else {
+            hudPanel(c, modeBtn.left, modeBtn.top, modeBtn.right, modeBtn.bottom, dp(12f));
+        }
         bold(c, dailyMode ? "DAILY ROUTE" : "FREE ROW", dp(28f), y - dp(1f), 14f,
                 dailyMode ? GOLD : TEXT, Paint.Align.LEFT);
         label(c, "TAP TO SWAP", dp(28f), y + dp(14f), 9f, DIM, Paint.Align.LEFT);
@@ -1207,40 +1248,94 @@ final class CollectorGame extends GameView {
         if (x1 <= x0) {
             return;
         }
-        paint.setColor(0x990A1420);
-        c.drawRoundRect(x0, y - dp(15f), x1, y + dp(15f), dp(10f), dp(10f), paint);
+        hudPanel(c, x0, y - dp(15f), x1, y + dp(15f), dp(10f));
+        float in = dp(3f);
+        float top = y - dp(12f);
+        float bottom = y + dp(12f);
+        // The four places, each a faint wash of its own sky, so the ribbon reads as a journey.
+        paint.setStyle(Paint.Style.FILL);
+        for (int p = 0; p < 4; p++) {
+            float sx = x0 + (x1 - x0) * (float) (p * PLACE_SECONDS / GAME_LENGTH);
+            float ex = x0 + (x1 - x0) * (float) ((p + 1) * PLACE_SECONDS / GAME_LENGTH);
+            paint.setColor(withAlpha(SKY_TOP[p], p == place && started ? 0x70 : 0x38));
+            if (p == 0) {
+                c.drawRoundRect(x0 + in, top, ex, bottom, dp(8f), dp(8f), paint);
+                c.drawRect(sx + dp(10f), top, ex, bottom, paint);
+            } else if (p == 3) {
+                c.drawRoundRect(sx, top, x1 - in, bottom, dp(8f), dp(8f), paint);
+                c.drawRect(sx, top, ex - dp(10f), bottom, paint);
+            } else {
+                c.drawRect(sx, top, ex, bottom, paint);
+            }
+        }
+        // The stretch already rowed, lit.
+        float cx = x0 + (x1 - x0) * (float) Math.min(1.0, gameSeconds / GAME_LENGTH);
+        if (cx > x0 + in + dp(4f)) {
+            paint.setColor(0x3335D0BA);
+            c.drawRoundRect(x0 + in, top, cx, bottom, dp(8f), dp(8f), paint);
+            paint.setColor(0x8835D0BA);
+            c.drawRect(x0 + in + dp(6f), bottom - dp(2f), cx, bottom, paint);
+        }
         // The golden minute, as a band along the route.
         float rs = x0 + (x1 - x0) * (float) (rushAt / GAME_LENGTH);
         float re = x0 + (x1 - x0) * (float) Math.min(1.0, (rushAt + RUSH_SECONDS) / GAME_LENGTH);
-        paint.setColor(0x66FFC21A);
+        if (rushBandShader == null || rushBandY != y) {
+            rushBandY = y;
+            rushBandShader = new LinearGradient(0, y - dp(13f), 0, y + dp(13f),
+                    new int[] {0xFFFFE58A, 0xFFFFC21A, 0xFFC88A00}, new float[] {0f, 0.45f, 1f},
+                    Shader.TileMode.CLAMP);
+        }
+        int bandAlpha = rushActive ? 200 + (int) (55 * Math.abs(Math.sin(sessionSeconds * 3))) : 150;
+        paint.setColor((bandAlpha << 24) | 0x00FFFFFF);
+        paint.setShader(rushBandShader);
         c.drawRoundRect(rs, y - dp(13f), re, y + dp(13f), dp(8f), dp(8f), paint);
+        paint.setShader(null);
+        paint.setColor(0x66FFFFFF);
+        c.drawRect(rs + dp(8f), y - dp(12f), re - dp(8f), y - dp(11f), paint);
         label(c, "GOLDEN MINUTE", (rs + re) / 2f, y + dp(4f), 8.5f, 0xFF3A2A00, Paint.Align.CENTER);
+        // Logs on the route: small logs with a cut end, faded once passed.
         for (int i = 0; i < logCount; i++) {
             float lx = x0 + (x1 - x0) * (float) (logSchedule[i] / GAME_LENGTH);
-            paint.setColor(i < logIndex ? 0x667A4E2A : 0xFF9C6A38);
-            c.drawRoundRect(lx - dp(2f), y - dp(8f), lx + dp(2f), y + dp(8f), dp(2f), dp(2f), paint);
+            boolean past = i < logIndex;
+            paint.setColor(past ? 0x557A4E2A : 0xFF8C5A2E);
+            c.drawRoundRect(lx - dp(7f), y - dp(3.5f), lx + dp(7f), y + dp(3.5f), dp(3.5f), dp(3.5f), paint);
+            if (!past) {
+                paint.setColor(0x66FFFFFF);
+                c.drawRect(lx - dp(5f), y - dp(2.6f), lx + dp(4f), y - dp(1.6f), paint);
+                paint.setColor(0xFFD8B27A);
+                c.drawOval(lx + dp(4f), y - dp(3.5f), lx + dp(8f), y + dp(3.5f), paint);
+            }
         }
+        // Golden fish on the route: faceted diamonds.
         for (int i = 0; i < goldCount; i++) {
             float gx = x0 + (x1 - x0) * (float) (goldSchedule[i] / GAME_LENGTH);
-            paint.setColor(i < goldIndex ? 0x66FFC21A : GOLD);
-            shape.rewind();
-            shape.moveTo(gx, y - dp(10f));
-            shape.lineTo(gx + dp(6f), y);
-            shape.lineTo(gx, y + dp(10f));
-            shape.lineTo(gx - dp(6f), y);
-            shape.close();
+            boolean past = i < goldIndex;
+            paint.setColor(past ? 0x66FFC21A : 0xFFC88A00);
+            diamond(gx, y, dp(6.5f), dp(10.5f));
             c.drawPath(shape, paint);
+            if (!past) {
+                paint.setColor(GOLD);
+                diamond(gx - dp(0.6f), y - dp(0.6f), dp(5f), dp(8.5f));
+                c.drawPath(shape, paint);
+                paint.setColor(0xCCFFFFFF);
+                c.drawCircle(gx - dp(1.6f), y - dp(3.5f), dp(1.5f), paint);
+            }
         }
         // Where the four places change hands.
         for (int p = 1; p < 4; p++) {
             float px = x0 + (x1 - x0) * (float) (p * PLACE_SECONDS / GAME_LENGTH);
-            paint.setColor(0x44FFFFFF);
+            paint.setColor(0x55FFFFFF);
             c.drawRect(px - dp(0.8f), y - dp(15f), px + dp(0.8f), y + dp(15f), paint);
         }
-        float cx = x0 + (x1 - x0) * (float) Math.min(1.0, gameSeconds / GAME_LENGTH);
+        // The cursor: a lit pin with a glow, riding the ribbon.
+        Fx.glow(c, cx, y, dp(26f), 0x66FFFFFF);
+        paint.setColor(0x66000000);
+        c.drawRect(cx - dp(0.4f), y - dp(17f), cx + dp(3.2f), y + dp(19f), paint);
         paint.setColor(0xFFFFFFFF);
-        c.drawRect(cx - dp(1.6f), y - dp(19f), cx + dp(1.6f), y + dp(19f), paint);
-        c.drawCircle(cx, y - dp(19f), dp(3.5f), paint);
+        c.drawRoundRect(cx - dp(1.8f), y - dp(19f), cx + dp(1.8f), y + dp(19f), dp(1.8f), dp(1.8f), paint);
+        c.drawCircle(cx, y - dp(19f), dp(4.5f), paint);
+        paint.setColor(ACCENT);
+        c.drawCircle(cx, y - dp(19f), dp(2.5f), paint);
         if (dailyMode) {
             bold(c, routeBestText, w - dp(16f), y - dp(1f), 13f,
                     routeBeaten ? GOLD : routeBest > 0 ? TEXT : DIM, Paint.Align.RIGHT);
@@ -1257,13 +1352,23 @@ final class CollectorGame extends GameView {
         float y = h * 0.875f;
         bookBtn.set(dp(16f), y - dp(22f), dp(196f), y + dp(22f));
         shopBtn.set(dp(208f), y - dp(22f), dp(392f), y + dp(22f));
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC0A1420);
-        c.drawRoundRect(bookBtn, dp(12f), dp(12f), paint);
-        c.drawRoundRect(shopBtn, dp(12f), dp(12f), paint);
         boolean afford = affordable();
+        boolean complete = Integer.bitCount(found) == SPECIES;
+        hudPanel(c, bookBtn.left, bookBtn.top, bookBtn.right, bookBtn.bottom, dp(12f));
+        hudPanel(c, shopBtn.left, shopBtn.top, shopBtn.right, shopBtn.bottom, dp(12f));
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        if (complete || newFinds > 0) {
+            paint.setColor(0xAAFFC21A);
+            c.drawRoundRect(bookBtn, dp(12f), dp(12f), paint);
+        }
+        if (afford) {
+            paint.setColor(0xAA35D0BA);
+            c.drawRoundRect(shopBtn, dp(12f), dp(12f), paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
         bold(c, badgeBook, dp(30f), y - dp(2f), 14f,
-                Integer.bitCount(found) == SPECIES ? GOLD : TEXT, Paint.Align.LEFT);
+                complete ? GOLD : TEXT, Paint.Align.LEFT);
         label(c, badgeBookSub, dp(30f), y + dp(14f), 9f, newFinds > 0 ? GOLD : DIM, Paint.Align.LEFT);
         bold(c, badgeBoat, dp(222f), y - dp(2f), 14f, afford ? ACCENT : TEXT, Paint.Align.LEFT);
         label(c, badgeBoatSub, dp(222f), y + dp(14f), 9f, afford ? ACCENT : DIM, Paint.Align.LEFT);
@@ -1291,9 +1396,8 @@ final class CollectorGame extends GameView {
         // Below the banner pill (which sits at waterTop + 8..52dp and is drawn on top of this):
         // at 0.42h the card's top edge ran under it and lost its border.
         float cy = h * 0.52f - in * dp(30f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(((a * 0xCC / 255) << 24) | 0x000A1420);
-        c.drawRoundRect(cx - dp(150f), cy - dp(70f), cx + dp(150f), cy + dp(66f), dp(16f), dp(16f), paint);
+        Fx.glow(c, cx, cy - dp(16f), dp(120f), withAlpha(SPECIES_COLOR[newFindIndex], a * 0x55 / 255));
+        hudPanel(c, cx - dp(150f), cy - dp(70f), cx + dp(150f), cy + dp(66f), dp(16f), PANEL_TOP, PANEL_BOTTOM, a);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
         paint.setColor((a << 24) | (SPECIES_COLOR[newFindIndex] & 0x00FFFFFF));
@@ -1311,13 +1415,28 @@ final class CollectorGame extends GameView {
         float left = (float) Math.max(0, rushUntil - gameSeconds);
         float cx = w * 0.5f;
         float cy = h * 0.245f;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC3A2A00);
-        c.drawRoundRect(cx - dp(150f), cy - dp(20f), cx + dp(150f), cy + dp(20f), dp(12f), dp(12f), paint);
+        hudPanel(c, cx - dp(150f), cy - dp(20f), cx + dp(150f), cy + dp(20f), dp(12f),
+                0xE0503A06, 0xD8261A00, 255);
         float frac = left / (float) RUSH_SECONDS;
-        paint.setColor(0x99FFC21A);
-        c.drawRoundRect(cx - dp(148f), cy - dp(18f), cx - dp(148f) + dp(296f) * frac, cy + dp(18f),
-                dp(10f), dp(10f), paint);
+        if (rushBandShader != null) {
+            paint.setStyle(Paint.Style.FILL);
+            c.save();
+            c.translate(0, cy - dp(18f) - (rushBandY - dp(13f)));
+            c.scale(1f, dp(36f) / dp(26f), 0, rushBandY - dp(13f));
+            paint.setColor(0xCCFFFFFF);
+            paint.setShader(rushBandShader);
+            c.drawRoundRect(cx - dp(148f), rushBandY - dp(13f), cx - dp(148f) + dp(296f) * frac,
+                    rushBandY + dp(13f), dp(9f), dp(7f), paint);
+            paint.setShader(null);
+            c.restore();
+        } else {
+            paint.setColor(0x99FFC21A);
+            c.drawRoundRect(cx - dp(148f), cy - dp(18f), cx - dp(148f) + dp(296f) * frac, cy + dp(18f),
+                    dp(10f), dp(10f), paint);
+        }
+        paint.setColor(0x55FFFFFF);
+        c.drawRect(cx - dp(140f), cy - dp(16f), Math.max(cx - dp(140f), cx - dp(148f) + dp(296f) * frac - dp(8f)),
+                cy - dp(14.5f), paint);
         bold(c, "GOLDEN MINUTE  " + (int) Math.ceil(left) + "s  ·  x2  ·  +" + rushScore, cx,
                 cy + dp(6f), 15f, 0xFF20180A, Paint.Align.CENTER);
     }
@@ -1328,8 +1447,7 @@ final class CollectorGame extends GameView {
         paint.setColor(0xCC000814);
         c.drawRect(0, 0, w, h, paint);
         panel.set(w * 0.5f - dp(430f), h * 0.5f - dp(280f), w * 0.5f + dp(430f), h * 0.5f + dp(280f));
-        paint.setColor(0xF20E1A28);
-        c.drawRoundRect(panel, dp(18f), dp(18f), paint);
+        hudPanel(c, panel.left, panel.top, panel.right, panel.bottom, dp(18f), 0xF6162334, 0xF60B131E, 255);
         bold(c, "THE COLLECTION BOOK", panel.centerX(), panel.top + dp(44f), 24f, TEXT,
                 Paint.Align.CENTER);
         label(c, Integer.bitCount(found) + " of " + SPECIES + " species  ·  "
@@ -1377,8 +1495,7 @@ final class CollectorGame extends GameView {
         paint.setColor(0xCC000814);
         c.drawRect(0, 0, w, h, paint);
         panel.set(w * 0.5f - dp(430f), h * 0.5f - dp(240f), w * 0.5f + dp(430f), h * 0.5f + dp(240f));
-        paint.setColor(0xF20E1A28);
-        c.drawRoundRect(panel, dp(18f), dp(18f), paint);
+        hudPanel(c, panel.left, panel.top, panel.right, panel.bottom, dp(18f), 0xF6162334, 0xF60B131E, 255);
         bold(c, "THE BOAT YARD", panel.centerX(), panel.top + dp(46f), 24f, TEXT, Paint.Align.CENTER);
         bold(c, (int) bank + " POINTS BANKED", panel.centerX(), panel.top + dp(74f), 15f, ACCENT,
                 Paint.Align.CENTER);
@@ -1503,9 +1620,7 @@ final class CollectorGame extends GameView {
 
     /** The hold meter: how close the current band is to giving up its rare. */
     private void drawHoldHud(Canvas c, float y) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x990A1420);
-        c.drawRoundRect(dp(6f), y - dp(16f), dp(230f), y + dp(16f), dp(10f), dp(10f), paint);
+        hudPanel(c, dp(6f), y - dp(16f), dp(230f), y + dp(16f), dp(10f));
         if (rareLive) {
             bold(c, rareText, dp(16f), y - dp(1f), 13f, 0xFF9AE6FF, Paint.Align.LEFT);
             label(c, "stay in the band to take it", dp(16f), y + dp(13f), 9f, DIM, Paint.Align.LEFT);
@@ -1517,10 +1632,8 @@ final class CollectorGame extends GameView {
         }
         float need = (float) HOLD_NEEDED[holdLane];
         float frac = Math.max(0f, Math.min(1f, (float) holdSeconds / need));
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(dp(16f), y + dp(3f), dp(220f), y + dp(11f), dp(4f), dp(4f), paint);
-        paint.setColor(frac >= 1f ? GOLD : 0xFF9AE6FF);
-        c.drawRoundRect(dp(16f), y + dp(3f), dp(16f) + dp(204f) * frac, y + dp(11f), dp(4f), dp(4f), paint);
+        glossyBar(c, dp(16f), y + dp(3f), dp(220f), y + dp(11f), frac,
+                frac >= 1f ? GOLD : holdLane >= 0 ? mix(0xFF9AE6FF, LANE_COLOR[holdLane], 0.35f) : 0xFF9AE6FF);
         label(c, holdText, dp(16f), y - dp(3f), 10f, 0xFF9AE6FF, Paint.Align.LEFT);
     }
 
@@ -1534,8 +1647,20 @@ final class CollectorGame extends GameView {
             Fx.glow(c, x, y, dp(40f + mult * 12f), (color & 0x00FFFFFF) | 0x66000000);
         }
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC0A1420);
+        paint.setColor(0x55000000);
+        c.drawCircle(x + dp(1.5f), y + dp(3f), r, paint);
+        paint.setColor(0xE00A1420);
         c.drawCircle(x, y, r, paint);
+        paint.setColor(0xFF1A2738);
+        c.drawCircle(x, y - r * 0.08f, r * 0.86f, paint);
+        paint.setColor(0xE00E1824);
+        c.drawCircle(x, y + r * 0.04f, r * 0.8f, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.2f));
+        paint.setColor(0x55FFFFFF);
+        arc.set(x - r * 0.9f, y - r * 0.9f, x + r * 0.9f, y + r * 0.9f);
+        c.drawArc(arc, 200, 140, false, paint);
+        paint.setStyle(Paint.Style.FILL);
         // Remaining chain time, as a ring.
         if (combo > 0) {
             float frac = (float) Math.max(0, 1 - (gameSeconds - lastCatchAt) / chainSeconds());
@@ -1544,8 +1669,10 @@ final class CollectorGame extends GameView {
             paint.setColor(0x33FFFFFF);
             arc.set(x - r, y - r, x + r, y + r);
             c.drawArc(arc, 0, 360, false, paint);
+            paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setColor(frac < 0.3f ? BAD : color);
             c.drawArc(arc, -90, 360 * frac, false, paint);
+            paint.setStrokeCap(Paint.Cap.BUTT);
             // Progress to the next step, as pips beneath.
             paint.setStyle(Paint.Style.FILL);
             if (mult < MAX_MULT) {
@@ -1577,12 +1704,7 @@ final class CollectorGame extends GameView {
         for (int k = 0; k < CHARGE_NEEDED; k++) {
             float fill = Math.max(0f, Math.min(1f, charge - k));
             float x0 = dp(46f) + k * dp(22f);
-            paint.setColor(0x44FFFFFF);
-            c.drawRoundRect(x0, y - dp(5f), x0 + dp(18f), y + dp(5f), dp(3f), dp(3f), paint);
-            if (fill > 0f) {
-                paint.setColor(0xFFFF5A5A);
-                c.drawRoundRect(x0, y - dp(5f), x0 + dp(18f) * fill, y + dp(5f), dp(3f), dp(3f), paint);
-            }
+            glossyBar(c, x0, y - dp(5f), x0 + dp(18f), y + dp(5f), fill, 0xFFFF5A5A);
         }
         label(c, "PUSH " + Math.round(strongWatts) + "W", dp(116f), y + dp(4f), 9f, DIM, Paint.Align.LEFT);
     }
@@ -1632,8 +1754,13 @@ final class CollectorGame extends GameView {
         c.drawOval(x - half - dp(6f), y + bob + dp(4f), x + half + dp(6f), y + bob + th + dp(8f), paint);
         paint.setColor(LOG_COLOR[place]);
         c.drawRoundRect(x - half, y + bob - th, x + half, y + bob + th, th, th, paint);
+        paint.setColor(0x40000000);
+        c.drawRoundRect(x - half, y + bob + th * 0.15f, x + half, y + bob + th, th * 0.8f, th * 0.8f, paint);
         paint.setColor(0x33FFFFFF);
         c.drawRect(x - half + th, y + bob - th * 0.7f, x + half - th, y + bob - th * 0.35f, paint);
+        paint.setColor(0x30000000);
+        c.drawRect(x - half + th * 1.4f, y + bob - th * 0.1f, x + half - th * 2f, y + bob + th * 0.02f, paint);
+        c.drawRect(x - half + th * 2.6f, y + bob + th * 0.4f, x + half - th * 1.2f, y + bob + th * 0.52f, paint);
         // Branch stub and knot.
         paint.setColor(LOG_COLOR[place]);
         paint.setStrokeWidth(dp(4f));
@@ -1667,26 +1794,41 @@ final class CollectorGame extends GameView {
         c.rotate(tilt, x, y);
         // Fish faces left, toward the boat.
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(GOLD);
-        c.drawOval(x - dp(20f), y - dp(9f), x + dp(16f), y + dp(9f), paint);
         float flick = (float) Math.sin(sessionSeconds * 14) * dp(4f);
-        shape.rewind();
-        shape.moveTo(x + dp(12f), y);
-        shape.lineTo(x + dp(28f), y - dp(11f) + flick);
-        shape.lineTo(x + dp(28f), y + dp(11f) + flick);
-        shape.close();
-        c.drawPath(shape, paint);
-        paint.setColor(0xFFFFE9A0);
-        c.drawOval(x - dp(14f), y - dp(6f), x + dp(8f), y - dp(1f), paint);
+        // Tail and fins behind the body, darker.
+        tri(x + dp(12f), y, x + dp(29f), y - dp(12f) + flick, x + dp(29f), y + dp(12f) + flick);
         paint.setColor(0xFFE09A00);
-        shape.rewind();
-        shape.moveTo(x - dp(4f), y - dp(8f));
-        shape.lineTo(x + dp(6f), y - dp(17f));
-        shape.lineTo(x + dp(10f), y - dp(7f));
-        shape.close();
         c.drawPath(shape, paint);
+        tri(x + dp(14f), y, x + dp(26f), y - dp(6f) + flick, x + dp(26f), y + dp(6f) + flick);
+        paint.setColor(0xFFFFD86B);
+        c.drawPath(shape, paint);
+        tri(x - dp(4f), y - dp(8f), x + dp(6f), y - dp(18f), x + dp(10f), y - dp(7f));
+        paint.setColor(0xFFD08A00);
+        c.drawPath(shape, paint);
+        // Body: a dark back, the gold flank, a pale belly, scales catching the light.
+        paint.setColor(0xFFC88400);
+        c.drawOval(x - dp(20f), y - dp(9.5f), x + dp(16f), y + dp(9f), paint);
+        paint.setColor(GOLD);
+        c.drawOval(x - dp(19f), y - dp(7f), x + dp(15f), y + dp(9f), paint);
+        paint.setColor(0xFFFFE9A0);
+        c.drawOval(x - dp(15f), y + dp(1f), x + dp(9f), y + dp(8f), paint);
+        paint.setColor(0xCCFFFFFF);
+        c.drawOval(x - dp(13f), y - dp(6f), x + dp(2f), y - dp(3f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.3f));
+        paint.setColor(0x88A86A00);
+        for (int k = 0; k < 3; k++) {
+            arc.set(x - dp(4f) + k * dp(5f), y - dp(5f), x + dp(4f) + k * dp(5f), y + dp(5f));
+            c.drawArc(arc, 120, 120, false, paint);
+        }
+        arc.set(x - dp(13f), y - dp(6f), x - dp(5f), y + dp(6f));
+        paint.setColor(0xAA8A5A00);
+        c.drawArc(arc, -60, 120, false, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF);
+        c.drawCircle(x - dp(12.5f), y - dp(2f), dp(3.2f), paint);
         paint.setColor(0xFF1A1A1A);
-        c.drawCircle(x - dp(12f), y - dp(2f), dp(2.2f), paint);
+        c.drawCircle(x - dp(13f), y - dp(2f), dp(2f), paint);
         c.restore();
         // Sparkles and the splash where it re-enters.
         paint.setColor(0xFFFFFFFF);
@@ -1703,121 +1845,364 @@ final class CollectorGame extends GameView {
         }
     }
 
-    /** This place's prize for a lane: the species the book knows it by, spinning and glowing. */
-    private void drawPrize(Canvas c, int lane, float x, float y) {
+    /**
+     * This place's prize for a lane: the species the book knows it by, spinning and glowing, with
+     * its reflection and a ring of ripples on the water under it. {@code bob} lifts the prize;
+     * the water line stays put.
+     */
+    private void drawPrize(Canvas c, int lane, float x, float waterY, float bob) {
         int index = place * SLOTS + lane;
+        int colour = SPECIES_COLOR[index];
         float r = dp(14f + lane * 3f);
-        Fx.glow(c, x, y, r * 2.4f, (SPECIES_COLOR[index] & 0x00FFFFFF) | 0x55000000);
+        float y = waterY + bob;
+        float line = waterY + r * 1.15f;
+        // Reflection and contact shadow on the water: smaller as the bob lifts it.
+        float lift = 1f - Math.max(-1f, Math.min(1f, bob / dp(3f))) * 0.12f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x38000000);
+        c.drawOval(x - r * 0.95f * lift, line - r * 0.18f, x + r * 0.95f * lift, line + r * 0.22f, paint);
+        paint.setColor(withAlpha(colour, 0x46));
+        c.drawOval(x - r * 0.7f * lift, line - r * 0.1f, x + r * 0.7f * lift, line + r * 0.42f, paint);
+        // A ripple ring spreading from where it floats.
+        float t = (float) ((sessionSeconds * 0.6 + lane * 0.33) % 1.0);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(((int) (110 * (1f - t)) << 24) | 0x00DDF2FF);
+        float rr = r * (0.9f + t * 1.4f);
+        arc.set(x - rr, line - rr * 0.28f, x + rr, line + rr * 0.28f);
+        c.drawOval(arc, paint);
+        paint.setStyle(Paint.Style.FILL);
+        Fx.glow(c, x, y, r * 2.6f, withAlpha(colour, 0x60));
         drawSpecies(c, index, x, y, r);
+    }
+
+    /** A four-point sparkle; {@code a} 0..255. */
+    private void sparkle(Canvas c, float x, float y, float s, int a) {
+        if (a <= 4 || s <= 0f) {
+            return;
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((a << 24) | 0x00FFFFFF);
+        shape.rewind();
+        shape.moveTo(x, y - s);
+        shape.quadTo(x, y, x + s, y);
+        shape.quadTo(x, y, x, y + s);
+        shape.quadTo(x, y, x - s, y);
+        shape.quadTo(x, y, x, y - s);
+        shape.close();
+        c.drawPath(shape, paint);
+        c.drawCircle(x, y, s * 0.16f, paint);
+    }
+
+    /** A five-point star into {@link #shape}. */
+    private void starPath(float x, float y, float r, float inner, double a0) {
+        shape.rewind();
+        for (int k = 0; k < 10; k++) {
+            double a = a0 + k * Math.PI / 5;
+            float rr = (k & 1) == 0 ? r : r * inner;
+            float px = x + (float) Math.cos(a) * rr;
+            float py = y + (float) Math.sin(a) * rr;
+            if (k == 0) {
+                shape.moveTo(px, py);
+            } else {
+                shape.lineTo(px, py);
+            }
+        }
+        shape.close();
+    }
+
+    /** A diamond into {@link #shape}. */
+    private void diamond(float x, float y, float hw, float hh) {
+        shape.rewind();
+        shape.moveTo(x, y - hh);
+        shape.lineTo(x + hw, y);
+        shape.lineTo(x, y + hh);
+        shape.lineTo(x - hw, y);
+        shape.close();
+    }
+
+    private void quad(float ax, float ay, float bx, float by, float cx, float cy, float dx, float dy) {
+        shape.rewind();
+        shape.moveTo(ax, ay);
+        shape.lineTo(bx, by);
+        shape.lineTo(cx, cy);
+        shape.lineTo(dx, dy);
+        shape.close();
+    }
+
+    private void tri(float ax, float ay, float bx, float by, float cx, float cy) {
+        shape.rewind();
+        shape.moveTo(ax, ay);
+        shape.lineTo(bx, by);
+        shape.lineTo(cx, cy);
+        shape.close();
     }
 
     /**
      * One species, drawn from its shape and colour: used in the water, on the find card and in the
      * book, so a page in the book is the thing you actually caught.
+     *
+     * <p>3.25.0: light comes from the upper left on all of them. Coins turn on a vertical axis and
+     * show their milled edge as they go side-on; gems are cut into lit and shaded facets whose
+     * ridge moves as they turn; stars carry a bevel and rays; chests rock, leak light at the lid
+     * and catch a sweep of shine.
      */
     private void drawSpecies(Canvas c, int index, float x, float y, float r) {
         int colour = SPECIES_COLOR[index];
         int shapeId = SPECIES_SHAPE[index];
-        float spin = (float) Math.abs(Math.cos(sessionSeconds * 3 + index));
         paint.setStyle(Paint.Style.FILL);
         switch (shapeId) {
             case SH_COIN: {
-                float rx = r * (0.25f + 0.75f * spin);
-                paint.setColor(0xFF8A6A18 | (colour & 0x00202020));
+                double th = sessionSeconds * 3 + index;
+                float cs = (float) Math.cos(th);
+                float sn = (float) Math.sin(th);
+                float face = Math.abs(cs);
+                float rx = r * (0.1f + 0.9f * face);
+                // The milled edge, seen as the coin turns side-on.
+                float ex = r * 0.2f * sn;
+                paint.setColor(mix(colour, 0xFF000000, 0.55f));
+                c.drawOval(x - rx + ex, y - r, x + rx + ex, y + r, paint);
+                c.drawRect(Math.min(x, x + ex), y - r, Math.max(x, x + ex), y + r, paint);
+                paint.setColor(mix(colour, 0xFF000000, 0.38f));
+                for (int k = -3; k <= 3; k++) {
+                    if (Math.abs(ex) > dp(1.5f)) {
+                        float my = y + k * r * 0.26f;
+                        c.drawRect(Math.min(x, x + ex), my - dp(0.6f), Math.max(x, x + ex), my + dp(0.6f), paint);
+                    }
+                }
+                // The face: rim, field, a raised boss, and the shine on it.
+                float shade = 0.3f * (1f - face);
+                paint.setColor(mix(mix(colour, 0xFF000000, 0.28f), 0xFF000000, shade));
                 c.drawOval(x - rx, y - r, x + rx, y + r, paint);
-                paint.setColor(colour);
-                c.drawOval(x - rx * 0.8f, y - r * 0.8f, x + rx * 0.8f, y + r * 0.8f, paint);
+                paint.setColor(mix(colour, 0xFF000000, shade));
+                c.drawOval(x - rx * 0.82f, y - r * 0.82f, x + rx * 0.82f, y + r * 0.82f, paint);
+                paint.setColor(mix(mix(colour, 0xFF000000, 0.18f), 0xFF000000, shade));
+                c.drawOval(x - rx * 0.5f + rx * 0.05f, y - r * 0.5f + r * 0.06f, x + rx * 0.5f + rx * 0.05f,
+                        y + r * 0.5f + r * 0.06f, paint);
+                paint.setColor(mix(mix(colour, 0xFFFFFFFF, 0.35f), 0xFF000000, shade));
+                c.drawOval(x - rx * 0.5f, y - r * 0.5f, x + rx * 0.5f, y + r * 0.5f, paint);
+                if (face > 0.25f) {
+                    paint.setColor(((int) (170 * face) << 24) | 0x00FFFFFF);
+                    c.drawOval(x - rx * 0.62f, y - r * 0.7f, x - rx * 0.05f, y - r * 0.38f, paint);
+                }
+                if (face > 0.88f) {
+                    sparkle(c, x + rx * 0.5f, y - r * 0.55f, r * 0.75f, (int) (255 * (face - 0.88f) / 0.12f));
+                }
                 break;
             }
             case SH_GEM: {
-                float rx = r * (0.5f + 0.5f * spin);
-                shape.rewind();
-                shape.moveTo(x, y - r);
-                shape.lineTo(x + rx, y - r * 0.25f);
-                shape.lineTo(x, y + r);
-                shape.lineTo(x - rx, y - r * 0.25f);
-                shape.close();
+                double th = sessionSeconds * 2.2 + index;
+                float sn = (float) Math.sin(th);
+                float rx = r * (0.66f + 0.34f * Math.abs((float) Math.cos(th)));
+                float gY = y - r * 0.22f;
+                float tY = y - r * 0.72f;
+                float bY = y + r;
+                float xm = x + rx * 0.55f * sn;
+                float xmT = x + (xm - x) * 0.5f;
+                int lit = mix(colour, 0xFFFFFFFF, 0.42f);
+                int shade = mix(colour, 0xFF000000, 0.28f);
+                int deep = mix(colour, 0xFF000000, 0.52f);
+                // Pavilion: the lower cone, lit side and shaded side.
+                tri(x - rx, gY, xm, gY, x, bY);
                 paint.setColor(colour);
                 c.drawPath(shape, paint);
-                paint.setColor(0x99FFFFFF);
-                c.drawRect(x - rx * 0.5f, y - r * 0.45f, x, y - r * 0.2f, paint);
+                tri(xm, gY, x + rx, gY, x, bY);
+                paint.setColor(deep);
+                c.drawPath(shape, paint);
+                // Crown: two facets and the table.
+                quad(x - rx, gY, x - rx * 0.5f, tY, xmT, tY, xm, gY);
+                paint.setColor(lit);
+                c.drawPath(shape, paint);
+                quad(xm, gY, xmT, tY, x + rx * 0.5f, tY, x + rx, gY);
+                paint.setColor(shade);
+                c.drawPath(shape, paint);
+                // Facet edges and the shine on the table.
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(1f, r * 0.06f));
+                paint.setColor(0x66FFFFFF);
+                c.drawLine(x - rx, gY, x + rx, gY, paint);
+                c.drawLine(xm, gY, x, bY, paint);
+                paint.setColor(0xDDFFFFFF);
+                c.drawLine(x - rx * 0.5f, tY, x + rx * 0.5f, tY, paint);
+                paint.setStyle(Paint.Style.FILL);
+                tri(x - rx * 0.72f, gY - r * 0.04f, x - rx * 0.42f, tY + r * 0.08f, x - rx * 0.28f, gY - r * 0.04f);
+                paint.setColor(0xAAFFFFFF);
+                c.drawPath(shape, paint);
+                float tw = (float) Math.sin(sessionSeconds * 2.6 + index * 1.3);
+                if (tw > 0.7f) {
+                    sparkle(c, x - rx * 0.3f, tY + r * 0.05f, r * 0.8f, (int) (255 * (tw - 0.7f) / 0.3f));
+                }
                 break;
             }
             case SH_STAR: {
-                double a0 = sessionSeconds * 2;
-                shape.rewind();
-                for (int k = 0; k < 10; k++) {
-                    double a = a0 + k * Math.PI / 5;
-                    float rr = (k & 1) == 0 ? r : r * 0.45f;
-                    float px = x + (float) Math.cos(a) * rr;
-                    float py = y + (float) Math.sin(a) * rr;
-                    if (k == 0) {
-                        shape.moveTo(px, py);
-                    } else {
-                        shape.lineTo(px, py);
-                    }
+                double a0 = sessionSeconds * 1.5 + index - Math.PI / 2;
+                float pulse = 1f + 0.07f * (float) Math.sin(sessionSeconds * 4 + index);
+                float rr = r * pulse;
+                // Rays turning slowly behind it.
+                paint.setColor(withAlpha(mix(colour, 0xFFFFFFFF, 0.5f), 0x50));
+                double ra = -sessionSeconds * 0.8 + index;
+                for (int k = 0; k < 4; k++) {
+                    double a = ra + k * Math.PI / 4;
+                    float dx = (float) Math.cos(a);
+                    float dy = (float) Math.sin(a);
+                    quad(x + dx * rr * 1.7f, y + dy * rr * 1.7f, x - dy * rr * 0.12f, y + dx * rr * 0.12f,
+                            x - dx * rr * 1.7f, y - dy * rr * 1.7f, x + dy * rr * 0.12f, y - dx * rr * 0.12f);
+                    c.drawPath(shape, paint);
                 }
-                shape.close();
+                starPath(x + rr * 0.06f, y + rr * 0.1f, rr, 0.46f, a0);
+                paint.setColor(0x44000000);
+                c.drawPath(shape, paint);
+                starPath(x, y, rr, 0.46f, a0);
+                paint.setColor(mix(colour, 0xFF000000, 0.3f));
+                c.drawPath(shape, paint);
+                starPath(x - rr * 0.04f, y - rr * 0.05f, rr * 0.86f, 0.46f, a0);
                 paint.setColor(colour);
                 c.drawPath(shape, paint);
+                starPath(x - rr * 0.08f, y - rr * 0.1f, rr * 0.48f, 0.46f, a0);
+                paint.setColor(mix(colour, 0xFFFFFFFF, 0.55f));
+                c.drawPath(shape, paint);
                 paint.setColor(0xFFFFFFFF);
-                c.drawCircle(x, y, r * 0.2f, paint);
+                c.drawCircle(x - rr * 0.08f, y - rr * 0.1f, rr * 0.14f, paint);
+                float tw = (float) Math.sin(sessionSeconds * 3.1 + index * 0.9);
+                if (tw > 0.6f) {
+                    sparkle(c, x + rr * 0.55f, y - rr * 0.6f, rr * 0.7f, (int) (255 * (tw - 0.6f) / 0.4f));
+                }
                 break;
             }
             case SH_SHELL: {
-                paint.setColor(colour);
+                float rock = (float) Math.sin(sessionSeconds * 1.6 + index) * 7f;
+                c.save();
+                c.rotate(rock, x, y + r * 0.3f);
+                paint.setColor(mix(colour, 0xFF000000, 0.35f));
                 arc.set(x - r, y - r * 0.9f, x + r, y + r * 1.1f);
                 c.drawArc(arc, 180, 180, true, paint);
-                paint.setColor(0x66000000);
+                paint.setColor(colour);
+                arc.set(x - r * 0.9f, y - r * 0.82f, x + r * 0.9f, y + r * 1.0f);
+                c.drawArc(arc, 180, 180, true, paint);
+                paint.setColor(mix(colour, 0xFFFFFFFF, 0.45f));
+                arc.set(x - r * 0.7f, y - r * 0.72f, x + r * 0.3f, y + r * 0.5f);
+                c.drawArc(arc, 190, 80, true, paint);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(Math.max(1f, r * 0.08f));
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                paint.setColor(withAlpha(mix(colour, 0xFF000000, 0.5f), 0xAA));
                 for (int k = -2; k <= 2; k++) {
-                    c.drawLine(x, y + r * 0.1f, x + k * r * 0.38f, y - r * 0.8f, paint);
+                    c.drawLine(x, y + r * 0.1f, x + k * r * 0.36f, y - r * 0.72f + Math.abs(k) * r * 0.1f, paint);
                 }
+                paint.setStrokeCap(Paint.Cap.BUTT);
                 paint.setStyle(Paint.Style.FILL);
+                paint.setColor(mix(colour, 0xFF000000, 0.45f));
+                c.drawRoundRect(x - r * 0.3f, y + r * 0.02f, x + r * 0.3f, y + r * 0.34f, r * 0.1f, r * 0.1f, paint);
+                c.restore();
+                float tw = (float) Math.sin(sessionSeconds * 2.3 + index);
+                if (tw > 0.75f) {
+                    sparkle(c, x - r * 0.35f, y - r * 0.55f, r * 0.7f, (int) (255 * (tw - 0.75f) / 0.25f));
+                }
                 break;
             }
             case SH_FLOWER: {
-                paint.setColor(colour);
+                int dark = mix(colour, 0xFF000000, 0.35f);
+                int light = mix(colour, 0xFFFFFFFF, 0.4f);
                 for (int k = 0; k < 5; k++) {
                     double a = sessionSeconds * 1.2 + k * Math.PI * 0.4;
                     float px = x + (float) Math.cos(a) * r * 0.55f;
                     float py = y + (float) Math.sin(a) * r * 0.55f;
-                    c.drawCircle(px, py, r * 0.45f, paint);
+                    paint.setColor(dark);
+                    c.drawCircle(px, py, r * 0.47f, paint);
+                    paint.setColor(colour);
+                    c.drawCircle(px - r * 0.04f, py - r * 0.05f, r * 0.4f, paint);
+                    paint.setColor(light);
+                    c.drawCircle(px - r * 0.1f, py - r * 0.12f, r * 0.18f, paint);
                 }
+                paint.setColor(0xFFB8860B);
+                c.drawCircle(x, y, r * 0.34f, paint);
                 paint.setColor(0xFFFFE066);
-                c.drawCircle(x, y, r * 0.32f, paint);
+                c.drawCircle(x - r * 0.03f, y - r * 0.04f, r * 0.28f, paint);
+                paint.setColor(0xCCFFFFFF);
+                c.drawCircle(x - r * 0.1f, y - r * 0.12f, r * 0.09f, paint);
                 break;
             }
             case SH_FISH: {
-                paint.setColor(colour);
-                c.drawOval(x - r, y - r * 0.5f, x + r * 0.6f, y + r * 0.5f, paint);
                 float flick = (float) Math.sin(sessionSeconds * 10 + index) * r * 0.2f;
-                shape.rewind();
-                shape.moveTo(x + r * 0.4f, y);
-                shape.lineTo(x + r * 1.1f, y - r * 0.55f + flick);
-                shape.lineTo(x + r * 1.1f, y + r * 0.55f + flick);
-                shape.close();
+                tri(x + r * 0.4f, y, x + r * 1.1f, y - r * 0.55f + flick, x + r * 1.1f, y + r * 0.55f + flick);
+                paint.setColor(mix(colour, 0xFF000000, 0.25f));
                 c.drawPath(shape, paint);
+                paint.setColor(mix(colour, 0xFF000000, 0.3f));
+                c.drawOval(x - r, y - r * 0.5f, x + r * 0.6f, y + r * 0.5f, paint);
+                paint.setColor(colour);
+                c.drawOval(x - r * 0.95f, y - r * 0.38f, x + r * 0.55f, y + r * 0.46f, paint);
+                paint.setColor(mix(colour, 0xFFFFFFFF, 0.55f));
+                c.drawOval(x - r * 0.75f, y + r * 0.05f, x + r * 0.35f, y + r * 0.4f, paint);
+                tri(x - r * 0.1f, y - r * 0.45f, x + r * 0.25f, y - r * 0.85f, x + r * 0.35f, y - r * 0.4f);
+                paint.setColor(mix(colour, 0xFF000000, 0.35f));
+                c.drawPath(shape, paint);
+                paint.setColor(0xFFFFFFFF);
+                c.drawCircle(x - r * 0.55f, y - r * 0.1f, Math.max(1.5f, r * 0.16f), paint);
                 paint.setColor(0xFF1A1A1A);
-                c.drawCircle(x - r * 0.55f, y - r * 0.1f, Math.max(1f, r * 0.12f), paint);
+                c.drawCircle(x - r * 0.58f, y - r * 0.1f, Math.max(1f, r * 0.09f), paint);
                 break;
             }
             default: {
-                // The rare: a small chest, with one gem on the lid per place so the four differ.
+                // The rare: a chest, with one gem on the lid per place so the four differ. It rocks
+                // on the water, light leaks from under the lid, and a shine sweeps across it.
                 int p = index / SLOTS;
-                paint.setColor(0xFF3A2A18);
-                c.drawRoundRect(x - r, y - r * 0.15f, x + r, y + r * 0.8f, r * 0.2f, r * 0.2f, paint);
-                paint.setColor(colour);
+                float rock = (float) Math.sin(sessionSeconds * 1.8 + index) * 6f;
+                c.save();
+                c.rotate(rock, x, y + r * 0.8f);
+                float pulse = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 4 + index);
+                Fx.glow(c, x, y - r * 0.15f, r * 1.9f, ((int) (60 + 80 * pulse) << 24) | 0x00FFE9A0);
+                // Body: planks, a shadowed lower half.
+                paint.setColor(0xFF5A3A1E);
+                c.drawRoundRect(x - r, y - r * 0.15f, x + r, y + r * 0.8f, r * 0.18f, r * 0.18f, paint);
+                paint.setColor(0xFF3A2410);
+                c.drawRect(x - r, y + r * 0.42f, x + r, y + r * 0.47f, paint);
+                paint.setColor(0x33000000);
+                c.drawRoundRect(x - r, y + r * 0.47f, x + r, y + r * 0.8f, r * 0.18f, r * 0.18f, paint);
+                // Lid, with its lit crown.
+                paint.setColor(mix(colour, 0xFF000000, 0.3f));
                 arc.set(x - r, y - r * 0.85f, x + r, y + r * 0.35f);
                 c.drawArc(arc, 180, 180, true, paint);
-                paint.setColor(0xFFF5E0A0);
-                c.drawRect(x - r, y - r * 0.2f, x + r, y - r * 0.05f, paint);
-                c.drawRect(x - r * 0.12f, y - r * 0.2f, x + r * 0.12f, y + r * 0.45f, paint);
+                paint.setColor(colour);
+                arc.set(x - r * 0.92f, y - r * 0.8f, x + r * 0.92f, y + r * 0.3f);
+                c.drawArc(arc, 180, 180, true, paint);
+                paint.setColor(mix(colour, 0xFFFFFFFF, 0.45f));
+                arc.set(x - r * 0.75f, y - r * 0.72f, x + r * 0.2f, y + r * 0.1f);
+                c.drawArc(arc, 195, 70, true, paint);
+                // Light leaking from the seam.
+                paint.setColor(((int) (150 + 105 * pulse) << 24) | 0x00FFE9A0);
+                c.drawRect(x - r * 0.95f, y - r * 0.24f, x + r * 0.95f, y - r * 0.1f, paint);
+                // Brass straps and the lock plate.
+                paint.setColor(0xFFE8C66A);
+                c.drawRect(x - r * 0.68f, y - r * 0.62f, x - r * 0.52f, y + r * 0.8f, paint);
+                c.drawRect(x + r * 0.52f, y - r * 0.62f, x + r * 0.68f, y + r * 0.8f, paint);
+                c.drawRoundRect(x - r * 0.2f, y - r * 0.3f, x + r * 0.2f, y + r * 0.22f, r * 0.06f, r * 0.06f, paint);
+                paint.setColor(0xFFFFF3C4);
+                c.drawRect(x - r * 0.68f, y - r * 0.62f, x - r * 0.62f, y + r * 0.8f, paint);
+                paint.setColor(0xFF3A2410);
+                c.drawCircle(x, y - r * 0.08f, r * 0.07f, paint);
+                c.drawRect(x - r * 0.03f, y - r * 0.08f, x + r * 0.03f, y + r * 0.08f, paint);
                 paint.setColor(0xFF9AE6FF);
                 for (int k = 0; k <= p; k++) {
-                    c.drawCircle(x - r * 0.6f + k * r * 0.4f, y - r * 0.5f, r * 0.13f, paint);
+                    float gx = x + (k - p * 0.5f) * r * 0.36f;
+                    c.drawCircle(gx, y - r * 0.5f, r * 0.13f, paint);
                 }
+                paint.setColor(0xCCFFFFFF);
+                for (int k = 0; k <= p; k++) {
+                    float gx = x + (k - p * 0.5f) * r * 0.36f;
+                    c.drawCircle(gx - r * 0.04f, y - r * 0.54f, r * 0.045f, paint);
+                }
+                // A sweep of shine, every couple of seconds.
+                float sweep = (float) ((sessionSeconds * 0.55 + index * 0.17) % 1.0) * 1.8f;
+                if (sweep < 1f) {
+                    c.save();
+                    c.clipRect(x - r, y - r * 0.85f, x + r, y + r * 0.8f);
+                    float sx = x - r * 1.5f + sweep * r * 3f;
+                    quad(sx, y - r, sx + r * 0.35f, y - r, sx - r * 0.25f, y + r, sx - r * 0.6f, y + r);
+                    paint.setColor(0x66FFFFFF);
+                    c.drawPath(shape, paint);
+                    c.restore();
+                }
+                c.restore();
                 break;
             }
         }
@@ -1844,8 +2229,15 @@ final class CollectorGame extends GameView {
         Fx.glow(c, sunX, sunY, dp(90f), place == JUNGLE ? 0x66FFF4C0 : 0x88FFF4C0);
         paint.setColor(0xFFFFF4C0);
         c.drawCircle(sunX, sunY, dp(26f), paint);
-        paint.setColor(place == JUNGLE ? 0xAAF2F6E6 : 0xDDFFFFFF);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x33FFF4C0);
+        c.drawCircle(sunX, sunY, dp(38f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        // Clouds lit from above: a shaded flat base, white lobes, a bright rim on top.
         int clouds = place == SEA ? 5 : 4;
+        int base = place == JUNGLE ? 0x99C8D2BE : 0xCCC9D7E8;
+        int body = place == JUNGLE ? 0xAAF2F6E6 : 0xEEFFFFFF;
         for (int i = 0; i < clouds; i++) {
             float span = w + dp(300f);
             float cx = (float) (((i * 530 + 120) - sessionMeters * 1.5) % span);
@@ -1853,8 +2245,16 @@ final class CollectorGame extends GameView {
                 cx += span;
             }
             float cy = bottom * (0.28f + (i % 2) * 0.3f);
-            c.drawOval(cx - dp(60f), cy - dp(12f), cx + dp(60f), cy + dp(12f), paint);
-            c.drawOval(cx - dp(28f), cy - dp(24f), cx + dp(30f), cy + dp(4f), paint);
+            float sc = (i % 3 == 1) ? 0.8f : 1f;
+            paint.setColor(base);
+            c.drawOval(cx - dp(64f) * sc, cy - dp(8f) * sc, cx + dp(64f) * sc, cy + dp(14f) * sc, paint);
+            paint.setColor(body);
+            c.drawOval(cx - dp(58f) * sc, cy - dp(14f) * sc, cx + dp(56f) * sc, cy + dp(8f) * sc, paint);
+            c.drawCircle(cx - dp(24f) * sc, cy - dp(12f) * sc, dp(20f) * sc, paint);
+            c.drawCircle(cx + dp(8f) * sc, cy - dp(18f) * sc, dp(25f) * sc, paint);
+            c.drawCircle(cx + dp(36f) * sc, cy - dp(8f) * sc, dp(15f) * sc, paint);
+            paint.setColor(0x99FFFFFF);
+            c.drawCircle(cx + dp(2f) * sc, cy - dp(26f) * sc, dp(12f) * sc, paint);
         }
         if (place == SEA) {
             drawGulls(c, w, bottom);
@@ -2094,57 +2494,250 @@ final class CollectorGame extends GameView {
         }
     }
 
-    /** The near bank, scrolling faster than the far one: reeds, a pebble shore, a beach, ferns. */
+    /**
+     * The near bank, scrolling faster than the far one: reeds, a pebble shore, a beach, ferns.
+     *
+     * <p>3.25.0: two layers of reeds (a paler back row, a dark tall front row that sways harder
+     * the faster you row), ground that darkens toward the viewer, a wet edge and water lapping
+     * along it. Reed strokes are batched into one {@code drawLines} per colour.
+     */
     private void drawNearShore(Canvas c, float w, float h, float top, float ppm) {
+        if (shoreShaderTop != top || shoreShaderBottom != h) {
+            shoreShaderTop = top;
+            shoreShaderBottom = h;
+            for (int i = 0; i < shoreShader.length; i++) {
+                shoreShader[i] = null;
+            }
+        }
+        if (shoreShader[place] == null) {
+            int a;
+            int b;
+            switch (place) {
+                case SEA:
+                    a = 0xFFEFD9A4;
+                    b = 0xFFB8925A;
+                    break;
+                case JUNGLE:
+                    a = 0xFF2E5A25;
+                    b = 0xFF0E200C;
+                    break;
+                case LAKE:
+                    a = 0xFF51704B;
+                    b = 0xFF1E2C1C;
+                    break;
+                default:
+                    a = 0xFF3D7846;
+                    b = 0xFF15301D;
+                    break;
+            }
+            shoreShader[place] = new LinearGradient(0, top, 0, h, a, b, Shader.TileMode.CLAMP);
+        }
         paint.setStyle(Paint.Style.FILL);
-        int ground = place == SEA ? 0xFFE2C58A : place == JUNGLE ? 0xFF24461F : 0xFF2F5E33;
-        int lip = place == SEA ? 0xCCFFFFFF : place == JUNGLE ? 0xFF33602A : 0xFF3F7A45;
-        paint.setColor(ground);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(shoreShader[place]);
         c.drawRect(0, top, w, h, paint);
-        paint.setColor(lip);
-        float foam = place == SEA ? (float) Math.abs(Math.sin(sessionSeconds * 1.5)) * dp(4f) : 0f;
-        c.drawRect(0, top, w, top + dp(6f) + foam, paint);
-        float gap = dp(22f);
-        double scroll = sessionMeters * ppm * 1.2;
-        float off = (float) (scroll % gap);
-        paint.setStrokeWidth(dp(3f));
-        paint.setStrokeCap(Paint.Cap.BUTT);
-        for (float x = -off - gap; x < w + gap; x += gap) {
-            int k = (int) Math.floor((x + scroll) / gap + 0.5);
-            if (place == SEA) {
+        paint.setShader(null);
+        int wet = place == SEA ? 0xFFD2B47C : place == JUNGLE ? 0xFF3B2F1A : place == LAKE ? 0xFF5B6168 : 0xFF2A4E30;
+        paint.setColor(wet);
+        c.drawRect(0, top, w, top + dp(9f), paint);
+        paint.setColor(0x40000000);
+        c.drawRect(0, top + dp(9f), w, top + dp(12f), paint);
+
+        float t = (float) sessionSeconds;
+        float sway = dp(2.5f) + Math.min(5f, boatSpeed()) * dp(0.9f);
+        if (place == SEA) {
+            // The wash: a sheet of water running up the sand and back, edged with foam.
+            float reach = dp(9f) + (float) Math.sin(t * 1.2) * dp(6f);
+            paint.setColor(0x40DDF2FF);
+            c.drawRect(0, top, w, top + reach, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            linesA.clear();
+            float step = dp(24f);
+            float prevX = 0;
+            float prevY = top + reach;
+            for (float x = step; x <= w + step; x += step) {
+                float fy = top + reach + (float) Math.sin(x * 0.013 + t * 2.0) * dp(2.5f);
+                linesA.add(prevX, prevY, x, fy);
+                prevX = x;
+                prevY = fy;
+            }
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(0xDDFFFFFF);
+            linesA.flush(c, paint);
+            // Ripple marks in the sand.
+            float gap = dp(46f);
+            double scroll = sessionMeters * ppm * 1.2;
+            float off = (float) (scroll % gap);
+            linesA.clear();
+            for (float x = -off - gap; x < w + gap; x += gap) {
+                int k = (int) Math.floor((x + scroll) / gap + 0.5);
+                float ry = top + dp(30f) + (Math.abs(k * 7) % 4) * dp(7f);
+                linesA.add(x - dp(14f), ry, x, ry - dp(2f));
+                linesA.add(x, ry - dp(2f), x + dp(14f), ry);
+            }
+            paint.setStrokeWidth(dp(2f));
+            paint.setColor(0x33603E10);
+            linesA.flush(c, paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            gap = dp(22f);
+            off = (float) (scroll % gap);
+            for (float x = -off - gap; x < w + gap; x += gap) {
+                int k = (int) Math.floor((x + scroll) / gap + 0.5);
                 if (Math.abs(k) % 7 == 3) {
-                    drawStarfish(c, x, top + dp(22f) + (Math.abs(k) % 3) * dp(6f), k);
+                    float sy = top + dp(22f) + (Math.abs(k) % 3) * dp(6f);
+                    paint.setColor(0x33000000);
+                    c.drawOval(x - dp(8f), sy + dp(3f), x + dp(9f), sy + dp(8f), paint);
+                    drawStarfish(c, x, sy, k);
                 } else if (Math.abs(k) % 5 == 1) {
+                    paint.setColor(0x33000000);
+                    c.drawOval(x - dp(6f), top + dp(20f), x + dp(6f), top + dp(26f), paint);
                     paint.setColor(0xFFF6E7D0);
                     c.drawOval(x - dp(5f), top + dp(16f), x + dp(5f), top + dp(23f), paint);
                     paint.setColor(0xFFD9B99A);
                     c.drawRect(x - dp(0.8f), top + dp(16f), x + dp(0.8f), top + dp(23f), paint);
+                    paint.setColor(0xAAFFFFFF);
+                    c.drawCircle(x - dp(2f), top + dp(18f), dp(1.3f), paint);
                 }
-                continue;
             }
-            float tall = dp(16f) + (Math.abs(k * 7) % 4) * dp(6f);
-            float sway = (float) Math.sin(sessionSeconds * 2 + k) * dp(3f);
-            if (place == JUNGLE) {
-                // Ferns: a fan of fronds.
-                if ((k & 1) == 0) {
-                    paint.setColor(0xFF3F9A42);
-                    for (int f = -2; f <= 2; f++) {
-                        c.drawLine(x, top + dp(12f), x + f * dp(7f) + sway, top + dp(12f) - tall * (1f - Math.abs(f) * 0.15f), paint);
-                    }
-                }
-                continue;
-            }
-            paint.setColor((k & 1) == 0 ? 0xFF4E8F4F : 0xFF6BAA5C);
-            c.drawLine(x, top + dp(10f), x + sway, top + dp(10f) - tall, paint);
-            if (place == LAKE && Math.abs(k) % 3 == 1) {
-                paint.setColor(0xFF8A9199);
-                c.drawOval(x - dp(6f), top + dp(14f), x + dp(6f), top + dp(21f), paint);
-            } else if (Math.abs(k) % 5 == 2) {
-                paint.setColor(0xFF7A4E2A);
-                c.drawRoundRect(x + sway - dp(2.5f), top + dp(8f) - tall - dp(10f), x + sway + dp(2.5f),
-                        top + dp(8f) - tall + dp(2f), dp(2f), dp(2f), paint);
+            return;
+        }
+
+        // Water lapping along the edge.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        linesA.clear();
+        float step = dp(24f);
+        double lap = sessionMeters * ppm;
+        float prevX = 0;
+        float prevY = top + dp(2f);
+        for (float x = step; x <= w + step; x += step) {
+            float fy = top + dp(2f) + (float) Math.sin((x + lap) * 0.02 + t * 2.4) * dp(1.6f);
+            linesA.add(prevX, prevY, x, fy);
+            prevX = x;
+            prevY = fy;
+        }
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0x77DDF2FF);
+        linesA.flush(c, paint);
+
+        if (place == JUNGLE) {
+            // Ferns: a paler back row and a bright front row, fans of fronds.
+            fernRow(c, w, top + dp(14f), ppm * 1.0f, dp(30f), dp(14f), sway * 0.6f, 0xFF2C6A30, dp(2.4f));
+            fernRow(c, w, top + dp(26f), ppm * 1.5f, dp(44f), dp(24f), sway, 0xFF45A548, dp(3.4f));
+            paint.setStyle(Paint.Style.FILL);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            return;
+        }
+
+        // Back row: shorter, paler, slower.
+        float gap = dp(17f);
+        double scroll = sessionMeters * ppm * 0.95;
+        float off = (float) (scroll % gap);
+        linesA.clear();
+        linesB.clear();
+        for (float x = -off - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5);
+            float tall = dp(12f) + (Math.abs(k * 7) % 4) * dp(4f);
+            float sw = (float) Math.sin(t * 1.8 + k * 0.7) * sway * 0.6f;
+            float base = top + dp(10f);
+            ((k & 1) == 0 ? linesA : linesB).add(x, base, x + sw, base - tall);
+        }
+        paint.setStrokeWidth(dp(2.4f));
+        paint.setColor(place == LAKE ? 0xFF7E9E80 : 0xFF6FA87A);
+        linesA.flush(c, paint);
+        paint.setColor(place == LAKE ? 0xFF6C8C70 : 0xFF5C9668);
+        linesB.flush(c, paint);
+
+        // The ground between: pebbles on the lake shore, grass tufts on the river.
+        paint.setStyle(Paint.Style.FILL);
+        gap = dp(34f);
+        scroll = sessionMeters * ppm * 1.25;
+        off = (float) (scroll % gap);
+        for (float x = -off - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5);
+            int hsh = Math.abs(k * 2654435 + 12345) % 97;
+            float gy = top + dp(22f) + (hsh % 5) * dp(6f);
+            float gx = x + (hsh % 7) * dp(2f);
+            if (place == LAKE || hsh % 4 == 0) {
+                float pr = dp(4f) + (hsh % 3) * dp(2f);
+                paint.setColor(0x44000000);
+                c.drawOval(gx - pr, gy + pr * 0.2f, gx + pr * 1.1f, gy + pr * 0.9f, paint);
+                paint.setColor(hsh % 2 == 0 ? 0xFF8A9199 : 0xFF6F767E);
+                c.drawOval(gx - pr, gy - pr * 0.6f, gx + pr, gy + pr * 0.5f, paint);
+                paint.setColor(0x66FFFFFF);
+                c.drawOval(gx - pr * 0.6f, gy - pr * 0.5f, gx, gy - pr * 0.1f, paint);
             }
         }
+
+        // Front row: tall, dark, thick at the base, swaying with the boat's speed; cattails.
+        gap = dp(26f);
+        scroll = sessionMeters * ppm * 1.5;
+        off = (float) (scroll % gap);
+        linesA.clear();
+        linesB.clear();
+        linesC.clear();
+        float base = top + dp(20f);
+        for (float x = -off - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5);
+            int hsh = Math.abs(k * 40503 + 977) % 89;
+            float bx = x + (hsh % 5) * dp(1.5f);
+            float tall = dp(28f) + (hsh % 5) * dp(5f);
+            float sw = (float) Math.sin(t * 2.0 + k * 0.9) * sway;
+            float mx = bx + sw * 0.35f;
+            float my = base - tall * 0.5f;
+            float tx = bx + sw;
+            float ty = base - tall;
+            linesA.add(bx, base, mx, my);
+            linesB.add(mx, my, tx, ty);
+            linesC.add(bx - dp(1.2f), base - dp(2f), mx - dp(1f), my);
+            if (hsh % 4 == 1) {
+                // A cattail head on its stalk.
+                paint.setColor(0xFF5E3B1C);
+                c.drawRoundRect(tx - dp(3.5f), ty - dp(15f), tx + dp(3.5f), ty + dp(1f), dp(3.5f), dp(3.5f), paint);
+                paint.setColor(0x55FFFFFF);
+                c.drawRect(tx - dp(2.2f), ty - dp(12f), tx - dp(1f), ty - dp(2f), paint);
+                linesB.add(tx, ty - dp(15f), tx + sw * 0.1f, ty - dp(22f));
+            }
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        int reed = place == LAKE ? 0xFF2E5634 : 0xFF2A6232;
+        paint.setColor(reed);
+        paint.setStrokeWidth(dp(4.5f));
+        linesA.flush(c, paint);
+        paint.setStrokeWidth(dp(2.8f));
+        linesB.flush(c, paint);
+        paint.setStrokeWidth(dp(1.2f));
+        paint.setColor(0xAA8CC77A);
+        linesC.flush(c, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    /** A row of ferns for the jungle shore: each clump a fan of five fronds, batched. */
+    private void fernRow(Canvas c, float w, float base, float ppm, float gap, float tall, float sway,
+            int colour, float width) {
+        double scroll = sessionMeters * ppm;
+        float off = (float) (scroll % gap);
+        linesA.clear();
+        for (float x = -off - gap; x < w + gap; x += gap) {
+            int k = (int) Math.floor((x + scroll) / gap + 0.5);
+            float tt = tall * (0.8f + (Math.abs(k * 7) % 3) * 0.15f);
+            float sw = (float) Math.sin(sessionSeconds * 1.8 + k) * sway;
+            for (int f = -2; f <= 2; f++) {
+                linesA.add(x, base, x + f * tt * 0.42f + sw, base - tt * (1f - Math.abs(f) * 0.22f));
+            }
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(width);
+        paint.setColor(colour);
+        linesA.flush(c, paint);
+        paint.setStrokeWidth(width * 0.4f);
+        paint.setColor(withAlpha(mix(colour, 0xFFFFFFFF, 0.4f), 0x99));
+        // Midrib highlights on the same fronds.
+        linesA.flush(c, paint);
     }
 
     private void drawStarfish(Canvas c, float x, float y, int k) {
@@ -2247,6 +2840,338 @@ final class CollectorGame extends GameView {
                 c.drawCircle(dx - dp(12f), dy - dp(10f), dp(6f), paint);
                 paint.setColor(0xFFF0B132);
                 c.drawRect(dx - dp(22f), dy - dp(11f), dx - dp(16f), dy - dp(8f), paint);
+            }
+        }
+    }
+
+    /* =====================================================================
+     * 3.25.0 graphics: the three lanes, HUD panels and small helpers
+     * ===================================================================== */
+
+    /**
+     * The three lanes as three kinds of water: EASY is glassy and still, with slow sheen and rings
+     * from rising fish; STEADY flows, in dashed current lines; FAST is white rapids, streaks
+     * lengthening with boat speed, foam flecks and breaking crests. The lane you are in is lit
+     * and edged in its colour; a lane a log is coming down pulses red.
+     */
+    private void drawLanes(Canvas c, float w, float waterTop, float laneH, int inLane, int danger,
+            float speed, float ppm) {
+        if (laneShaderH != laneH) {
+            laneShaderH = laneH;
+            float[] pos = {0f, 0.5f, 1f};
+            for (int i = 0; i < LANES; i++) {
+                int col = LANE_COLOR[i];
+                laneShader[i] = new LinearGradient(0, 0, 0, laneH,
+                        new int[] {withAlpha(col, 0x26), withAlpha(col, 0x06), withAlpha(col, 0x1E)}, pos,
+                        Shader.TileMode.CLAMP);
+                laneShaderOn[i] = new LinearGradient(0, 0, 0, laneH,
+                        new int[] {withAlpha(col, 0x58), withAlpha(col, 0x1C), withAlpha(col, 0x4C)}, pos,
+                        Shader.TileMode.CLAMP);
+            }
+            dangerShader = new LinearGradient(0, 0, 0, laneH,
+                    new int[] {0xB0F0655D, 0x40F0655D, 0xB0F0655D}, pos, Shader.TileMode.CLAMP);
+        }
+        float t = (float) sessionSeconds;
+        float pulse = (float) Math.abs(Math.sin(sessionSeconds * 8));
+        for (int i = 0; i < LANES; i++) {
+            float y0 = waterTop + laneH * i;
+            c.save();
+            c.translate(0, y0);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFFFFFFFF);
+            paint.setShader(i == inLane ? laneShaderOn[i] : laneShader[i]);
+            c.drawRect(0, 0, w, laneH, paint);
+            if (i == danger) {
+                paint.setColor(((int) (70 + 150 * pulse) << 24) | 0x00FFFFFF);
+                paint.setShader(dangerShader);
+                c.drawRect(0, 0, w, laneH, paint);
+            }
+            paint.setShader(null);
+            c.restore();
+            drawLaneSurface(c, i, w, y0, laneH, speed, ppm, t);
+        }
+        // Lane ropes between the lanes (the buoys ride on them), with a shadow below.
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 1; i < LANES; i++) {
+            float y = waterTop + laneH * i;
+            paint.setColor(0x33000000);
+            c.drawRect(0, y + dp(1f), w, y + dp(3.5f), paint);
+            paint.setColor(0x40FFFFFF);
+            c.drawRect(0, y - dp(1f), w, y + dp(1f), paint);
+        }
+        // Colour tabs on the left edge: which water is which, at a glance.
+        for (int i = 0; i < LANES; i++) {
+            float y0 = waterTop + laneH * i;
+            boolean on = i == inLane;
+            paint.setColor(on ? LANE_COLOR[i] : withAlpha(LANE_COLOR[i], 0x66));
+            c.drawRoundRect(-dp(6f), y0 + dp(8f), on ? dp(10f) : dp(5f), y0 + laneH - dp(8f), dp(4f), dp(4f), paint);
+        }
+        // The lane you are in, edged in its colour with a soft glow.
+        if (inLane >= 0) {
+            float y0 = waterTop + laneH * inLane;
+            float y1 = y0 + laneH;
+            int col = LANE_COLOR[inLane];
+            paint.setColor(withAlpha(col, 0x2A));
+            c.drawRect(0, y0, w, y0 + dp(7f), paint);
+            c.drawRect(0, y1 - dp(7f), w, y1, paint);
+            paint.setColor(withAlpha(col, 0xC0));
+            c.drawRect(0, y0, w, y0 + dp(2.5f), paint);
+            c.drawRect(0, y1 - dp(2.5f), w, y1, paint);
+        }
+        if (danger >= 0) {
+            float y0 = waterTop + laneH * danger;
+            float y1 = y0 + laneH;
+            paint.setColor(((int) (90 + 160 * pulse) << 24) | 0x00F0655D);
+            c.drawRect(0, y0, w, y0 + dp(3f), paint);
+            c.drawRect(0, y1 - dp(3f), w, y1, paint);
+        }
+    }
+
+    /** The texture that gives each lane its character; a few dozen strokes per lane. */
+    private void drawLaneSurface(Canvas c, int i, float w, float y0, float laneH, float speed, float ppm,
+            float t) {
+        float span = w + dp(260f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        if (i == 0) {
+            // EASY: glassy. Long slow sheen lines that breathe, and rings from rising fish.
+            double s = sessionMeters * ppm * 0.5 + sessionSeconds * dp(8f);
+            paint.setStrokeWidth(dp(2.5f));
+            for (int k = 0; k < 10; k++) {
+                float gx = w + dp(130f) - (float) ((frac(k * 0.618f) * span + s) % span);
+                float gy = y0 + laneH * (0.18f + 0.64f * frac(k * 0.4142f + 0.2f));
+                float len = dp(40f) + (k * 3 % 5) * dp(16f);
+                float tw = 0.5f + 0.5f * (float) Math.sin(t * 1.1f + k * 1.9f);
+                paint.setColor(((int) (16 + 50 * tw) << 24) | 0x00E8FFF6);
+                c.drawLine(gx, gy, gx + len, gy, paint);
+            }
+            paint.setStrokeWidth(dp(1.6f));
+            for (int k = 0; k < 2; k++) {
+                double tt = sessionSeconds / 3.4 + k * 0.5;
+                int cyc = (int) Math.floor(tt);
+                float f = (float) (tt - cyc);
+                float px = w * (0.4f + 0.55f * hash01(cyc * 7 + k * 13)) - f * dp(30f);
+                float py = y0 + laneH * (0.25f + 0.5f * hash01(cyc * 3 + k * 5 + 1));
+                float rr = dp(6f) + f * dp(46f);
+                paint.setColor(((int) (120 * (1f - f)) << 24) | 0x00E8FFF6);
+                arc.set(px - rr, py - rr * 0.3f, px + rr, py + rr * 0.3f);
+                c.drawOval(arc, paint);
+                if (f > 0.2f) {
+                    float r2 = rr * 0.55f;
+                    arc.set(px - r2, py - r2 * 0.3f, px + r2, py + r2 * 0.3f);
+                    c.drawOval(arc, paint);
+                }
+            }
+        } else if (i == 1) {
+            // STEADY: a current - dashed flow lines in three rows, all running the same way.
+            double s = sessionMeters * ppm * 1.0 + sessionSeconds * dp(38f);
+            paint.setStrokeWidth(dp(2.2f));
+            for (int k = 0; k < 18; k++) {
+                int row = k % 3;
+                float gx = w + dp(130f) - (float) ((frac(k * 0.382f + row * 0.13f) * span + s) % span);
+                float gy = y0 + laneH * (0.22f + row * 0.28f) + (float) Math.sin(t * 1.5f + k + gx * 0.01f) * dp(2f);
+                float len = dp(22f) + (k % 4) * dp(9f);
+                paint.setColor(((40 + (k * 7) % 30) << 24) | 0x00C4D6FF);
+                c.drawLine(gx, gy, gx + len, gy, paint);
+                paint.setColor(0x22FFFFFF);
+                c.drawLine(gx + len + dp(5f), gy, gx + len + dp(9f), gy, paint);
+            }
+        } else {
+            // FAST: rapids. Streaks lengthen with speed; foam flecks and breaking crests.
+            double s = sessionMeters * ppm * 1.7 + sessionSeconds * dp(115f);
+            float len0 = dp(24f) + Math.min(5f, speed) * dp(11f);
+            paint.setStrokeWidth(dp(2f));
+            for (int k = 0; k < 22; k++) {
+                float gx = w + dp(130f) - (float) ((frac(k * 0.618f) * span + s) % span);
+                float gy = y0 + laneH * (0.1f + 0.8f * frac(k * 0.37f + 0.1f));
+                float len = len0 * (0.55f + 0.45f * frac(k * 0.73f));
+                paint.setColor(((45 + (k * 11) % 50) << 24) | 0x00FFFFFF);
+                c.drawLine(gx, gy, gx + len, gy, paint);
+            }
+            paint.setStrokeWidth(dp(2.2f));
+            double s2 = s * 0.8;
+            for (int k = 0; k < 8; k++) {
+                float cx = w + dp(130f) - (float) ((frac(k * 0.291f + 0.5f) * span + s2) % span);
+                float cy = y0 + laneH * (0.2f + 0.6f * frac(k * 0.53f)) + (float) Math.sin(t * 3f + k) * dp(2f);
+                paint.setColor(0x70FFFFFF);
+                c.drawLine(cx - dp(9f), cy, cx, cy - dp(5f), paint);
+                c.drawLine(cx, cy - dp(5f), cx + dp(9f), cy, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0x80FFFFFF);
+            double s3 = s * 1.15;
+            for (int k = 0; k < 14; k++) {
+                float fx2 = w + dp(130f) - (float) ((frac(k * 0.157f + 0.3f) * span + s3) % span);
+                float fy2 = y0 + laneH * (0.08f + 0.84f * frac(k * 0.811f));
+                c.drawOval(fx2 - dp(3f), fy2 - dp(1.6f), fx2 + dp(3f), fy2 + dp(1.6f), paint);
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    /** The shared HUD panel in the app's palette. */
+    private void hudPanel(Canvas c, float l, float t, float r, float b, float rad) {
+        hudPanel(c, l, t, r, b, rad, PANEL_TOP, PANEL_BOTTOM, 255);
+    }
+
+    /**
+     * A HUD panel: a vertical gradient, a hairline border and a lit top edge, at {@code alpha}.
+     * The gradient is cached by height and colours and drawn translated, so panels of the same
+     * height share one shader and nothing is allocated per frame once they are warm.
+     */
+    private void hudPanel(Canvas c, float l, float t, float r, float b, float rad, int top, int bottom,
+            int alpha) {
+        float hgt = b - t;
+        if (hgt <= 0f || alpha <= 0) {
+            return;
+        }
+        LinearGradient g = panelGradient(Math.round(hgt), top, bottom);
+        c.save();
+        c.translate(0, t);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((alpha << 24) | 0x00FFFFFF);
+        paint.setShader(g);
+        c.drawRoundRect(l, 0, r, hgt, rad, rad, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(((0x24 * alpha / 255) << 24) | 0x00FFFFFF);
+        c.drawRoundRect(l + dp(0.5f), dp(0.5f), r - dp(0.5f), hgt - dp(0.5f), rad, rad, paint);
+        paint.setColor(((0x50 * alpha / 255) << 24) | 0x00FFFFFF);
+        c.drawLine(l + Math.max(dp(2f), rad * 0.8f), dp(1f), r - Math.max(dp(2f), rad * 0.8f), dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+        c.restore();
+    }
+
+    private LinearGradient panelGradient(int hgt, int top, int bottom) {
+        for (int i = 0; i < panelCount; i++) {
+            if (panelKeyH[i] == hgt && panelKeyTop[i] == top && panelKeyBottom[i] == bottom) {
+                return panelShader[i];
+            }
+        }
+        int slot;
+        if (panelCount < PANEL_CACHE) {
+            slot = panelCount++;
+        } else {
+            slot = panelNext;
+            panelNext = (panelNext + 1) % PANEL_CACHE;
+        }
+        panelKeyH[slot] = hgt;
+        panelKeyTop[slot] = top;
+        panelKeyBottom[slot] = bottom;
+        panelShader[slot] = new LinearGradient(0, 0, 0, hgt, top, bottom, Shader.TileMode.CLAMP);
+        return panelShader[slot];
+    }
+
+    /** A rounded track with a glossy fill: a darker lower half and a lit line along the top. */
+    private void glossyBar(Canvas c, float l, float t, float r, float b, float frac, int colour) {
+        float rad = (b - t) * 0.5f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x55000000);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setColor(0x26FFFFFF);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        frac = Math.max(0f, Math.min(1f, frac));
+        if (frac <= 0f) {
+            return;
+        }
+        float e = l + (r - l) * frac;
+        paint.setColor(mix(colour, 0xFF000000, 0.2f));
+        c.drawRoundRect(l, t, e, b, rad, rad, paint);
+        paint.setColor(colour);
+        c.drawRoundRect(l, t, e, t + (b - t) * 0.62f, rad, rad, paint);
+        if (e - l > rad * 2f) {
+            paint.setColor(0x88FFFFFF);
+            c.drawRect(l + rad, t + (b - t) * 0.16f, e - rad, t + (b - t) * 0.32f, paint);
+        }
+    }
+
+    private static int withAlpha(int colour, int a) {
+        return (Math.max(0, Math.min(255, a)) << 24) | (colour & 0x00FFFFFF);
+    }
+
+    /** Blends two opaque-or-not colours channel by channel; pure arithmetic, no allocation. */
+    private static int mix(int a, int b, float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        int aa = a >>> 24;
+        int ar = (a >> 16) & 0xFF;
+        int ag = (a >> 8) & 0xFF;
+        int ab = a & 0xFF;
+        int ba = b >>> 24;
+        int br = (b >> 16) & 0xFF;
+        int bg = (b >> 8) & 0xFF;
+        int bb = b & 0xFF;
+        return ((int) (aa + (ba - aa) * t) << 24) | ((int) (ar + (br - ar) * t) << 16)
+                | ((int) (ag + (bg - ag) * t) << 8) | (int) (ab + (bb - ab) * t);
+    }
+
+    private static float frac(float v) {
+        return v - (float) Math.floor(v);
+    }
+
+    /** Deterministic 0..1 from an integer, for placing scenery without java.util.Random. */
+    private static float hash01(int n) {
+        n = n * 0x27D4EB2D + 0x165667B1;
+        n ^= n >>> 15;
+        n *= 0x2C1B3C6D;
+        n ^= n >>> 12;
+        return (n & 0xFFFF) / 65535f;
+    }
+
+    private String speedText(float speed) {
+        int tenths = Math.round(speed * 10f);
+        if (tenths != speedTenths) {
+            speedTenths = tenths;
+            speedText = (tenths / 10) + "." + Math.abs(tenths % 10) + " m/s";
+        }
+        return speedText;
+    }
+
+    private String logsText() {
+        if (dodged != logsTextDodged) {
+            logsTextDodged = dodged;
+            logsText = "LOGS HIT  ·  " + dodged + " DODGED";
+        }
+        return logsText;
+    }
+
+    private String placeText() {
+        int left = Math.round((float) (GAME_LENGTH - gameSeconds)); // the same rounding clock() uses
+        int key = place * 100000 + left;
+        if (key != placeTextKey) {
+            placeTextKey = key;
+            placeText = PLACE_NAMES[place] + "  ·  " + clock(GAME_LENGTH - gameSeconds) + " LEFT";
+        }
+        return placeText;
+    }
+
+    /** A reusable batch of line segments, flushed in one drawLines call. */
+    private static final class Lines {
+        final float[] pts;
+        int n;
+
+        Lines(int segments) {
+            pts = new float[segments * 4];
+        }
+
+        void clear() {
+            n = 0;
+        }
+
+        void add(float x0, float y0, float x1, float y1) {
+            if (n + 4 > pts.length) {
+                return;
+            }
+            pts[n++] = x0;
+            pts[n++] = y0;
+            pts[n++] = x1;
+            pts[n++] = y1;
+        }
+
+        void flush(Canvas c, Paint p) {
+            if (n > 0) {
+                c.drawLines(pts, 0, n, p);
             }
         }
     }

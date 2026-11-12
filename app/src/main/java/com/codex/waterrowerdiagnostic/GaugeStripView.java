@@ -51,6 +51,24 @@ final class GaugeStripView extends View {
         postInvalidateOnAnimation();
     }
 
+    /** Session totals, or -1 while no session is running. See {@link #setSession}. */
+    private int sessionMetres = -1;
+    private int sessionStrokes = -1;
+
+    /**
+     * What the strip's distance and stroke figures count from. With a session running they are the
+     * session's own - zero when START SESSION was pressed, carried across every game in it. With
+     * none they fall back to the monitor's counters, which run from whenever the S4 powered up and
+     * were the only thing this strip could show before 3.25.0 ("4353 m" on a fresh game).
+     */
+    void setSession(int metres, int strokes) {
+        if (metres != sessionMetres || strokes != sessionStrokes) {
+            sessionMetres = metres;
+            sessionStrokes = strokes;
+            postInvalidateOnAnimation();
+        }
+    }
+
     private float dp(float v) {
         return v * getResources().getDisplayMetrics().density;
     }
@@ -67,8 +85,8 @@ final class GaugeStripView extends View {
         // Averaged for the same reason as the gauges screen: an isolated dip in 1A9 reads
         // as a missed stroke. Raw stays in diagnostics.
         int spm = status == null ? 0 : status.strokeRateAverage;
-        int strokes = status == null ? 0 : status.strokes;
-        int dist = status == null ? 0 : (status.distanceMeters > 0
+        int strokes = sessionStrokes >= 0 ? sessionStrokes : status == null ? 0 : status.strokes;
+        int dist = sessionMetres >= 0 ? sessionMetres : status == null ? 0 : (status.distanceMeters > 0
                 ? status.distanceMeters : status.derivedDistanceMeters);
 
         // Stopwatch takes the left, then two arc gauges, then plain figures.

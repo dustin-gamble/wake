@@ -313,6 +313,46 @@ final class RiverExplorerGame extends GameView {
     private int skyShaderKey;
     private float skyShaderHorizon;
 
+    /*
+     * 3.25 graphics pass. The ground loop now records each strip's river geometry so the water and
+     * the banks can be drawn as smooth polygons (the per-strip rectangles stepped 19 px at a time
+     * near the boat) and the water can carry a gradient. All preallocated; grown only on a resize.
+     */
+    private float[] stripY = new float[0];
+    private float[] stripTop = new float[0];
+    private float[] stripCx = new float[0];
+    private float[] stripHalf = new float[0];
+    private float[] stripSpread = new float[0];
+    private float[] stripFog = new float[0];
+    private int[] stripFoam = new int[0];
+    private int stripCount;
+    /** Strips [0, stripMain) are the main channel; beyond it the fork's two branches. */
+    private int stripMain;
+    private final Path path2 = new Path();
+    /** Where the sun (or the moon) is, for its glitter path on the water and the scene's shading. */
+    private float glintX;
+    private float glintA;
+    private int glintCol = 0xFFFFF4D0;
+    /** -1 lit from the left, +1 from the right, 0 from straight ahead. */
+    private float lightSide = -0.6f;
+    private static final float RIPPLE_ROW = 3f;
+    private static final int G_WATER = 0;
+    private static final int G_BANK = 1;
+    private static final int G_REFL = 2;
+    private static final int G_HAZE = 3;
+    private static final int G_HILL = 4; // 4, 5, 6
+    private static final int G_HULL = 7;
+    private static final int G_DECK = 8;
+    private static final int G_SLOTS = 9;
+    private final LinearGradient[] grads = new LinearGradient[G_SLOTS];
+    private final long[] gradKeys = new long[G_SLOTS];
+    private final int[] cols2 = new int[2];
+    private final float[] pos2 = {0f, 1f};
+    private final int[] cols3 = new int[3];
+    private final float[] pos3 = new float[3];
+    private final int[] cols5 = new int[5];
+    private final float[] pos5 = new float[5];
+
     /* Wildlife. */
     private Seg heronSeg;
     private double heronStart;
@@ -1425,112 +1465,25 @@ final class RiverExplorerGame extends GameView {
         paint.setShader(null);
         drawSunMoonStars(c, w, horizon);
         float hillShift = (float) ((worldHeading + yaw) * w * 0.8f);
-        for (int layer = 0; layer < 2; layer++) {
-            // The near hills carry the season, the far ones stay hazy blue whatever the month.
-            int hill = layer == 0 ? 0xFF6E86A0 : blend(0xFF4E6B5C, season.grassB, 0.45f);
-            paint.setColor(blend(lit(hill), fogColour, 0.2f + mist * 0.5f));
-            path.reset();
-            path.moveTo(0, horizon + 1);
-            float step = dp(70f);
-            float shift = ((hillShift * (layer == 0 ? 0.4f : 0.8f)) % (step * 8) + step * 8) % (step * 8);
-            for (float x = -step * 8; x <= w + step * 8; x += step) {
-                float px = x + shift;
-                int k = (int) Math.floor((x) / step);
-                float peak = horizon - dp(18f + ((k * 7919 + layer * 131) % 7 + 7) % 7 * 6f) - layer * dp(4f);
-                path.lineTo(px, peak);
-            }
-            path.lineTo(w, horizon + 1);
-            path.close();
-            c.drawPath(path, paint);
-        }
-
+        // 3.25: the clouds sit behind the hills, and the hills are three layers deep.
         drawSkyLife(c, w, horizon, hillShift);
+        drawHills(c, w, horizon, hillShift);
 
-        c.save();
-        c.translate(shake.dx, shake.dy);
-        // Ground: one strip per few pixels, each a distance ahead.
         double forkDist = distanceToFork();
         char choice = choiceForNextFork();
         float fogReach = LOOK * (1f - 0.55f * mist);
-        double t = sessionSeconds;
-        for (float y = h; y > horizon + 2; y -= dp(3f)) {
-            float z = CAM_H * focal / (y - horizon);
-            if (z > LOOK) {
-                break;
-            }
-            int zi = (int) z;
-            float fog = Math.min(1f, z / fogReach);
-            float cx = w / 2f + (offsets[zi] - lateral - yaw * z) * focal / z;
-            float half = HALF_WIDTH * focal / z;
-            double s = along + dir * z;
-            boolean grassBand = ((int) (s / 10)) % 2 == 0;
-            paint.setColor(world(grassBand ? season.grassA : season.grassB, fog * 0.7f));
-            c.drawRect(0, y - dp(3f), w, y + 1, paint);
-            boolean white = (rapSeg != null && s > rapBase - 8 && s < rapBase + RAPIDS_LEN + 8)
-                    || (weirSeg != null && s > weirBase - 3 && s < weirBase + 26);
-            int water;
-            if (white) {
-                // Broken water: pale, streaked with foam that races toward the boat.
-                int band = (int) Math.floor(s * 0.45 + t * 2.2) % 3;
-                water = world(band == 0 ? 0xFFD8ECF2 : band == 1 ? 0xFF4C93B4 : 0xFF3A7FA2, fog * 0.6f);
-            } else {
-                // The ripple pattern is carried downstream at the season's current, so a spring
-                // flood visibly runs and a summer river barely moves.
-                boolean ripple = ((int) ((s + current * t) / 4)) % 2 == 0;
-                water = world(ripple ? season.waterA : season.waterB, fog * 0.6f);
-            }
-            if (dir > 0 && forkDist < LOOK && z > forkDist) {
-                float spread = (float) (z - forkDist) * FORK_ANGLE * focal / z;
-                for (int side = -1; side <= 1; side += 2) {
-                    boolean chosen = (side < 0) == (choice == 'L');
-                    paint.setColor(chosen ? water : blend(water, 0xFF1A2A33, 0.35f));
-                    c.drawRect(cx + side * spread - half * 0.8f, y - dp(3f), cx + side * spread + half * 0.8f, y + 1, paint);
-                }
-            } else {
-                paint.setColor(water);
-                c.drawRect(cx - half, y - dp(3f), cx + half, y + 1, paint);
-            }
-            paint.setColor(world(season.bank, fog * 0.7f));
-            c.drawRect(cx - half - half * 0.08f, y - dp(3f), cx - half, y + 1, paint);
-            c.drawRect(cx + half, y - dp(3f), cx + half + half * 0.08f, y + 1, paint);
-        }
+        // The hard black line across the horizon: the strips start LOOK metres out, which is ~7 px
+        // below the horizon, and the sky and hills stop 1 px below it, so the view's own black
+        // background showed through. Fill that band with the farthest meadow colour - outside the
+        // shake, so a jolt cannot open the gap again.
+        paint.setColor(world(blend(season.grassA, season.grassB, 0.5f), 0.7f * Math.min(1f, LOOK / fogReach)));
+        c.drawRect(0, horizon, w, horizon + dp(16f), paint);
 
-        // Trees along both banks, far to near, and landmarks where they stand. The run of tree
-        // numbers is taken in the direction of travel, so the cruise home sees the same trees.
-        long treeA = (long) Math.ceil((along + dir * 3.0) / TREE_STEP);
-        long treeB = (long) Math.floor((along + dir * (LOOK - 1.0)) / TREE_STEP);
-        long firstTree = Math.min(treeA, treeB);
-        long lastTree = Math.max(treeA, treeB);
-        for (long n = dir > 0 ? lastTree : firstTree; dir > 0 ? n >= firstTree : n <= lastTree; n -= dir) {
-            float z = (float) ((n * TREE_STEP - along) * dir);
-            if (z < 3f || z > LOOK) {
-                continue;
-            }
-            int zi = Math.max(0, Math.min(LOOK, (int) z));
-            long hsh = n * 2654435761L;
-            boolean left = ((hsh >>> 7) & 1) == 0;
-            float out = HALF_WIDTH + 5f + ((hsh >>> 12) & 15);
-            float xw = offsets[zi] + dir * (left ? -out : out);
-            float sx = w / 2f + (xw - lateral - yaw * z) * focal / z;
-            float sy = horizon + CAM_H * focal / z;
-            float size = 9f * focal / z;
-            float fog = Math.min(1f, z / fogReach);
-            paint.setColor(world(0xFF5A3E2B, fog * 0.7f));
-            c.drawRect(sx - size * 0.06f, sy - size * 0.5f, sx + size * 0.06f, sy, paint);
-            if (season.bareness > 0.6f) {
-                // Winter: bare branches rather than a canopy.
-                paint.setStrokeWidth(Math.max(1f, size * 0.05f));
-                paint.setColor(world(season.foliageB, fog * 0.7f));
-                for (int b = -1; b <= 1; b++) {
-                    c.drawLine(sx, sy - size * 0.45f, sx + b * size * 0.22f, sy - size * 0.85f, paint);
-                }
-                paint.setColor(world(0xFFF2F6FA, fog * 0.7f));
-                c.drawCircle(sx, sy - size * 0.72f, size * 0.12f, paint);
-            } else {
-                paint.setColor(world(((hsh >>> 20) & 1) == 0 ? season.foliageA : season.foliageB, fog * 0.7f));
-                c.drawCircle(sx, sy - size * 0.62f, size * 0.32f, paint);
-            }
-        }
+        c.save();
+        c.translate(shake.dx, shake.dy);
+        drawGround(c, w, h, horizon, focal, yaw, forkDist, choice, fogReach);
+        drawBankLife(c, w, horizon, focal, yaw, forkDist, fogReach);
+        drawTrees(c, w, horizon, focal, yaw, fogReach);
         drawLandmarks(c, w, horizon, focal);
         // Far to near: the destination closes the river off at the top of the reach, and a weir can
         // stand between you and it.
@@ -1567,10 +1520,741 @@ final class RiverExplorerGame extends GameView {
         }
     }
 
+    /* ---------- 3.25 scenery: hills, ground, water, banks, trees ---------- */
+
+    /**
+     * A vertical gradient kept in slot {@code slot} and rebuilt only when its inputs move. Colours
+     * are quantised to 5 bits a channel first, so a sky easing through the day rebuilds a handful of
+     * shaders a minute rather than one a frame. The arrays are copied by LinearGradient.
+     */
+    private LinearGradient grad(int slot, float y0, float y1, int[] cols, float[] pos) {
+        long key = 0x9E3779B97F4A7C15L;
+        key = mixKey(key, Float.floatToIntBits(y0));
+        key = mixKey(key, Float.floatToIntBits(y1));
+        for (int i = 0; i < cols.length; i++) {
+            cols[i] &= 0xFFF8F8F8;
+            key = mixKey(key, cols[i]);
+            key = mixKey(key, Float.floatToIntBits(pos[i]));
+        }
+        if (grads[slot] == null || gradKeys[slot] != key) {
+            grads[slot] = new LinearGradient(0, y0, 0, y1, cols, pos, Shader.TileMode.CLAMP);
+            gradKeys[slot] = key;
+        }
+        return grads[slot];
+    }
+
+    private static long mixKey(long h, int v) {
+        h ^= v & 0xFFFFFFFFL;
+        h *= 0xff51afd7ed558ccdL;
+        return h ^ (h >>> 33);
+    }
+
+    private void ensureStrips(int n) {
+        if (stripY.length >= n) {
+            return;
+        }
+        stripY = new float[n];
+        stripTop = new float[n];
+        stripCx = new float[n];
+        stripHalf = new float[n];
+        stripSpread = new float[n];
+        stripFog = new float[n];
+        stripFoam = new int[n];
+    }
+
+    /** Broken water: the rapids and the pour below a weir. Purely how it is drawn. */
+    private boolean whiteAt(double s) {
+        return (rapSeg != null && s > rapBase - 8 && s < rapBase + RAPIDS_LEN + 8)
+                || (weirSeg != null && s > weirBase - 3 && s < weirBase + 26);
+    }
+
+    /**
+     * The meadow on one bank ({@code side} -1 or +1 in world terms) at distance {@code s}: a
+     * patchwork of fields 64 m long, each its own shade, some ripening toward the bank colour, with
+     * a slow roll inside each so the ground recedes rather than reading as one flat card. Replaces
+     * the 10 m light/dark bands, which read as stripes.
+     */
+    private int fieldColour(double s, int side, float fog) {
+        long f = (long) Math.floor((s + (side > 0 ? 29.0 : 0.0)) / 64.0);
+        long hsh = (f * 0x9E3779B97F4A7C15L) ^ (side > 0 ? 0x632BE59BD9B4E019L : 0x2545F4914F6CDD1DL);
+        hsh *= 0xff51afd7ed558ccdL;
+        hsh ^= hsh >>> 29;
+        float shade = ((hsh >>> 40) & 0xFF) / 255f;
+        int base = blend(season.grassA, season.grassB, shade);
+        base = blend(base, 0xFF16300F, 0.05f + 0.16f * (((hsh >>> 24) & 0xFF) / 255f));
+        if (((hsh >>> 16) & 3) == 0) {
+            base = blend(base, season.bank, 0.26f);
+        }
+        float roll = (float) Math.sin(s * 0.11 + side * 1.7) * 0.5f + 0.5f;
+        base = blend(base, 0xFF0E1E0A, roll * 0.07f);
+        return world(base, fog * 0.7f);
+    }
+
+    private float chCentre(int j, int ch) {
+        return stripCx[j] + ch * stripSpread[j];
+    }
+
+    private float chHalf(int j, int ch) {
+        return ch == 0 ? stripHalf[j] : stripHalf[j] * 0.8f;
+    }
+
+    /**
+     * A band of channel {@code ch} (0 main, -1/+1 the fork's branches) between strips from..to,
+     * bounded by offsets {@code a} and {@code b} from its centre in units of its half-width: -1..1
+     * is the water, 1..1.09 the right bank. Returns false when there is nothing to draw.
+     */
+    private boolean bandPath(Path p, int ch, int from, int to, float a, float b, float horizon) {
+        p.rewind();
+        if (to - from < 2) {
+            return false;
+        }
+        for (int j = from; j < to; j++) {
+            float x = chCentre(j, ch) + a * chHalf(j, ch);
+            if (j == from) {
+                p.moveTo(x, stripY[j]);
+            } else {
+                p.lineTo(x, stripY[j]);
+            }
+        }
+        if (to == stripCount) {
+            p.lineTo(chCentre(to - 1, ch) + a * chHalf(to - 1, ch), horizon + 1f);
+            p.lineTo(chCentre(to - 1, ch) + b * chHalf(to - 1, ch), horizon + 1f);
+        }
+        for (int j = to - 1; j >= from; j--) {
+            p.lineTo(chCentre(j, ch) + b * chHalf(j, ch), stripY[j]);
+        }
+        p.close();
+        return true;
+    }
+
+    /** The line at offset {@code a} along channel {@code ch}, for stroking a bank's edge. */
+    private boolean edgePath(Path p, int ch, int from, int to, float a, float horizon) {
+        p.rewind();
+        if (to - from < 2) {
+            return false;
+        }
+        for (int j = from; j < to; j++) {
+            float x = chCentre(j, ch) + a * chHalf(j, ch);
+            if (j == from) {
+                p.moveTo(x, stripY[j]);
+            } else {
+                p.lineTo(x, stripY[j]);
+            }
+        }
+        if (to == stripCount) {
+            p.lineTo(chCentre(to - 1, ch) + a * chHalf(to - 1, ch), horizon + 1f);
+        }
+        return true;
+    }
+
+    /**
+     * Three ranges, far to near: blue mountains, the valley's own hills, and the far bank's woods
+     * as a scalloped tree line. Each slides with the river's heading at its own rate, so the view
+     * has parallax, and each fades into the haze at its foot.
+     */
+    private void drawHills(Canvas c, float w, float horizon, float hillShift) {
+        for (int layer = 0; layer < 3; layer++) {
+            float step = dp(layer == 0 ? 120f : layer == 1 ? 72f : 30f);
+            float par = layer == 0 ? 0.3f : layer == 1 ? 0.55f : 0.85f;
+            float maxH = dp(layer == 0 ? 92f : layer == 1 ? 52f : 18f);
+            float minH = dp(layer == 0 ? 36f : layer == 1 ? 16f : 7f);
+            int colour;
+            float haze;
+            if (layer == 0) {
+                colour = blend(0xFF7890AE, skyBot, 0.3f);
+                haze = 0.32f;
+            } else if (layer == 1) {
+                colour = blend(0xFF4E6B5C, season.grassB, 0.45f);
+                haze = 0.16f;
+            } else {
+                colour = blend(blend(season.foliageA, season.foliageB, 0.5f), 0xFF14201A, 0.5f);
+                haze = 0.08f;
+            }
+            int top = blend(lit(colour), fogColour, haze + mist * 0.5f);
+            cols2[0] = top;
+            cols2[1] = blend(top, fogColour, 0.42f + mist * 0.3f);
+            paint.setColor(0xFFFFFFFF);
+            paint.setShader(grad(G_HILL + layer, horizon - maxH, horizon, cols2, pos2));
+            float period = step * 16;
+            float shift = ((hillShift * par) % period + period) % period;
+            int k = -(int) Math.ceil(shift / step) - 2;
+            float px = k * step + shift;
+            float py = horizon - hillHeight(k, layer, minH, maxH);
+            path.rewind();
+            path.moveTo(px, horizon + 1f);
+            path.lineTo(px, py);
+            while (px < w + step) {
+                k++;
+                float nx = k * step + shift;
+                float ny = horizon - hillHeight(k, layer, minH, maxH);
+                if (layer == 0) {
+                    // Mountains keep their peaks, with a shoulder between each pair.
+                    path.lineTo((px + nx) / 2f + step * 0.12f, Math.max(py, ny) + (horizon - Math.max(py, ny)) * 0.3f);
+                    path.lineTo(nx, ny);
+                } else if (layer == 1) {
+                    path.quadTo(px, py, (px + nx) / 2f, (py + ny) / 2f);
+                } else {
+                    // A crown per tree.
+                    path.quadTo((px + nx) / 2f, Math.min(py, ny) - step * 0.45f, nx, ny);
+                }
+                px = nx;
+                py = ny;
+            }
+            path.lineTo(px, horizon + 1f);
+            path.close();
+            c.drawPath(path, paint);
+            paint.setShader(null);
+        }
+    }
+
+    private static float hillHeight(int k, int layer, float minH, float maxH) {
+        int m = ((k % 16) + 16) % 16;
+        long hsh = (m * 0x9E3779B97F4A7C15L + layer * 0x632BE59BD9B4E019L) * 0xff51afd7ed558ccdL;
+        hsh ^= hsh >>> 31;
+        return minH + (maxH - minH) * (((hsh >>> 40) & 0xFFFF) / 65535f);
+    }
+
+    /**
+     * The ground, near to far, one strip per 3 px as before: each strip is a distance ahead and
+     * paints the meadows. The river is then drawn over them as smooth polygons from the recorded
+     * strips - water with the sky's reflection, the banks' reflections, ripples and glitter, then
+     * the banks themselves - and the haze is laid along the horizon last.
+     */
+    private void drawGround(Canvas c, float w, float h, float horizon, float focal, float yaw,
+                            double forkDist, char choice, float fogReach) {
+        boolean fork = dir > 0 && forkDist < LOOK;
+        int cap = (int) ((h - horizon) / dp(3f)) + 4;
+        ensureStrips(cap);
+        double t = sessionSeconds;
+        int n = 0;
+        int main = -1;
+        for (float y = h; y > horizon + 2 && n < cap; y -= dp(3f)) {
+            float z = CAM_H * focal / (y - horizon);
+            if (z > LOOK) {
+                break;
+            }
+            int zi = (int) z;
+            float fog = Math.min(1f, z / fogReach);
+            float cx = w / 2f + (offsets[zi] - lateral - yaw * z) * focal / z;
+            float half = HALF_WIDTH * focal / z;
+            double s = along + dir * z;
+            float split = Math.max(0f, Math.min(w, cx));
+            paint.setColor(fieldColour(s, -dir, fog));
+            c.drawRect(0, y - dp(3f), split, y + 1, paint);
+            paint.setColor(fieldColour(s, dir, fog));
+            c.drawRect(split, y - dp(3f), w, y + 1, paint);
+            boolean beyond = fork && z > forkDist;
+            if (beyond && main < 0) {
+                main = n;
+            }
+            stripY[n] = n == 0 ? h + 2f : y - dp(1f);
+            stripTop[n] = y - dp(3f);
+            stripCx[n] = cx;
+            stripHalf[n] = half;
+            stripSpread[n] = beyond ? (float) (z - forkDist) * FORK_ANGLE * focal / z : 0f;
+            stripFog[n] = fog;
+            int foam = 0;
+            if (!beyond && whiteAt(s)) {
+                // Broken water: pale, streaked with foam that races toward the boat.
+                int band = (int) Math.floor(s * 0.45 + t * 2.2) % 3;
+                foam = band == 0 ? 0xB8 : band == 1 ? 0x70 : 0x38;
+            }
+            stripFoam[n] = foam;
+            n++;
+        }
+        stripCount = n;
+        stripMain = main < 0 ? n : main;
+        if (n < 2) {
+            return;
+        }
+        int bFrom = Math.max(0, stripMain - 1);
+        int channels = fork ? 3 : 1;
+
+        // The water. Its edges are aliased on purpose - they sit under the banks' anti-aliased lips,
+        // and an aliased fill is far cheaper for the GPU than an anti-aliased one this size.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(waterShader(horizon, h, focal, fogReach));
+        paint.setAntiAlias(false);
+        for (int k = 0; k < channels; k++) {
+            int ch = k == 0 ? 0 : k == 1 ? -1 : 1;
+            if (bandPath(path, ch, k == 0 ? 0 : bFrom, k == 0 ? stripMain : n, -1f, 1f, horizon)) {
+                c.drawPath(path, paint);
+            }
+        }
+        paint.setShader(null);
+        paint.setAntiAlias(true);
+        if (fork) {
+            // The branch not taken lies in shadow.
+            paint.setColor(0x591A2A33);
+            if (bandPath(path, choice == 'L' ? 1 : -1, bFrom, n, -1f, 1f, horizon)) {
+                c.drawPath(path, paint);
+            }
+        }
+        // Broken water, narrowed to each strip's top edge so it never steps past the bank.
+        for (int j = 0; j < stripMain; j++) {
+            if (stripFoam[j] == 0) {
+                continue;
+            }
+            float top = stripTop[j];
+            float bot = (j == 0 ? h : stripTop[j - 1]) + 1f;
+            float ht = stripHalf[j] * (top - horizon) / Math.max(1f, top + dp(3f) - horizon);
+            paint.setColor((stripFoam[j] << 24) | (world(0xFFE4F3F7, stripFog[j] * 0.6f) & 0x00FFFFFF));
+            c.drawRect(stripCx[j] - ht, top, stripCx[j] + ht, bot, paint);
+        }
+        // The banks and their woods reflected along each edge of the water.
+        int refl = blend(lit(blend(season.foliageA, season.foliageB, 0.5f)), 0xFF050C08, 0.62f);
+        cols3[0] = 0x30000000 | (blend(refl, fogColour, 0.5f) & 0x00FFFFFF);
+        cols3[1] = 0x60000000 | (refl & 0x00FFFFFF);
+        cols3[2] = 0x80000000 | (refl & 0x00FFFFFF);
+        pos3[0] = 0f;
+        pos3[1] = 0.25f;
+        pos3[2] = 1f;
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(grad(G_REFL, horizon, h, cols3, pos3));
+        for (int k = 0; k < channels; k++) {
+            int ch = k == 0 ? 0 : k == 1 ? -1 : 1;
+            int from = k == 0 ? 0 : bFrom;
+            int to = k == 0 ? stripMain : n;
+            for (int side = -1; side <= 1; side += 2) {
+                if (bandPath(path, ch, from, to, side * 1f, side * 0.86f, horizon)) {
+                    c.drawPath(path, paint);
+                }
+            }
+        }
+        paint.setShader(null);
+
+        drawWaterMarks(c, w, h, horizon, focal, yaw, forkDist, fork, fogReach);
+
+        // The banks: earth fading into the distance, a dark wet line at the water and a dry lip
+        // where they meet the meadow.
+        int bank = lit(season.bank);
+        cols3[0] = blend(bank, fogColour, Math.min(1f, LOOK / fogReach) * 0.7f);
+        cols3[1] = blend(bank, fogColour, Math.min(1f, 50f / fogReach) * 0.7f);
+        cols3[2] = blend(bank, 0xFF000000, 0.12f);
+        pos3[0] = 0f;
+        pos3[1] = Math.min(0.95f, CAM_H * focal / 50f / (h - horizon));
+        pos3[2] = 1f;
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(grad(G_BANK, horizon, h, cols3, pos3));
+        for (int k = 0; k < channels; k++) {
+            int ch = k == 0 ? 0 : k == 1 ? -1 : 1;
+            int from = k == 0 ? 0 : bFrom;
+            int to = k == 0 ? stripMain : n;
+            for (int side = -1; side <= 1; side += 2) {
+                if (bandPath(path, ch, from, to, side * 1f, side * 1.09f, horizon)) {
+                    c.drawPath(path, paint);
+                }
+            }
+        }
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        int wet = 0x99000000 | (blend(bank, 0xFF0A1014, 0.6f) & 0x00FFFFFF);
+        int lip = 0x66000000 | (blend(bank, 0xFFFFF4DC, 0.3f) & 0x00FFFFFF);
+        for (int k = 0; k < channels; k++) {
+            int ch = k == 0 ? 0 : k == 1 ? -1 : 1;
+            int from = k == 0 ? 0 : bFrom;
+            int to = k == 0 ? stripMain : n;
+            for (int side = -1; side <= 1; side += 2) {
+                paint.setStrokeWidth(dp(2.2f));
+                paint.setColor(wet);
+                if (edgePath(path, ch, from, to, side * 1f, horizon)) {
+                    c.drawPath(path, paint);
+                }
+                paint.setStrokeWidth(dp(1.5f));
+                paint.setColor(lip);
+                if (edgePath(path, ch, from, to, side * 1.09f, horizon)) {
+                    c.drawPath(path, paint);
+                }
+            }
+        }
+        paint.setStyle(Paint.Style.FILL);
+
+        // Haze along the horizon, thicker in mist: it is what makes the far end of the valley far.
+        int hazeA = ((int) Math.min(0xC0, 0x50 + 0x70 * mist)) & 0xF0;
+        int fogRgb = fogColour & 0x00FFFFFF;
+        cols3[0] = fogRgb;
+        cols3[1] = (hazeA << 24) | fogRgb;
+        cols3[2] = fogRgb;
+        pos3[0] = 0f;
+        pos3[1] = 0.6f;
+        pos3[2] = 1f;
+        float hazeTop = horizon - dp(48f);
+        float hazeBot = horizon + dp(32f);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(grad(G_HAZE, hazeTop, hazeBot, cols3, pos3));
+        c.drawRect(-dp(40f), hazeTop, w + dp(40f), hazeBot, paint);
+        paint.setShader(null);
+    }
+
+    /**
+     * The water's colour down the screen: near the horizon it is mostly sky, seen at a grazing
+     * angle; near the boat you look down into it and it goes deep. Stops at 300, 60, 20 and 8 m.
+     */
+    private LinearGradient waterShader(float horizon, float h, float focal, float fogReach) {
+        int wA = lit(season.waterA);
+        int wB = lit(season.waterB);
+        float span = Math.max(1f, h - horizon);
+        cols5[0] = blend(blend(wA, skyBot, 0.62f), fogColour, Math.min(1f, LOOK / fogReach) * 0.6f);
+        cols5[1] = blend(blend(wA, skyBot, 0.42f), fogColour, Math.min(1f, 60f / fogReach) * 0.6f);
+        cols5[2] = blend(blend(wA, skyTop, 0.18f), fogColour, Math.min(1f, 20f / fogReach) * 0.6f);
+        cols5[3] = blend(wA, wB, 0.5f);
+        cols5[4] = blend(wB, 0xFF04101A, 0.3f);
+        pos5[0] = 0f;
+        pos5[1] = Math.min(0.9f, CAM_H * focal / 60f / span);
+        pos5[2] = Math.min(0.93f, CAM_H * focal / 20f / span);
+        pos5[3] = Math.min(0.96f, CAM_H * focal / 8f / span);
+        pos5[4] = 1f;
+        return grad(G_WATER, horizon, h, cols5, pos5);
+    }
+
+    /**
+     * Ripples: short crests (sky-coloured) over troughs (deep water), scattered on rows every
+     * {@link #RIPPLE_ROW} m of the water's own frame, so they shrink and crowd toward the horizon
+     * and drift downstream at the season's current - a spring flood visibly runs. In broken water
+     * they become longer white foam streaks that boil. Then the sun's glitter.
+     */
+    private void drawWaterMarks(Canvas c, float w, float h, float horizon, float focal, float yaw,
+                                double forkDist, boolean fork, float fogReach) {
+        double t = sessionSeconds;
+        double ct = current * t;
+        float zNear = CAM_H * focal / Math.max(1f, h - horizon);
+        float zFar = 110f;
+        double sA = along + dir * zNear;
+        double sB = along + dir * zFar;
+        long r0 = (long) Math.ceil((Math.min(sA, sB) + ct) / RIPPLE_ROW) - 1;
+        long r1 = (long) Math.floor((Math.max(sA, sB) + ct) / RIPPLE_ROW);
+        int crest = blend(skyBot, 0xFFFFFFFF, 0.3f) & 0x00FFFFFF;
+        int trough = blend(lit(season.waterB), 0xFF02080E, 0.55f) & 0x00FFFFFF;
+        int foamRgb = lit(0xFFF2FAFC) & 0x00FFFFFF;
+        for (long r = r0; r <= r1; r++) {
+            long hsh = r * 0x9E3779B97F4A7C15L;
+            for (int k = 0; k < 4; k++) {
+                hsh = hsh * 6364136223846793005L + 1442695040888963407L;
+                double s = r * RIPPLE_ROW - ct + (((hsh >>> 52) & 0xFF) / 255f) * RIPPLE_ROW;
+                float z = (float) ((s - along) * dir);
+                if (z < zNear || z > zFar || (fork && z > forkDist)) {
+                    continue;
+                }
+                boolean white = whiteAt(s);
+                if (!white && k == 3) {
+                    continue;
+                }
+                int zi = (int) z;
+                float u = focal / z;
+                float y = horizon + CAM_H * u;
+                float fade = Math.min(1f, (zFar - z) / 35f) * (1f - 0.75f * Math.min(1f, z / fogReach));
+                float lane = ((((hsh >>> 33) & 0xFFFF) / 65535f) * 1.8f - 0.9f) * HALF_WIDTH;
+                float len = 0.7f + (((hsh >>> 20) & 0xFF) / 255f) * 1.6f;
+                float wob = (float) Math.sin(t * (white ? 4.0 : 1.3) + r * 0.7 + k * 2.3) * (white ? 0.6f : 0.25f);
+                float x = w / 2f + (offsets[zi] + lane + wob - lateral - yaw * z) * u;
+                float hl = len * 0.5f * u;
+                if (white) {
+                    paint.setStrokeWidth(Math.max(1.5f, 0.08f * u));
+                    paint.setColor(((int) (0xC8 * fade) << 24) | foamRgb);
+                    c.drawLine(x - hl * 1.3f, y, x + hl * 1.3f, y, paint);
+                } else {
+                    float th = Math.max(1f, 0.045f * u);
+                    paint.setStrokeWidth(th);
+                    paint.setColor(((int) (0x60 * fade) << 24) | crest);
+                    c.drawLine(x - hl, y, x + hl, y, paint);
+                    paint.setColor(((int) (0x48 * fade) << 24) | trough);
+                    c.drawLine(x - hl * 0.75f, y + th, x + hl * 0.75f, y + th, paint);
+                }
+            }
+        }
+        drawGlitter(c, w, h, horizon, focal, yaw, forkDist, fork, zNear);
+    }
+
+    /** The sun's (or moon's) path of glitter on the water, under it and widening toward the boat. */
+    private void drawGlitter(Canvas c, float w, float h, float horizon, float focal, float yaw,
+                             double forkDist, boolean fork, float zNear) {
+        float a = glintA * (1f - cloud * 0.85f) * (1f - rain * 0.7f);
+        if (a < 0.04f) {
+            return;
+        }
+        double t = sessionSeconds;
+        int rgb = glintCol & 0x00FFFFFF;
+        for (int i = 0; i < 40; i++) {
+            double cyc = t * 1.6 + i * 0.618;
+            long cycle = (long) cyc;
+            float ph = (float) (cyc - cycle);
+            long hsh = ((i + 1) * 0x9E3779B97F4A7C15L + cycle * 0xBF58476D1CE4E5B9L) * 0x94D049BB133111EBL;
+            hsh ^= hsh >>> 31;
+            float r1 = ((hsh >>> 40) & 0xFFFF) / 65535f;
+            float r2 = ((hsh >>> 20) & 0xFFFF) / 65535f;
+            float y = horizon + dp(3f) + r1 * r1 * (h - horizon - dp(3f));
+            float z = CAM_H * focal / (y - horizon);
+            if (z > LOOK || z < zNear || (fork && z > forkDist)) {
+                continue;
+            }
+            int zi = (int) z;
+            float u = focal / z;
+            float cx = w / 2f + (offsets[zi] - lateral - yaw * z) * u;
+            float spread = dp(18f) + (y - horizon) * 0.55f;
+            float x = glintX + (r2 - 0.5f) * 2f * spread;
+            if (Math.abs(x - cx) > HALF_WIDTH * u * 0.9f) {
+                continue;
+            }
+            float tw = (float) Math.sin(Math.PI * ph);
+            float len = Math.min(dp(46f), dp(3f) + u * 0.6f) * (0.5f + tw * 0.5f);
+            paint.setStrokeWidth(Math.max(1.2f, Math.min(dp(3.5f), u * 0.04f)));
+            paint.setColor(((int) (235 * a * tw) << 24) | rgb);
+            c.drawLine(x - len, y, x + len, y, paint);
+        }
+    }
+
+    /**
+     * Reeds at the water's edge, with bulrush heads, and tufts and flowers up the meadow near the
+     * boat. Every 5 m of bank, from its own hash. Nothing is drawn on the fork's island.
+     */
+    private void drawBankLife(Canvas c, float w, float horizon, float focal, float yaw,
+                              double forkDist, float fogReach) {
+        boolean fork = dir > 0 && forkDist < LOOK;
+        float step = 5f;
+        double sNear = along + dir * 3.5;
+        double sFar = along + dir * 90.0;
+        long a = (long) Math.ceil(Math.min(sNear, sFar) / step);
+        long b = (long) Math.floor(Math.max(sNear, sFar) / step);
+        boolean winter = season.index == RiverExplorerSeason.WINTER;
+        int reed = winter ? 0xFFB8A27A : blend(season.grassB, 0xFF4E5A22, 0.45f);
+        int head = winter ? 0xFF8A7650 : 0xFF6B4A2B;
+        int tuft = blend(season.grassB, 0xFF13260F, 0.35f);
+        int flower = season.index == RiverExplorerSeason.SPRING ? 0xFFFFE3EF
+                : season.index == RiverExplorerSeason.SUMMER ? 0xFFF5D547 : 0;
+        double t = sessionSeconds;
+        for (long n = dir > 0 ? b : a; dir > 0 ? n >= a : n <= b; n -= dir) {
+            float z = (float) ((n * step - along) * dir);
+            if (z < 3.5f || z > 90f || (fork && z > forkDist - 4f)) {
+                continue;
+            }
+            int zi = (int) z;
+            float u = focal / z;
+            float gy = horizon + CAM_H * u;
+            float fog = Math.min(1f, z / fogReach) * 0.7f;
+            long hsh = (n * 0xD1B54A32D192ED03L) ^ 0x2545F4914F6CDD1DL;
+            hsh *= 0xff51afd7ed558ccdL;
+            hsh ^= hsh >>> 29;
+            float centre = offsets[zi] - lateral - yaw * z;
+            for (int side = -1; side <= 1; side += 2) {
+                long hs = hsh >>> (side < 0 ? 0 : 20);
+                if ((hs & 3) != 0) {
+                    float out = HALF_WIDTH + 0.5f + ((hs >>> 3) & 7) * 0.12f;
+                    float bx = w / 2f + (centre + side * out) * u;
+                    float rh = (1.1f + ((hs >>> 6) & 7) * 0.08f) * u;
+                    float sway = (float) Math.sin(t * 1.4 + n * 0.9 + side) * 0.12f * u * (1f + rain);
+                    paint.setStrokeWidth(Math.max(1f, 0.05f * u));
+                    paint.setColor(world(reed, fog));
+                    for (int k = -2; k <= 2; k++) {
+                        float tip = bx + k * 0.24f * u + sway * (1f + Math.abs(k) * 0.2f);
+                        c.drawLine(bx + k * 0.05f * u, gy, tip, gy - rh * (1f - Math.abs(k) * 0.14f), paint);
+                    }
+                    if ((hs & 4) != 0) {
+                        paint.setStrokeWidth(Math.max(1.5f, 0.11f * u));
+                        paint.setColor(world(head, fog));
+                        c.drawLine(bx + sway, gy - rh * 1.02f, bx + sway, gy - rh * 0.8f, paint);
+                    }
+                }
+                if (z < 45f) {
+                    float tout = HALF_WIDTH + 2.5f + ((hs >>> 9) & 31) * 0.5f;
+                    float tx = w / 2f + (centre + side * tout) * u;
+                    float th = 0.35f * u;
+                    paint.setStrokeWidth(Math.max(1f, 0.04f * u));
+                    paint.setColor(world(tuft, fog));
+                    c.drawLine(tx, gy, tx - 0.15f * u, gy - th, paint);
+                    c.drawLine(tx, gy, tx + 0.02f * u, gy - th * 1.2f, paint);
+                    c.drawLine(tx, gy, tx + 0.16f * u, gy - th * 0.9f, paint);
+                    if (flower != 0 && ((hs >>> 14) & 1) != 0) {
+                        paint.setColor(world(flower, fog));
+                        c.drawCircle(tx + 0.02f * u, gy - th * 1.25f, Math.max(1.2f, 0.07f * u), paint);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Trees along both banks, far to near. The run of tree numbers is taken in the direction of
+     * travel, so the cruise home sees the same trees. 3.25: a second, deeper row of woodland stands
+     * behind the first, from its own hash, so the original row is exactly where it always was.
+     */
+    private void drawTrees(Canvas c, float w, float horizon, float focal, float yaw, float fogReach) {
+        long treeA = (long) Math.ceil((along + dir * 3.0) / TREE_STEP);
+        long treeB = (long) Math.floor((along + dir * (LOOK - 1.0)) / TREE_STEP);
+        long firstTree = Math.min(treeA, treeB);
+        long lastTree = Math.max(treeA, treeB);
+        for (long n = dir > 0 ? lastTree : firstTree; dir > 0 ? n >= firstTree : n <= lastTree; n -= dir) {
+            float z = (float) ((n * TREE_STEP - along) * dir);
+            if (z < 3f || z > LOOK) {
+                continue;
+            }
+            int zi = Math.max(0, Math.min(LOOK, (int) z));
+            float sy = horizon + CAM_H * focal / z;
+            float fog = Math.min(1f, z / fogReach);
+            long back = (n * 0x9E3779B97F4A7C15L) ^ 0x632BE59BD9B4E019L;
+            back *= 0xff51afd7ed558ccdL;
+            back ^= back >>> 31;
+            if (((back >>> 9) & 3) != 0) {
+                boolean bl = ((back >>> 7) & 1) == 0;
+                float bout = HALF_WIDTH + 22f + ((back >>> 12) & 31);
+                float bxw = offsets[zi] + dir * (bl ? -bout : bout);
+                float bsx = w / 2f + (bxw - lateral - yaw * z) * focal / z;
+                drawTree(c, bsx, sy, (9.5f + ((back >>> 40) & 7) * 0.6f) * focal / z, back, Math.min(1f, fog * 1.1f));
+            }
+            long hsh = n * 2654435761L;
+            boolean left = ((hsh >>> 7) & 1) == 0;
+            float out = HALF_WIDTH + 5f + ((hsh >>> 12) & 15);
+            float xw = offsets[zi] + dir * (left ? -out : out);
+            float sx = w / 2f + (xw - lateral - yaw * z) * focal / z;
+            drawTree(c, sx, sy, 9f * focal / z, hsh, fog);
+        }
+    }
+
+    /**
+     * One tree standing at (sx, sy), {@code size} px tall: a broadleaf with a lobed crown, a
+     * two-tone conifer or a poplar, shaded away from the light and with a soft contact shadow. In
+     * winter the broadleaves are bare and snowed on. Far trees drop to a trunk and one crown.
+     */
+    private void drawTree(Canvas c, float sx, float sy, float size, long hsh, float fog) {
+        long m = hsh * 0xff51afd7ed558ccdL;
+        m ^= m >>> 32;
+        int kind = (int) ((m >>> 8) & 0xFFFF) % 6; // 0-2 broadleaf, 3-4 conifer, 5 poplar
+        // Winter strips the broadleaves and poplars; the conifers stay green under snow.
+        boolean bare = season.bareness > 0.6f && (kind < 3 || kind == 5);
+        if (bare) {
+            kind = 0;
+        }
+        float ls = lightSide;
+        float f = fog * 0.7f;
+        float wide = 0.9f + ((m >>> 28) & 15) / 15f * 0.3f;
+        float sway = (float) Math.sin(sessionSeconds * (0.8 + (m & 7) * 0.05) + (m & 63)) * size * (0.012f + rain * 0.02f);
+        int leaf = ((hsh >>> 20) & 1) == 0 ? season.foliageA : season.foliageB;
+        if (kind >= 3) {
+            leaf = blend(0xFF2C5233, season.foliageA, season.index == RiverExplorerSeason.WINTER ? 0f : 0.15f);
+        }
+        int shA = (int) (0x40 * litLevel * (1f - fog));
+        if (shA > 4) {
+            paint.setColor(shA << 24);
+            c.drawOval(sx - size * 0.30f - ls * size * 0.14f, sy - size * 0.045f,
+                    sx + size * 0.30f - ls * size * 0.14f, sy + size * 0.035f, paint);
+        }
+        int bark = world(0xFF5A3E2B, f);
+        if (size < dp(22f)) {
+            paint.setColor(bark);
+            c.drawRect(sx - size * 0.05f, sy - size * 0.45f, sx + size * 0.05f, sy, paint);
+            paint.setColor(world(bare ? season.foliageB : leaf, f));
+            if (kind >= 3 && kind <= 4) {
+                path2.rewind();
+                path2.moveTo(sx - size * 0.24f, sy - size * 0.2f);
+                path2.lineTo(sx, sy - size * 1.0f);
+                path2.lineTo(sx + size * 0.24f, sy - size * 0.2f);
+                path2.close();
+                c.drawPath(path2, paint);
+            } else {
+                c.drawCircle(sx, sy - size * 0.62f, size * (bare ? 0.22f : 0.32f) * wide, paint);
+            }
+            return;
+        }
+        int barkDark = world(0xFF2E2016, f);
+        int shade = world(blend(leaf, 0xFF0B140C, 0.4f), f);
+        int main = world(leaf, f);
+        int high = world(blend(leaf, 0xFFFFF0B8, 0.3f), f);
+        float lsSign = ls >= 0f ? 1f : -1f;
+        if (kind >= 3 && kind <= 4) {
+            // Conifer: three tiers, the shadowed side dark and the lit side bright.
+            paint.setColor(bark);
+            c.drawRect(sx - size * 0.04f, sy - size * 0.22f, sx + size * 0.04f, sy, paint);
+            path2.rewind();
+            for (int k = 0; k < 3; k++) {
+                float base = sy - (0.16f + 0.25f * k) * size;
+                float hw = (0.27f - 0.065f * k) * size * wide;
+                float ax = sx + sway * (k + 1) * 0.6f;
+                path2.moveTo(sx - hw, base);
+                path2.lineTo(ax, base - 0.44f * size);
+                path2.lineTo(sx + hw, base);
+                path2.close();
+            }
+            paint.setColor(shade);
+            c.drawPath(path2, paint);
+            path2.rewind();
+            for (int k = 0; k < 3; k++) {
+                float base = sy - (0.16f + 0.25f * k) * size;
+                float hw = (0.27f - 0.065f * k) * size * wide;
+                float ax = sx + sway * (k + 1) * 0.6f;
+                path2.moveTo(ax, base - 0.44f * size);
+                path2.lineTo(sx + lsSign * hw, base);
+                path2.lineTo(sx, base + 0.02f * size);
+                path2.close();
+            }
+            paint.setColor(main);
+            c.drawPath(path2, paint);
+            if (season.index == RiverExplorerSeason.WINTER) {
+                paint.setColor(world(0xFFF2F6FA, f));
+                for (int k = 0; k < 3; k++) {
+                    float base = sy - (0.16f + 0.25f * k) * size;
+                    float ax = sx + sway * (k + 1) * 0.6f;
+                    c.drawOval(ax - size * 0.07f, base - 0.44f * size, ax + size * 0.07f, base - 0.34f * size, paint);
+                }
+            }
+            return;
+        }
+        if (kind == 5) {
+            // Poplar: a tall flame of a crown.
+            paint.setColor(bark);
+            c.drawRect(sx - size * 0.035f, sy - size * 0.3f, sx + size * 0.035f, sy, paint);
+            paint.setColor(shade);
+            c.drawOval(sx - size * 0.15f * wide + sway, sy - size * 1.12f, sx + size * 0.15f * wide + sway, sy - size * 0.18f, paint);
+            paint.setColor(main);
+            c.drawOval(sx - size * 0.12f * wide + sway + ls * size * 0.025f, sy - size * 1.1f,
+                    sx + size * 0.1f * wide + sway + ls * size * 0.025f, sy - size * 0.26f, paint);
+            paint.setColor(high);
+            c.drawOval(sx + sway + ls * size * 0.05f - size * 0.04f, sy - size * 1.0f,
+                    sx + sway + ls * size * 0.05f + size * 0.04f, sy - size * 0.55f, paint);
+            return;
+        }
+        // Broadleaf: a trunk lit on one side, then a crown of lobes.
+        paint.setColor(bark);
+        c.drawRect(sx - size * 0.055f, sy - size * 0.56f, sx + size * 0.055f, sy, paint);
+        paint.setColor(barkDark);
+        if (lsSign > 0) {
+            c.drawRect(sx - size * 0.055f, sy - size * 0.56f, sx - size * 0.01f, sy, paint);
+        } else {
+            c.drawRect(sx + size * 0.01f, sy - size * 0.56f, sx + size * 0.055f, sy, paint);
+        }
+        float cy = sy - size * 0.64f;
+        if (bare) {
+            paint.setStrokeWidth(Math.max(1f, size * 0.035f));
+            paint.setColor(world(season.foliageB, f));
+            for (int b = -2; b <= 2; b++) {
+                float bx = sx + b * size * 0.13f * wide + sway;
+                float by = sy - size * (0.86f - Math.abs(b) * 0.08f);
+                c.drawLine(sx, sy - size * 0.42f, bx, by, paint);
+                c.drawLine(bx, by, bx + b * size * 0.05f - size * 0.04f, by - size * 0.12f, paint);
+            }
+            paint.setColor(world(0xFFF2F6FA, f));
+            c.drawOval(sx - size * 0.1f, sy - size * 0.47f, sx + size * 0.1f, sy - size * 0.41f, paint);
+            c.drawCircle(sx - size * 0.13f * wide + sway, sy - size * 0.79f, size * 0.035f, paint);
+            c.drawCircle(sx + size * 0.13f * wide + sway, sy - size * 0.79f, size * 0.035f, paint);
+            return;
+        }
+        float r = size * wide;
+        paint.setColor(shade);
+        c.drawCircle(sx + sway - ls * 0.03f * size, cy + 0.03f * size, 0.33f * r, paint);
+        c.drawCircle(sx - 0.2f * r + sway * 0.6f, cy + 0.1f * size, 0.22f * r, paint);
+        c.drawCircle(sx + 0.2f * r + sway * 0.6f, cy + 0.09f * size, 0.23f * r, paint);
+        paint.setColor(main);
+        c.drawCircle(sx + sway + ls * 0.02f * size, cy - 0.03f * size, 0.29f * r, paint);
+        c.drawCircle(sx - 0.17f * r + sway * 0.6f + ls * 0.02f * size, cy + 0.05f * size, 0.18f * r, paint);
+        c.drawCircle(sx + 0.17f * r + sway * 0.6f + ls * 0.02f * size, cy + 0.04f * size, 0.19f * r, paint);
+        paint.setColor(high);
+        c.drawCircle(sx + sway + ls * 0.11f * size, cy - 0.13f * size, 0.14f * r, paint);
+        c.drawCircle(sx + sway * 0.6f + ls * 0.2f * r, cy + 0.0f * size, 0.08f * r, paint);
+    }
+
     /** The sun's arc through the day, the moon and stars at night. */
     private void drawSunMoonStars(Canvas c, float w, float horizon) {
         double t = sessionSeconds;
         float dark = 1f - light;
+        glintA = 0f;
         // Stars, dimmed by cloud.
         float starA = Math.max(0f, Math.min(1f, (dark - 0.4f) / 0.35f)) * (1f - cloud * 0.9f);
         if (starA > 0.02f) {
@@ -1590,8 +2274,14 @@ final class RiverExplorerGame extends GameView {
             float sy = horizon - e * horizon * 0.8f + dp(8f);
             int warm = blend(0xFFFFF4D0, 0xFFFF9A50, 1f - Math.min(1f, e * 2.5f));
             float a = 1f - cloud * 0.75f;
-            // Colour quantised so the cached glow is reused as it warms toward evening.
+            // Colour quantised so the cached glow is reused as it warms toward evening. 3.25: a wide
+            // faint halo first, so the sky round the sun is lit and not just the disc.
+            Fx.glow(c, sx, sy, dp(210f), ((int) (a * 0x30) << 24) | (warm & 0x00F0F0F0));
             Fx.glow(c, sx, sy, dp(90f), ((int) (a * 0x66) << 24) | (warm & 0x00F0F0F0));
+            // The glitter on the water is strongest with the sun low.
+            glintX = sx;
+            glintA = a * Math.min(1f, 0.55f + (1f - e) * 0.6f);
+            glintCol = blend(0xFFFFF8E0, warm, 0.6f);
             paint.setColor(((int) (a * 255) << 24) | (warm & 0x00FFFFFF));
             c.drawCircle(sx, sy, dp(18f), paint);
         }
@@ -1605,7 +2295,13 @@ final class RiverExplorerGame extends GameView {
             c.drawCircle(mx, my, dp(14f), paint);
             paint.setColor(skyTop);
             c.drawCircle(mx + dp(6f), my - dp(3f), dp(12f), paint);
+            if (a * 0.6f > glintA) {
+                glintX = mx;
+                glintA = a * 0.6f;
+                glintCol = 0xFFDDE6F2;
+            }
         }
+        lightSide = glintA > 0.05f ? Math.max(-1f, Math.min(1f, (glintX - w / 2f) / (w * 0.3f))) : -0.6f;
     }
 
     /**
@@ -1618,23 +2314,37 @@ final class RiverExplorerGame extends GameView {
         float span = w + dp(500f);
         int clouds = 5 + Math.round(cloud * 5f);
         int cloudColour = lit(blend(0xFFFFFFFF, 0xFF7C8591, cloud * 0.7f));
+        int cloudShade = blend(cloudColour, skyTop, 0.4f);
+        int cloudRim = 0x70000000 | (blend(cloudColour, glintCol, 0.35f) & 0x00FFFFFF);
         for (int i = 0; i < clouds; i++) {
             float cx = (float) ((((i * 523 + hillShift * 0.25f + t * dp(5f + i + rain * 8f)) % span) + span) % span) - dp(250f);
             float cy = horizon * (0.18f + (i % 3) * 0.17f) - (i >= 5 ? dp(20f) : 0f);
             float sc = (0.6f + (i % 3) * 0.3f) * (1f + cloud * 0.5f);
-            paint.setColor((0xCC << 24) | (cloudColour & 0x00FFFFFF));
-            c.drawOval(cx - dp(80f) * sc, cy - dp(12f) * sc, cx + dp(80f) * sc, cy + dp(12f) * sc, paint);
-            c.drawOval(cx - dp(36f) * sc, cy - dp(28f) * sc, cx + dp(40f) * sc, cy + dp(4f) * sc, paint);
+            // 3.25: a cumulus rather than two flat ovals - lit puffs over a flat base in the shadow
+            // colour of the sky, and a warm rim on the side toward the sun.
+            paint.setColor(cloudColour);
+            c.drawCircle(cx - dp(40f) * sc, cy - dp(4f) * sc, dp(22f) * sc, paint);
+            c.drawCircle(cx + dp(2f) * sc, cy - dp(14f) * sc, dp(30f) * sc, paint);
+            c.drawCircle(cx + dp(42f) * sc, cy - dp(2f) * sc, dp(19f) * sc, paint);
+            c.drawOval(cx - dp(84f) * sc, cy - dp(10f) * sc, cx + dp(84f) * sc, cy + dp(10f) * sc, paint);
+            paint.setColor(cloudShade);
+            c.drawOval(cx - dp(76f) * sc, cy + dp(1f) * sc, cx + dp(76f) * sc, cy + dp(11f) * sc, paint);
+            paint.setColor(cloudRim);
+            c.drawCircle(cx + dp(2f) * sc + lightSide * dp(9f) * sc, cy - dp(21f) * sc, dp(17f) * sc, paint);
         }
         if (rain > 0.3f || light < 0.5f) {
             return;
         }
         float bx = (float) ((((w * 0.3f + hillShift * 0.3f + t * dp(4f)) % span) + span) % span) - dp(250f);
         float by = horizon * 0.42f + (float) Math.sin(t * 0.4) * dp(8f);
-        paint.setColor(lit(0xFFE8573C));
+        paint.setColor(lit(0xFFB83A26));
         c.drawOval(bx - dp(16f), by - dp(20f), bx + dp(16f), by + dp(16f), paint);
+        paint.setColor(lit(0xFFE8573C));
+        c.drawOval(bx - dp(14f) + lightSide * dp(2f), by - dp(19f), bx + dp(12f) + lightSide * dp(2f), by + dp(13f), paint);
         paint.setColor(lit(0xFFF5C518));
-        c.drawRect(bx - dp(4f), by - dp(20f), bx + dp(4f), by + dp(16f), paint);
+        c.drawOval(bx - dp(5f), by - dp(20f), bx + dp(5f), by + dp(16f), paint);
+        paint.setColor(0x55FFFFFF);
+        c.drawOval(bx + lightSide * dp(7f) - dp(3f), by - dp(15f), bx + lightSide * dp(7f) + dp(3f), by - dp(4f), paint);
         paint.setColor(lit(0xFF6B4A2B));
         c.drawRect(bx - dp(4f), by + dp(22f), bx + dp(4f), by + dp(28f), paint);
         paint.setStrokeWidth(dp(1f));
@@ -1901,88 +2611,261 @@ final class RiverExplorerGame extends GameView {
     /** The standing landmarks, also used to paint the postcards. */
     private void drawLandmarkShape(Canvas c, int type, float bank, float baseX, float sy, float u, float side, float bridgeHalf) {
         float night = 1f - litLevel;
+        float ls = lightSide;
+        float shadeSide = ls >= 0f ? -1f : 1f;
+        int shadeA = (int) (0x30 + 0x20 * Math.abs(ls)) << 24;
+        if (type != 1 && type != 2) {
+            // A soft contact shadow on the bank, thrown away from the light.
+            paint.setColor(((int) (0x38 * litLevel)) << 24);
+            c.drawOval(bank - 4.6f * u - ls * 1.2f * u, sy - 0.35f * u, bank + 4.6f * u - ls * 1.2f * u, sy + 0.4f * u, paint);
+        }
         switch (type) {
-            case 1: // stone bridge across the river
+            case 1: { // stone bridge across the river, three arches with their reflections
+                float top = sy - 5f * u;
+                float l = baseX - bridgeHalf - 1.2f * u;
+                float r = baseX + bridgeHalf + 1.2f * u;
+                float span = (r - l) / 3f;
+                path.rewind();
+                path.moveTo(l, top);
+                path.lineTo(r, top);
+                path.lineTo(r, sy);
+                for (int a = 2; a >= 0; a--) {
+                    float ar = l + span * (a + 1) - span * 0.13f;
+                    float al = l + span * a + span * 0.13f;
+                    float archH = Math.min(3.3f * u, (ar - al) * 0.5f);
+                    path.lineTo(ar, sy);
+                    rect.set(al, sy - archH, ar, sy + archH);
+                    path.arcTo(rect, 0f, -180f, false);
+                }
+                path.lineTo(l, sy);
+                path.close();
+                // The reflection first, so the arches and their mirror images make rings.
+                c.save();
+                c.scale(1f, -0.7f, 0f, sy);
+                paint.setColor(0x44000000 | (lit(0xFF4A453C) & 0x00FFFFFF));
+                c.drawPath(path, paint);
+                c.restore();
                 paint.setColor(lit(0xFF8C8577));
-                c.drawRect(baseX - bridgeHalf, sy - 5f * u, baseX + bridgeHalf, sy - 3.8f * u, paint);
-                paint.setColor(lit(0xFF6E685C));
-                c.drawRect(baseX - bridgeHalf, sy - 3.8f * u, baseX - bridgeHalf + 2f * u, sy, paint);
-                c.drawRect(baseX + bridgeHalf - 2f * u, sy - 3.8f * u, baseX + bridgeHalf, sy, paint);
+                c.drawPath(path, paint);
+                // Coping along the top, and a course line under it.
+                paint.setColor(lit(0xFFA9A291));
+                c.drawRect(l - 0.3f * u, top - 0.4f * u, r + 0.3f * u, top + 0.15f * u, paint);
+                paint.setColor(lit(0xFF5E584D));
+                c.drawRect(l, top + 0.15f * u, r, top + 0.35f * u, paint);
+                paint.setStrokeWidth(Math.max(1f, 0.06f * u));
+                paint.setColor(0x40000000);
+                c.drawLine(l, top + 1.1f * u, r, top + 1.1f * u, paint);
                 if (night > 0.4f) {
                     paint.setColor(0xFFFFD27A);
                     c.drawCircle(baseX - bridgeHalf * 0.5f, sy - 5.4f * u, 0.25f * u, paint);
                     c.drawCircle(baseX + bridgeHalf * 0.5f, sy - 5.4f * u, 0.25f * u, paint);
                 }
                 break;
-            case 2: // waterfall on the bank
-                paint.setColor(lit(0xFF6B6F66));
-                c.drawRect(bank - 3f * u, sy - 7f * u, bank + 3f * u, sy, paint);
+            }
+            case 2: { // waterfall on the bank
+                path.rewind();
+                path.moveTo(bank - 3.8f * u, sy);
+                path.lineTo(bank - 3.1f * u, sy - 7.3f * u);
+                path.lineTo(bank - 0.9f * u, sy - 7.9f * u);
+                path.lineTo(bank + 1.4f * u, sy - 7.6f * u);
+                path.lineTo(bank + 3.3f * u, sy - 7.0f * u);
+                path.lineTo(bank + 3.9f * u, sy);
+                path.close();
+                paint.setColor(lit(0xFF5E625A));
+                c.drawPath(path, paint);
+                paint.setColor(shadeA);
+                c.drawRect(shadeSide < 0 ? bank - 3.6f * u : bank + 1.6f * u, sy - 7.2f * u,
+                        shadeSide < 0 ? bank - 1.6f * u : bank + 3.7f * u, sy, paint);
+                paint.setColor(lit(blend(season.foliageA, 0xFF1C2A1E, 0.3f)));
+                c.drawOval(bank - 3.3f * u, sy - 8.3f * u, bank + 3.5f * u, sy - 7.1f * u, paint);
                 paint.setColor(lit(0xEEFFFFFF));
-                c.drawRect(bank - 1.6f * u, sy - 7f * u, bank + 1.6f * u, sy, paint);
-                // Falling streaks so the water visibly pours.
+                c.drawRect(bank - 1.6f * u, sy - 7.6f * u, bank + 1.6f * u, sy, paint);
                 paint.setColor(lit(0xFFBFE3FF));
+                c.drawRect(bank - 0.9f * u, sy - 7.6f * u, bank - 0.3f * u, sy, paint);
+                c.drawRect(bank + 0.6f * u, sy - 7.6f * u, bank + 1.0f * u, sy, paint);
+                // Falling streaks so the water visibly pours.
+                paint.setColor(lit(0xFFE8F6FF));
                 paint.setStrokeWidth(Math.max(1f, 0.12f * u));
                 for (int i = 0; i < 4; i++) {
                     float f = (float) ((sessionSeconds * 1.4 + i * 0.25) % 1.0);
                     float lx = bank - 1.2f * u + i * 0.8f * u;
                     c.drawLine(lx, sy - 7f * u + f * 6f * u, lx, sy - 7f * u + f * 6f * u + 1f * u, paint);
                 }
+                // Spray boiling at the foot.
+                float boil = (float) Math.sin(sessionSeconds * 3.2) * 0.25f * u;
+                paint.setColor(0x99FFFFFF);
+                c.drawOval(bank - 2.6f * u, sy - 0.9f * u - boil, bank + 2.6f * u, sy + 0.6f * u, paint);
+                paint.setColor(0x55FFFFFF);
+                c.drawOval(bank - 3.6f * u, sy - 1.6f * u + boil, bank + 3.6f * u, sy + 0.2f * u, paint);
                 break;
-            case 3: // lighthouse
+            }
+            case 3: { // lighthouse: a tapered, banded tower with a lantern room and a cap
+                float tall = 12f * u;
+                float bw = 1.1f * u;
+                float tw = 0.7f * u;
+                paint.setColor(lit(0xFF8C8577));
+                c.drawRect(bank - 1.9f * u, sy - 1.0f * u, bank + 1.9f * u, sy, paint);
+                path.rewind();
+                path.moveTo(bank - bw, sy - 0.9f * u);
+                path.lineTo(bank - tw, sy - tall);
+                path.lineTo(bank + tw, sy - tall);
+                path.lineTo(bank + bw, sy - 0.9f * u);
+                path.close();
                 paint.setColor(lit(0xFFF2F2F2));
-                c.drawRect(bank - 0.9f * u, sy - 12f * u, bank + 0.9f * u, sy, paint);
-                paint.setColor(lit(0xFFD8453C));
+                c.drawPath(path, paint);
+                path2.rewind();
                 for (int b = 1; b < 12; b += 3) {
-                    c.drawRect(bank - 0.9f * u, sy - (b + 1.5f) * u, bank + 0.9f * u, sy - b * u, paint);
+                    float y0 = sy - (b + 1.5f) * u;
+                    float y1 = sy - b * u;
+                    float w0 = bw + (tw - bw) * ((b + 1.5f) * u / tall);
+                    float w1 = bw + (tw - bw) * (b * u / tall);
+                    path2.moveTo(bank - w1, y1);
+                    path2.lineTo(bank - w0, y0);
+                    path2.lineTo(bank + w0, y0);
+                    path2.lineTo(bank + w1, y1);
+                    path2.close();
                 }
-                Fx.glow(c, bank, sy - 12.5f * u, 3f * u, night > 0.4f ? 0xDDFFF2A0 : 0x88FFF2A0);
+                paint.setColor(lit(0xFFD8453C));
+                c.drawPath(path2, paint);
+                // The shadowed half of the tower.
+                path2.rewind();
+                path2.moveTo(bank, sy - 0.9f * u);
+                path2.lineTo(bank, sy - tall);
+                path2.lineTo(bank + shadeSide * tw, sy - tall);
+                path2.lineTo(bank + shadeSide * bw, sy - 0.9f * u);
+                path2.close();
+                paint.setColor(shadeA);
+                c.drawPath(path2, paint);
+                paint.setColor(lit(0xFF2A3340));
+                c.drawRect(bank - tw * 1.45f, sy - tall - 0.3f * u, bank + tw * 1.45f, sy - tall + 0.1f * u, paint);
+                paint.setColor(night > 0.4f ? 0xFFFFF2A0 : lit(0xFFE8E0B0));
+                c.drawRect(bank - 0.5f * u, sy - tall - 1.4f * u, bank + 0.5f * u, sy - tall - 0.3f * u, paint);
+                path2.rewind();
+                path2.moveTo(bank - 0.8f * u, sy - tall - 1.4f * u);
+                path2.lineTo(bank, sy - tall - 2.4f * u);
+                path2.lineTo(bank + 0.8f * u, sy - tall - 1.4f * u);
+                path2.close();
+                paint.setColor(lit(0xFFB8352E));
+                c.drawPath(path2, paint);
+                float lampY = sy - tall - 0.85f * u;
+                Fx.glow(c, bank, lampY, 3f * u, night > 0.4f ? 0xDDFFF2A0 : 0x88FFF2A0);
                 if (night > 0.4f) {
                     // A sweeping beam once the light is needed.
                     double a = sessionSeconds * 1.5;
                     paint.setColor(0x44FFF2A0);
                     path.reset();
-                    path.moveTo(bank, sy - 12.5f * u);
-                    path.lineTo(bank + (float) Math.cos(a) * 40f * u, sy - 12.5f * u - 3f * u);
-                    path.lineTo(bank + (float) Math.cos(a) * 40f * u, sy - 12.5f * u + 3f * u);
+                    path.moveTo(bank, lampY);
+                    path.lineTo(bank + (float) Math.cos(a) * 40f * u, lampY - 3f * u);
+                    path.lineTo(bank + (float) Math.cos(a) * 40f * u, lampY + 3f * u);
                     path.close();
                     c.drawPath(path, paint);
                 }
                 break;
-            case 4: // windmill
-                paint.setColor(lit(0xFFB8A58A));
-                c.drawRect(bank - 1.2f * u, sy - 7f * u, bank + 1.2f * u, sy, paint);
+            }
+            case 4: { // windmill: a tapered tower, a cap, and four cloth sails
+                path.rewind();
+                path.moveTo(bank - 1.6f * u, sy);
+                path.lineTo(bank - 0.95f * u, sy - 7f * u);
+                path.lineTo(bank + 0.95f * u, sy - 7f * u);
+                path.lineTo(bank + 1.6f * u, sy);
+                path.close();
+                paint.setColor(lit(0xFFC2AF92));
+                c.drawPath(path, paint);
+                path2.rewind();
+                path2.moveTo(bank, sy);
+                path2.lineTo(bank, sy - 7f * u);
+                path2.lineTo(bank + shadeSide * 0.95f * u, sy - 7f * u);
+                path2.lineTo(bank + shadeSide * 1.6f * u, sy);
+                path2.close();
+                paint.setColor(shadeA);
+                c.drawPath(path2, paint);
+                paint.setColor(night > 0.4f ? 0xFFFFD27A : lit(0xFF3A2A1A));
+                c.drawRect(bank - 0.45f * u, sy - 1.6f * u, bank + 0.45f * u, sy, paint);
+                c.drawRect(bank - 0.3f * u, sy - 4.6f * u, bank + 0.3f * u, sy - 3.9f * u, paint);
                 paint.setColor(lit(0xFF5A4B3A));
-                paint.setStrokeWidth(Math.max(1f, 0.3f * u));
+                c.drawOval(bank - 1.15f * u, sy - 7.9f * u, bank + 1.15f * u, sy - 6.6f * u, paint);
                 double rot = sessionSeconds * (1.2 + rain * 1.5);
+                float hx = bank;
+                float hy = sy - 7f * u;
+                path2.rewind();
                 for (int b = 0; b < 4; b++) {
                     double a = rot + b * Math.PI / 2;
-                    c.drawLine(bank, sy - 7f * u, bank + (float) Math.cos(a) * 5f * u, sy - 7f * u + (float) Math.sin(a) * 5f * u, paint);
+                    float dx = (float) Math.cos(a);
+                    float dy = (float) Math.sin(a);
+                    path2.moveTo(hx + dx * 1.0f * u, hy + dy * 1.0f * u);
+                    path2.lineTo(hx + dx * 5f * u, hy + dy * 5f * u);
+                    path2.lineTo(hx + dx * 5f * u - dy * 0.9f * u, hy + dy * 5f * u + dx * 0.9f * u);
+                    path2.lineTo(hx + dx * 1.4f * u - dy * 0.9f * u, hy + dy * 1.4f * u + dx * 0.9f * u);
+                    path2.close();
                 }
+                paint.setColor(lit(0xFFEDE3CF));
+                c.drawPath(path2, paint);
+                paint.setColor(lit(0xFF5A4B3A));
+                paint.setStrokeWidth(Math.max(1f, 0.3f * u));
+                for (int b = 0; b < 4; b++) {
+                    double a = rot + b * Math.PI / 2;
+                    c.drawLine(hx, hy, hx + (float) Math.cos(a) * 5f * u, hy + (float) Math.sin(a) * 5f * u, paint);
+                }
+                c.drawCircle(hx, hy, 0.35f * u, paint);
                 break;
-            case 6: // boathouse
+            }
+            case 6: { // boathouse: planked, a deep eave, a boat door and a jetty into the river
                 paint.setColor(lit(0xFF7A5230));
                 c.drawRect(bank - 4f * u, sy - 4f * u, bank + 4f * u, sy, paint);
+                paint.setStrokeWidth(Math.max(1f, 0.07f * u));
+                paint.setColor(0x40000000);
+                for (int k = -4; k <= 4; k++) {
+                    c.drawLine(bank + k * 0.9f * u, sy - 4f * u, bank + k * 0.9f * u, sy, paint);
+                }
+                paint.setColor(shadeA);
+                c.drawRect(shadeSide < 0 ? bank - 4f * u : bank, sy - 4f * u, shadeSide < 0 ? bank : bank + 4f * u, sy, paint);
                 paint.setColor(lit(0xFF4A2F1B));
                 path.reset();
-                path.moveTo(bank - 4.5f * u, sy - 4f * u);
-                path.lineTo(bank, sy - 6.5f * u);
-                path.lineTo(bank + 4.5f * u, sy - 4f * u);
+                path.moveTo(bank - 4.6f * u, sy - 3.9f * u);
+                path.lineTo(bank, sy - 6.6f * u);
+                path.lineTo(bank + 4.6f * u, sy - 3.9f * u);
                 path.close();
                 c.drawPath(path, paint);
+                paint.setColor(0x55000000);
+                c.drawRect(bank - 4f * u, sy - 3.9f * u, bank + 4f * u, sy - 3.5f * u, paint);
+                paint.setColor(lit(0xFF24160C));
+                c.drawRect(bank - 1.4f * u, sy - 2.6f * u, bank + 1.4f * u, sy, paint);
                 paint.setColor(night > 0.4f ? 0xFFFFD27A : lit(0xFF2A1A10));
-                c.drawRect(bank - 2.5f * u, sy - 3.2f * u, bank - 1.2f * u, sy - 2.2f * u, paint);
-                c.drawRect(bank + 1.2f * u, sy - 3.2f * u, bank + 2.5f * u, sy - 2.2f * u, paint);
+                c.drawRect(bank - 3.2f * u, sy - 3.2f * u, bank - 2.0f * u, sy - 2.2f * u, paint);
+                c.drawRect(bank + 2.0f * u, sy - 3.2f * u, bank + 3.2f * u, sy - 2.2f * u, paint);
+                // The jetty reaches toward the river, which is on the far side from the bank's.
+                float j0 = bank - side * 4f * u;
+                float j1 = bank - side * 7.5f * u;
+                paint.setColor(lit(0xFF8A6A44));
+                c.drawRect(Math.min(j0, j1), sy - 0.35f * u, Math.max(j0, j1), sy, paint);
+                paint.setColor(lit(0xFF3A2A1A));
+                c.drawRect(j1 - 0.15f * u, sy - 0.7f * u, j1 + 0.15f * u, sy + 0.3f * u, paint);
                 break;
-            default: // old mill with a turning wheel
+            }
+            default: { // old mill with a roof and a turning, splashing wheel
                 paint.setColor(lit(0xFFB09B7C));
                 c.drawRect(bank - 3f * u, sy - 5f * u, bank + 3f * u, sy, paint);
+                paint.setColor(shadeA);
+                c.drawRect(shadeSide < 0 ? bank - 3f * u : bank, sy - 5f * u, shadeSide < 0 ? bank : bank + 3f * u, sy, paint);
+                paint.setColor(lit(0xFF5A3A2A));
+                path.rewind();
+                path.moveTo(bank - 3.5f * u, sy - 4.9f * u);
+                path.lineTo(bank - 2.2f * u, sy - 7f * u);
+                path.lineTo(bank + 2.2f * u, sy - 7f * u);
+                path.lineTo(bank + 3.5f * u, sy - 4.9f * u);
+                path.close();
+                c.drawPath(path, paint);
                 paint.setColor(night > 0.4f ? 0xFFFFD27A : lit(0xFF3A2A1A));
                 c.drawRect(bank - 1.8f * u, sy - 3.8f * u, bank - 0.8f * u, sy - 2.8f * u, paint);
+                c.drawRect(bank + 0.8f * u, sy - 3.8f * u, bank + 1.8f * u, sy - 2.8f * u, paint);
+                float wx = bank - side * 3.6f * u;
+                float wy = sy - 1.8f * u;
+                paint.setColor(0x88FFFFFF);
+                float splash = (float) Math.sin(sessionSeconds * 4) * 0.2f * u;
+                c.drawOval(wx - 2.3f * u, sy - 0.5f * u - splash, wx + 2.3f * u, sy + 0.4f * u, paint);
                 paint.setColor(lit(0xFF4A3A2A));
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setStrokeWidth(Math.max(1f, 0.25f * u));
-                float wx = bank - side * 3.6f * u;
-                float wy = sy - 1.8f * u;
                 c.drawCircle(wx, wy, 1.8f * u, paint);
                 double wr = sessionSeconds * 0.8;
                 for (int b = 0; b < 4; b++) {
@@ -1993,6 +2876,7 @@ final class RiverExplorerGame extends GameView {
                 }
                 paint.setStyle(Paint.Style.FILL);
                 break;
+            }
         }
     }
 
@@ -2012,12 +2896,26 @@ final class RiverExplorerGame extends GameView {
             float y = horizon + CAM_H * u;
             float fog = Math.min(1f, z / (LOOK * (1f - 0.55f * mist)));
             float surge = (float) Math.sin(sessionSeconds * 5 + k) * 0.15f;
+            float ls = lightSide;
+            // 3.25: dark water in the rock's lee, the pillow of white water piled against it, the
+            // stone lit from the sun's side with a wet sheen, and a V of foam peeling back at you.
+            paint.setColor(0x66000000 | (world(0xFF0E2430, fog * 0.6f) & 0x00FFFFFF));
+            c.drawOval(x - 1.6f * u, y - 0.05f * u, x + 1.6f * u, y + 0.6f * u, paint);
             paint.setColor(world(0xFFE8F4F8, fog * 0.6f));
             c.drawOval(x - (1.7f + surge) * u, y - 0.35f * u, x + (1.7f + surge) * u, y + 0.35f * u, paint);
-            paint.setColor(world(0xFF4A4A48, fog * 0.6f));
+            paint.setColor(world(0xFF3A3A38, fog * 0.6f));
             c.drawOval(x - 1.1f * u, y - 1.3f * u, x + 1.1f * u, y + 0.15f * u, paint);
-            paint.setColor(world(0xFF6E6D68, fog * 0.6f));
-            c.drawOval(x - 0.8f * u, y - 1.25f * u, x + 0.3f * u, y - 0.6f * u, paint);
+            paint.setColor(world(0xFF5E5D58, fog * 0.6f));
+            c.drawOval(x - 1.0f * u + ls * 0.15f * u, y - 1.28f * u, x + 0.95f * u + ls * 0.15f * u, y - 0.05f * u, paint);
+            paint.setColor(world(0xFF83817A, fog * 0.6f));
+            c.drawOval(x - 0.55f * u + ls * 0.35f * u, y - 1.25f * u, x + 0.35f * u + ls * 0.35f * u, y - 0.6f * u, paint);
+            paint.setColor(0x55FFFFFF);
+            c.drawOval(x - 0.2f * u + ls * 0.4f * u, y - 1.18f * u, x + 0.15f * u + ls * 0.4f * u, y - 0.98f * u, paint);
+            paint.setColor(0xB0000000 | (world(0xFFF2FAFC, fog * 0.6f) & 0x00FFFFFF));
+            paint.setStrokeWidth(Math.max(1f, 0.14f * u));
+            for (int s = -1; s <= 1; s += 2) {
+                c.drawLine(x + s * 1.2f * u, y + 0.15f * u, x + s * (2.3f + surge) * u, y + 0.6f * u, paint);
+            }
             // The next rock is ringed in the colour of how things stand.
             if (inRapids || rapBase - along < ROCK_FIRST + 30) {
                 double rockAt = rapBase + ROCK_FIRST + k * ROCK_GAP;
@@ -2298,8 +3196,15 @@ final class RiverExplorerGame extends GameView {
         // Wake trailing behind toward us.
         paint.setColor(world(0xFFBFE3FF, fog * 0.6f) & 0x99FFFFFF);
         c.drawOval(x - hullW * 1.3f * u, y - 0.05f * u, x + hullW * 1.3f * u, y + 0.35f * u, paint);
-        paint.setColor(hull);
+        paint.setColor(0x55000000 | (world(0xFF0A1820, fog * 0.6f) & 0x00FFFFFF));
+        c.drawOval(x - hullW * 1.1f * u, y + 0.02f * u, x + hullW * 1.1f * u, y + 0.32f * u, paint);
+        paint.setColor(blend(hull, 0xFF000000, 0.3f));
         c.drawOval(x - hullW * u, y - 0.35f * u + bob, x + hullW * u, y + 0.15f * u + bob, paint);
+        paint.setColor(hull);
+        c.drawOval(x - hullW * 0.97f * u, y - 0.36f * u + bob, x + hullW * 0.97f * u, y + 0.02f * u + bob, paint);
+        paint.setStrokeWidth(Math.max(1f, 0.05f * u));
+        paint.setColor(blend(hull, 0xFFFFFFFF, 0.45f));
+        c.drawLine(x - hullW * 0.8f * u, y - 0.3f * u + bob, x + hullW * 0.8f * u, y - 0.3f * u + bob, paint);
         // The crew: body, head, and what they pull with.
         paint.setColor(shirt);
         c.drawRect(x - 0.25f * u, y - 1.05f * u + bob, x + 0.25f * u, y - 0.3f * u + bob, paint);
@@ -2342,20 +3247,103 @@ final class RiverExplorerGame extends GameView {
         oarPhase = Math.min(2f, oarPhase + dt / (oarPhase < 1f ? 0.8f : 1.6f));
         float cx = w / 2f;
         float deckTop = h * 0.80f;
-        paint.setColor(lit(0xFF8B5A2B));
-        path.reset();
-        path.moveTo(cx, deckTop);
-        path.lineTo(cx + w * 0.16f, h);
-        path.lineTo(cx - w * 0.16f, h);
+        float sp = Math.max(0f, Math.min(1f, speed / 4.2f));
+        float ls = lightSide;
+        // 3.25: the bow wave - white water peeling off the stem, wider and brighter the harder you
+        // row, with foam streaming past the hull carried by the distance actually rowed.
+        if (sp > 0.04f) {
+            int foamA = (int) (0x28 + 0x80 * sp);
+            paint.setColor((foamA << 24) | 0x00EAF6FA);
+            for (int side = -1; side <= 1; side += 2) {
+                path.rewind();
+                path.moveTo(cx + side * dp(4f), deckTop + dp(2f));
+                path.quadTo(cx + side * (w * 0.10f + w * 0.05f * sp), deckTop + (h - deckTop) * 0.45f,
+                        cx + side * (w * 0.17f + w * 0.13f * sp), h + dp(2f));
+                path.lineTo(cx + side * w * 0.165f, h + dp(2f));
+                path.close();
+                c.drawPath(path, paint);
+            }
+            paint.setStrokeWidth(dp(3f));
+            for (int i = 0; i < 8; i++) {
+                float p = (float) ((sessionMeters * 0.45 + i / 8.0) % 1.0);
+                float side = (i & 1) == 0 ? -1f : 1f;
+                float reach = w * 0.165f + w * 0.12f * sp;
+                float x0 = cx + side * reach * p;
+                float y0 = deckTop + (h - deckTop) * p;
+                float len = dp(8f) + dp(26f) * p;
+                paint.setColor(((int) Math.min(255.0, foamA * 1.6f * Math.sin(Math.PI * p)) << 24) | 0x00FFFFFF);
+                c.drawLine(x0, y0, x0 + side * len * 0.55f, y0 + len * 0.45f, paint);
+            }
+        }
+        // The hull: dark planking under a lighter deck, both with the light falling down them.
+        float hw = w * 0.17f;
+        cols2[0] = lit(0xFF5A3618);
+        cols2[1] = lit(0xFF8B5A2B);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(grad(G_HULL, deckTop, h, cols2, pos2));
+        path.rewind();
+        path.moveTo(cx, deckTop - dp(4f));
+        path.quadTo(cx + hw * 0.55f, deckTop + (h - deckTop) * 0.30f, cx + hw, h + dp(2f));
+        path.lineTo(cx - hw, h + dp(2f));
+        path.quadTo(cx - hw * 0.55f, deckTop + (h - deckTop) * 0.30f, cx, deckTop - dp(4f));
         path.close();
         c.drawPath(path, paint);
-        paint.setColor(lit(0xFFB07A45));
-        path.reset();
-        path.moveTo(cx, deckTop + dp(8f));
-        path.lineTo(cx + w * 0.11f, h);
-        path.lineTo(cx - w * 0.11f, h);
+        float dw = w * 0.12f;
+        cols2[0] = lit(0xFFCB9C64);
+        cols2[1] = lit(0xFF9A683A);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(grad(G_DECK, deckTop, h, cols2, pos2));
+        path.rewind();
+        path.moveTo(cx, deckTop + dp(9f));
+        path.quadTo(cx + dw * 0.55f, deckTop + (h - deckTop) * 0.35f, cx + dw, h + dp(2f));
+        path.lineTo(cx - dw, h + dp(2f));
+        path.quadTo(cx - dw * 0.55f, deckTop + (h - deckTop) * 0.35f, cx, deckTop + dp(9f));
         path.close();
         c.drawPath(path, paint);
+        paint.setShader(null);
+        // The half of the deck turned from the light.
+        float shadeSide = ls >= 0f ? -1f : 1f;
+        path2.rewind();
+        path2.moveTo(cx, deckTop + dp(12f));
+        path2.quadTo(cx + shadeSide * dw * 0.5f, deckTop + (h - deckTop) * 0.36f, cx + shadeSide * dw * 0.97f, h + dp(2f));
+        path2.lineTo(cx, h + dp(2f));
+        path2.close();
+        paint.setColor(((int) (0x18 + 0x18 * Math.abs(ls)) << 24));
+        c.drawPath(path2, paint);
+        // Seams converging on the stem, and the lit rim of the gunwale.
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(0x55000000 | (lit(0xFF4A2C14) & 0x00FFFFFF));
+        c.drawLine(cx, deckTop + dp(16f), cx, h, paint);
+        for (int side = -1; side <= 1; side += 2) {
+            c.drawLine(cx + side * dp(1f), deckTop + dp(18f), cx + side * dw * 0.36f, h, paint);
+            c.drawLine(cx + side * dp(2f), deckTop + dp(18f), cx + side * dw * 0.7f, h, paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2.5f));
+        paint.setColor(0x80000000 | (lit(0xFFFFE6C0) & 0x00FFFFFF));
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // The stem post with a brass cap, and a pennant on its staff that streams harder with speed.
+        float staffTop = deckTop - dp(40f);
+        paint.setStrokeWidth(dp(2.5f));
+        paint.setColor(lit(0xFF3A2A1A));
+        c.drawLine(cx, deckTop + dp(2f), cx, staffTop, paint);
+        float flap = (float) Math.sin(sessionSeconds * (5 + 7 * sp)) * dp(2f + 4f * sp);
+        float flagLen = dp(22f + 18f * sp);
+        path2.rewind();
+        path2.moveTo(cx, staffTop);
+        path2.quadTo(cx + flagLen * 0.5f, staffTop + dp(3f) + flap, cx + flagLen, staffTop + dp(6f) + flap * 1.4f);
+        path2.quadTo(cx + flagLen * 0.5f, staffTop + dp(10f) - flap * 0.4f, cx, staffTop + dp(13f));
+        path2.close();
+        paint.setColor(lit(ACCENT));
+        c.drawPath(path2, paint);
+        paint.setColor(lit(0xFF4A2E16));
+        rect.set(cx - dp(4f), deckTop - dp(4f), cx + dp(4f), deckTop + dp(14f));
+        c.drawRoundRect(rect, dp(3f), dp(3f), paint);
+        paint.setColor(lit(0xFFD9A441));
+        c.drawCircle(cx, deckTop - dp(3f), dp(5.5f), paint);
+        paint.setColor(0xAAFFFFFF);
+        c.drawCircle(cx + ls * dp(2f), deckTop - dp(5f), dp(2f), paint);
         if (light < 0.55f) {
             // A lantern on the bow once it gets dark.
             float a = Math.min(1f, (0.55f - light) / 0.25f);
@@ -2366,17 +3354,63 @@ final class RiverExplorerGame extends GameView {
         // Oar sweep: 0 at the catch (blades forward), 1 at the finish (blades back).
         float sweep = oarPhase < 1f ? oarPhase : 2f - oarPhase;
         boolean inWater = oarPhase < 1f;
+        int waterTint = lit(season.waterA);
         for (int side = -1; side <= 1; side += 2) {
             float pivotX = cx + side * w * 0.14f;
             float pivotY = h * 0.93f;
             float angle = (float) Math.toRadians(-60 + sweep * 50);
             float bladeX = pivotX + side * (float) Math.cos(angle) * w * 0.3f;
             float bladeY = pivotY + (float) Math.sin(angle) * h * 0.12f + (inWater ? dp(10f) : -dp(14f));
-            paint.setColor(lit(0xFFE0C9A0));
+            if (inWater) {
+                // The puddle the blade leaves, spreading through the drive.
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(2.5f));
+                paint.setColor(((int) (0xB0 * (1f - oarPhase)) << 24) | 0x00E4F3F7);
+                float rx = dp(28f) + dp(40f) * oarPhase;
+                float ry = dp(8f) + dp(10f) * oarPhase;
+                c.drawOval(bladeX - rx, bladeY - ry, bladeX + rx, bladeY + ry, paint);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0x66E4F3F7);
+                c.drawOval(bladeX - dp(30f), bladeY - dp(7f), bladeX + dp(30f), bladeY + dp(9f), paint);
+            } else {
+                // Drips falling off the blade on the recovery.
+                for (int d = 0; d < 3; d++) {
+                    float dph = (float) ((sessionSeconds * 1.8 + d * 0.33) % 1.0);
+                    paint.setColor(((int) (0xC0 * (1f - dph)) << 24) | 0x00D8ECF2);
+                    c.drawCircle(bladeX + side * dp(6f) * (d - 1), bladeY + dp(8f) + dph * dp(28f), dp(2.2f), paint);
+                }
+            }
+            // The loom: a shadow under it, the wood, a highlight along the top, a leather collar.
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(dp(7f));
+            paint.setColor(0x55000000);
+            c.drawLine(pivotX, pivotY + dp(3f), bladeX, bladeY + dp(3f), paint);
             paint.setStrokeWidth(dp(6f));
+            paint.setColor(lit(0xFFD9BE90));
             c.drawLine(pivotX, pivotY, bladeX, bladeY, paint);
-            paint.setColor(lit(0xFFF2F2F2));
-            c.drawOval(bladeX - dp(22f), bladeY - dp(9f), bladeX + dp(22f), bladeY + dp(9f), paint);
+            paint.setStrokeWidth(dp(1.6f));
+            paint.setColor(0x88FFFFFF);
+            c.drawLine(pivotX, pivotY - dp(1.5f), bladeX, bladeY - dp(1.5f), paint);
+            paint.setStrokeWidth(dp(9f));
+            paint.setColor(lit(0xFF3A2A1A));
+            float cxl = pivotX + (bladeX - pivotX) * 0.08f;
+            float cyl = pivotY + (bladeY - pivotY) * 0.08f;
+            c.drawLine(pivotX, pivotY, cxl, cyl, paint);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            // The blade, turned along the loom: white with the WAKE stripe at its tip, and greyed by
+            // the water while it is buried.
+            float deg = (float) Math.toDegrees(Math.atan2(bladeY - pivotY, bladeX - pivotX));
+            c.save();
+            c.rotate(deg, bladeX, bladeY);
+            rect.set(bladeX - dp(8f), bladeY - dp(10f), bladeX + dp(38f), bladeY + dp(10f));
+            paint.setColor(inWater ? blend(lit(0xFFF2F2F2), waterTint, 0.45f) : lit(0xFFF2F2F2));
+            c.drawRoundRect(rect, dp(9f), dp(9f), paint);
+            paint.setColor(0x33000000);
+            rect.set(bladeX - dp(6f), bladeY + dp(1f), bladeX + dp(36f), bladeY + dp(10f));
+            c.drawRoundRect(rect, dp(8f), dp(8f), paint);
+            paint.setColor(inWater ? blend(lit(ACCENT), waterTint, 0.45f) : lit(ACCENT));
+            c.drawRect(bladeX + dp(24f), bladeY - dp(9.5f), bladeX + dp(30f), bladeY + dp(9.5f), paint);
+            c.restore();
             if (inWater && oarPhase < 0.1f && speed > 0.5f) {
                 fx.burst(bladeX, bladeY, 8, dp(90f), 0.4f, dp(3f), 0xCCBFE3FF, true);
             }
@@ -2411,6 +3445,13 @@ final class RiverExplorerGame extends GameView {
             explorePct = surveyedPercent();
         }
         c.drawBitmap(map, left, top, null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0xFF243246);
+        c.drawRect(left, top, left + mw, top + mh, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x40FFFFFF);
+        c.drawRect(left + dp(1f), top, left + mw - dp(1f), top + dp(1f), paint);
         // You: a dot and a heading tick.
         int idx = segIndex(along);
         Seg seg = geom(prefixFor(idx), idx);
@@ -2711,25 +3752,76 @@ final class RiverExplorerGame extends GameView {
         }
     }
 
+    /* ---------- 3.25 HUD styling ---------- */
+
+    /**
+     * A HUD panel in the app's family: rounded, a faint sheen over its top half, a hairline border
+     * and a lighter top edge. Leaves {@link #rect} set to the panel's bounds.
+     */
+    private void panel(Canvas c, float l, float t, float r, float b, float radius, int fill) {
+        int a = fill >>> 24;
+        rect.set(l, t, r, b);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(fill);
+        c.drawRoundRect(rect, radius, radius, paint);
+        rect.set(l + dp(1f), t + dp(1f), r - dp(1f), t + (b - t) * 0.48f);
+        paint.setColor(((a * 0x14 / 0xFF) << 24) | 0x00FFFFFF);
+        c.drawRoundRect(rect, Math.max(0f, radius - dp(1f)), Math.max(0f, radius - dp(1f)), paint);
+        rect.set(l, t, r, b);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(((a * 0xE0 / 0xFF) << 24) | 0x00243246);
+        c.drawRoundRect(rect, radius, radius, paint);
+        paint.setColor(((a * 0x48 / 0xFF) << 24) | 0x00FFFFFF);
+        c.drawLine(l + radius, t + dp(0.5f), r - radius, t + dp(0.5f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A rounded bar track with a glossy fill to fraction {@code p}. */
+    private void bar(Canvas c, float l, float t, float r, float b, float p, int colour) {
+        float rad = (b - t) / 2f;
+        rect.set(l, t, r, b);
+        paint.setColor(0xFF152131);
+        c.drawRoundRect(rect, rad, rad, paint);
+        p = Math.max(0f, Math.min(1f, p));
+        if (p <= 0.001f) {
+            return;
+        }
+        float fr = Math.max(l + (b - t), l + (r - l) * p);
+        rect.set(l, t, fr, b);
+        paint.setColor(colour);
+        c.drawRoundRect(rect, rad, rad, paint);
+        rect.set(l + rad * 0.6f, t + (b - t) * 0.16f, fr - rad * 0.6f, t + (b - t) * 0.46f);
+        if (rect.right > rect.left) {
+            paint.setColor(0x44FFFFFF);
+            c.drawRoundRect(rect, rad * 0.3f, rad * 0.3f, paint);
+        }
+    }
+
     private void drawHud(Canvas c, float w, float h, float speed, double forkDist, char choice) {
         int idx = segIndex(along);
-        String reach = reachName(prefixFor(idx), idx);
-        bold(c, reach.toUpperCase(java.util.Locale.US), dp(18f), dp(36f), 22f, TEXT, Paint.Align.LEFT);
-        label(c, String.format(java.util.Locale.US, "%.2f km up the river  ·  %d landmarks  ·  %d boats passed  ·  %s /500",
-                along / 1000.0, landmarksFound, passedToday, pace(speed)), dp(18f), dp(58f), 10f, DIM, Paint.Align.LEFT);
-        label(c, lightName() + "   ·   " + season.name + ", " + season.flow
-                        + String.format(java.util.Locale.US, " (%.1f m/s %s you)", current,
-                        dir > 0 ? "against" : "with"),
-                dp(18f), dp(80f), 10f, light < 0.5f ? 0xFFB9C4FF : 0xFFF2C39A, Paint.Align.LEFT);
+        String reach = reachName(prefixFor(idx), idx).toUpperCase(java.util.Locale.US);
+        String stats = String.format(java.util.Locale.US, "%.2f km up the river  ·  %d landmarks  ·  %d boats passed  ·  %s /500",
+                along / 1000.0, landmarksFound, passedToday, pace(speed));
+        String sky = lightName() + "   ·   " + season.name + ", " + season.flow
+                + String.format(java.util.Locale.US, " (%.1f m/s %s you)", current, dir > 0 ? "against" : "with");
+        // 3.25: the header sits on its own panel. Over a bright sky the 10dp lines were unreadable.
+        // Drawing an empty string sets each paint to its size so the lines can be measured first.
+        bold(c, "", 0f, 0f, 22f, TEXT, Paint.Align.LEFT);
+        float tw = textPaint.measureText(reach);
+        label(c, "", 0f, 0f, 10f, DIM, Paint.Align.LEFT);
+        tw = Math.max(tw, Math.max(dimPaint.measureText(stats), dimPaint.measureText(sky)));
+        panel(c, dp(8f), dp(8f), dp(18f) + tw + dp(14f), dp(88f), dp(10f), 0xB30A121C);
+        bold(c, reach, dp(18f), dp(36f), 22f, TEXT, Paint.Align.LEFT);
+        label(c, stats, dp(18f), dp(58f), 10f, DIM, Paint.Align.LEFT);
+        label(c, sky, dp(18f), dp(80f), 10f, light < 0.5f ? 0xFFB9C4FF : 0xFFF2C39A, Paint.Align.LEFT);
 
         // The album button: a small postcard stack with a count.
         albumBtnL = dp(18f);
         albumBtnT = dp(92f);
         albumBtnR = dp(158f);
         albumBtnB = dp(128f);
-        rect.set(albumBtnL, albumBtnT, albumBtnR, albumBtnB);
-        paint.setColor(0xCC0A121C);
-        c.drawRoundRect(rect, dp(8f), dp(8f), paint);
+        panel(c, albumBtnL, albumBtnT, albumBtnR, albumBtnB, dp(8f), 0xCC0A121C);
         paint.setColor(0xFFF4EBD8);
         c.save();
         c.rotate(-8f, albumBtnL + dp(20f), albumBtnT + dp(18f));
@@ -2778,9 +3870,7 @@ final class RiverExplorerGame extends GameView {
         float left = dp(18f);
         float right = Math.min(w * 0.46f, dp(520f));
         float top = dp(126f);
-        rect.set(left, top, right, top + dp(58f));
-        paint.setColor(0xCC0A121C);
-        c.drawRoundRect(rect, dp(8f), dp(8f), paint);
+        panel(c, left, top, right, top + dp(58f), dp(8f), 0xCC0A121C);
         if (dir < 0) {
             float togo = (float) Math.max(0, along - cruiseHome);
             bold(c, "CRUISING HOME", left + dp(12f), top + dp(22f), 15f, 0xFFF5C518, Paint.Align.LEFT);
@@ -2791,17 +3881,12 @@ final class RiverExplorerGame extends GameView {
             float p = cruiseFrom > cruiseHome
                     ? (float) ((cruiseFrom - along) / (cruiseFrom - cruiseHome)) : 1f;
             p = Math.max(0f, Math.min(1f, p));
-            paint.setColor(0xFF1E2A38);
-            c.drawRect(bl, top + dp(34f), br, top + dp(46f), paint);
-            paint.setColor(0xFFF5C518);
-            c.drawRect(bl, top + dp(34f), bl + (br - bl) * p, top + dp(46f), paint);
+            bar(c, bl, top + dp(34f), br, top + dp(46f), p, 0xFFF5C518);
             turnBtnL = right - dp(112f);
             turnBtnT = top + dp(30f);
             turnBtnR = right - dp(10f);
             turnBtnB = top + dp(52f);
-            rect.set(turnBtnL, turnBtnT, turnBtnR, turnBtnB);
-            paint.setColor(0xFF1B3A46);
-            c.drawRoundRect(rect, dp(6f), dp(6f), paint);
+            panel(c, turnBtnL, turnBtnT, turnBtnR, turnBtnB, dp(6f), 0xFF1B3A46);
             bold(c, "TURN UPSTREAM", (turnBtnL + turnBtnR) / 2f, turnBtnB - dp(7f), 10f, ACCENT, Paint.Align.CENTER);
             return;
         }
@@ -2814,11 +3899,8 @@ final class RiverExplorerGame extends GameView {
                 right - dp(12f), top + dp(22f), 12f, togo > 0 ? DIM : ACCENT, Paint.Align.RIGHT);
         float bl = left + dp(12f);
         float br = right - dp(12f);
-        paint.setColor(0xFF1E2A38);
-        c.drawRect(bl, top + dp(32f), br, top + dp(46f), paint);
         float p = expProgress();
-        paint.setColor(p >= 1f ? ACCENT : 0xFF5AA7D6);
-        c.drawRect(bl, top + dp(32f), bl + (br - bl) * p, top + dp(46f), paint);
+        bar(c, bl, top + dp(32f), br, top + dp(46f), p, p >= 1f ? ACCENT : 0xFF5AA7D6);
         // The boat's own mark, which can sit behind the frontier after a cruise.
         double span = expTarget - expStart;
         if (span > 0) {
@@ -2846,9 +3928,7 @@ final class RiverExplorerGame extends GameView {
         float pw = dp(460f);
         float left = w / 2f - pw / 2f;
         float top = dp(10f);
-        rect.set(left, top, left + pw, top + dp(96f));
-        paint.setColor(0xDD0A121C);
-        c.drawRoundRect(rect, dp(10f), dp(10f), paint);
+        panel(c, left, top, left + pw, top + dp(96f), dp(10f), 0xDD0A121C);
         String title = weirBlocking ? "WEIR  ·  THE BOAT IS HELD"
                 : weirLift > 0 ? "OVER!" : "WEIR IN " + Math.round(ahead) + " m";
         bold(c, title, left + dp(14f), top + dp(24f), 16f, weirBlocking ? BAD : WARN, Paint.Align.LEFT);
@@ -2860,10 +3940,10 @@ final class RiverExplorerGame extends GameView {
         float sy = top + dp(40f);
         float lo = 14f;
         float hi = Math.max(40f, weirTargetRate + 8f);
-        paint.setColor(0xFF1E2A38);
-        c.drawRect(sl, sy, sr, sy + dp(14f), paint);
+        bar(c, sl, sy, sr, sy + dp(14f), 0f, 0);
         paint.setColor(0x99F0B132);
-        c.drawRect(sl + (sr - sl) * (weirTargetRate - lo) / (hi - lo), sy, sr, sy + dp(14f), paint);
+        rect.set(sl + (sr - sl) * (weirTargetRate - lo) / (hi - lo), sy, sr, sy + dp(14f));
+        c.drawRoundRect(rect, dp(7f), dp(7f), paint);
         float rn = Math.max(lo, Math.min(hi, rateNow));
         float nx = sl + (sr - sl) * (rn - lo) / (hi - lo);
         boolean hard = rateNow >= weirTargetRate;
@@ -2876,10 +3956,7 @@ final class RiverExplorerGame extends GameView {
         label(c, "LIFT", sl, cy + dp(11f), 10f, DIM, Paint.Align.LEFT);
         float bl = sl + dp(40f);
         float br = sr - dp(60f);
-        paint.setColor(0xFF1E2A38);
-        c.drawRect(bl, cy, br, cy + dp(14f), paint);
-        paint.setColor(weirCharge > 0.66f ? ACCENT : weirCharge > 0.25f ? WARN : BAD);
-        c.drawRect(bl, cy, bl + (br - bl) * weirCharge, cy + dp(14f), paint);
+        bar(c, bl, cy, br, cy + dp(14f), weirCharge, weirCharge > 0.66f ? ACCENT : weirCharge > 0.25f ? WARN : BAD);
         if (weirCharge > 0.02f && weirCharge < 1f) {
             // A pip that rides the bar's end, so a charge that is bleeding back is obvious.
             paint.setColor(0xFFE6EDF7);
@@ -2904,9 +3981,7 @@ final class RiverExplorerGame extends GameView {
         float ph = dp(190f);
         float left = w / 2f - pw / 2f;
         float top = h * 0.44f - ph / 2f + (1f - pop) * dp(40f);
-        rect.set(left, top, left + pw, top + ph);
-        paint.setColor((((int) (0xE8 * pop)) << 24) | 0x000A121C);
-        c.drawRoundRect(rect, dp(14f), dp(14f), paint);
+        panel(c, left, top, left + pw, top + ph, dp(14f), (((int) (0xE8 * pop)) << 24) | 0x000A121C);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
         paint.setColor(0xFFF5C518);
@@ -2921,9 +3996,7 @@ final class RiverExplorerGame extends GameView {
         cruiseBtnT = by;
         cruiseBtnR = w / 2f - dp(12f);
         cruiseBtnB = by + bh;
-        rect.set(cruiseBtnL, cruiseBtnT, cruiseBtnR, cruiseBtnB);
-        paint.setColor(0xFF12313B);
-        c.drawRoundRect(rect, dp(10f), dp(10f), paint);
+        panel(c, cruiseBtnL, cruiseBtnT, cruiseBtnR, cruiseBtnB, dp(10f), 0xFF12313B);
         bold(c, "CRUISE HOME", (cruiseBtnL + cruiseBtnR) / 2f, by + dp(28f), 18f, ACCENT, Paint.Align.CENTER);
         label(c, String.format(java.util.Locale.US, "%.1f km downstream, the current with you",
                         Math.max(0, along - cruiseHome) / 1000.0),
@@ -2932,9 +4005,7 @@ final class RiverExplorerGame extends GameView {
         pressBtnT = by;
         pressBtnR = left + pw - dp(30f);
         pressBtnB = by + bh;
-        rect.set(pressBtnL, pressBtnT, pressBtnR, pressBtnB);
-        paint.setColor(0xFF2A2413);
-        c.drawRoundRect(rect, dp(10f), dp(10f), paint);
+        panel(c, pressBtnL, pressBtnT, pressBtnR, pressBtnB, dp(10f), 0xFF2A2413);
         bold(c, "PRESS ON", (pressBtnL + pressBtnR) / 2f, by + dp(28f), 18f, 0xFFF5C518, Paint.Align.CENTER);
         label(c, "next: " + expName + String.format(java.util.Locale.US, ", %.1f km further",
                         (expTarget - expStart) / 1000.0),
@@ -2960,9 +4031,7 @@ final class RiverExplorerGame extends GameView {
         float pw = dp(440f);
         float left = w / 2f - pw / 2f;
         float top = dp(10f);
-        rect.set(left, top, left + pw, top + dp(92f));
-        paint.setColor(0xCC0A121C);
-        c.drawRoundRect(rect, dp(10f), dp(10f), paint);
+        panel(c, left, top, left + pw, top + dp(92f), dp(10f), 0xCC0A121C);
         String title = inRapids
                 ? "RAPIDS  ·  ROCK " + Math.min(ROCKS, runCleared + runHits + 1) + " OF " + ROCKS
                 : "RAPIDS IN " + Math.round(ahead) + " m";
@@ -2974,10 +4043,10 @@ final class RiverExplorerGame extends GameView {
         float sy = top + dp(40f);
         float lo = 14f;
         float hi = 36f;
-        paint.setColor(0xFF1E2A38);
-        c.drawRect(sl, sy, sr, sy + dp(14f), paint);
+        bar(c, sl, sy, sr, sy + dp(14f), 0f, 0);
         paint.setColor(0x9935D0BA);
-        c.drawRect(sl + (sr - sl) * (rateLo - lo) / (hi - lo), sy, sl + (sr - sl) * (rateHi - lo) / (hi - lo), sy + dp(14f), paint);
+        rect.set(sl + (sr - sl) * (rateLo - lo) / (hi - lo), sy, sl + (sr - sl) * (rateHi - lo) / (hi - lo), sy + dp(14f));
+        c.drawRoundRect(rect, dp(7f), dp(7f), paint);
         float rn = Math.max(lo, Math.min(hi, rateNow));
         float nx = sl + (sr - sl) * (rn - lo) / (hi - lo);
         boolean inBand = rateNow >= rateLo && rateNow <= rateHi;
@@ -2989,10 +4058,7 @@ final class RiverExplorerGame extends GameView {
         label(c, "LINE", sl, ly + dp(10f), 10f, DIM, Paint.Align.LEFT);
         float bl = sl + dp(40f);
         float br = sr - dp(110f);
-        paint.setColor(0xFF1E2A38);
-        c.drawRect(bl, ly, br, ly + dp(12f), paint);
-        paint.setColor(rhythm > 0.5f ? ACCENT : rhythm > 0.3f ? WARN : BAD);
-        c.drawRect(bl, ly, bl + (br - bl) * rhythm, ly + dp(12f), paint);
+        bar(c, bl, ly, br, ly + dp(12f), rhythm, rhythm > 0.5f ? ACCENT : rhythm > 0.3f ? WARN : BAD);
         for (int k = 0; k < ROCKS; k++) {
             float dx = br + dp(14f) + k * dp(15f);
             int done = runCleared + runHits;

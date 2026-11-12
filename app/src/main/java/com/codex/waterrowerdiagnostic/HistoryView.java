@@ -833,7 +833,7 @@ final class HistoryView extends View {
         paint.setFakeBoldText(false);
         paint.setColor(FAINT);
         paint.setTextSize(dp(14f));
-        c.drawText("finish a row and it will appear here", w / 2f, cy + dp(26f), paint);
+        c.drawText("row, then END SESSION - it will appear here", w / 2f, cy + dp(26f), paint);
         paint.setTextAlign(Paint.Align.LEFT);
 
         // A single breathing ring so the screen is never dead.

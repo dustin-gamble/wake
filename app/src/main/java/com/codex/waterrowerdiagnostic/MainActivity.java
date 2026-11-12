@@ -152,8 +152,28 @@ public class MainActivity extends Activity
 
     /* ---------- session recording ---------- */
 
-    /** One row per screen: started when a game or the gauges open, committed on the way home. */
+    /**
+     * The session being recorded, or null between sessions. Up to 3.24 there was no session at
+     * all - one row per screen, started when a game opened and committed on the way home - so a
+     * half-hour row across four games landed in history as four rows and the strip restarted at
+     * every game. Since 3.25.0 the rower begins and ends it: START SESSION or the first stroke
+     * begins one, END SESSION closes it, and every screen in between is the same row.
+     */
     private SessionLog.Recorder recorder;
+    private boolean sessionActive;
+    /** Stroke counter at the last tick, to see a stroke land; -1 until the first reading. */
+    private int sessionLastStrokeCount = -1;
+    private long sessionLastStrokeMs;
+    /** What the next session will be named after: the screen in front when it begins. */
+    private String pendingSessionGame = "GAUGES";
+    /** Ten minutes with no stroke ends a session on its own, so a forgotten one cannot run for days. */
+    private static final long SESSION_IDLE_END_MS = 10 * 60 * 1000L;
+    /** The session button on each header that has one; refreshed together. */
+    private TextView homeSessionChip;
+    private TextView gaugesSessionChip;
+    private TextView gameSessionChip;
+    /** The whole second the session buttons last showed; -1 idle. Avoids a string per frame. */
+    private int sessionChipSecond = -2;
     /** The title of the screen the recorder is collecting, set by {@link #gameScreen}. */
     private String lastGameTitle = "ROW";
     /** Session-to-date values when the recorder started, so each row counts from zero. */
@@ -576,6 +596,11 @@ public class MainActivity extends Activity
      */
     @Override
     protected void onStop() {
+        // Leaving WAKE - for Ergatta, or Home - ends the session rather than leaving it open in a
+        // process Android may kill without warning. A rotation is not leaving.
+        if (!isChangingConfigurations()) {
+            endSession(false);
+        }
         saveMeasuredCalibration();
         commitProfile(RowerProfile.MIN_MINUTES);
         saveProgress();
@@ -681,8 +706,8 @@ public class MainActivity extends Activity
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         if (screen == homeScreen) {
             saveLastSession();
-            // Same path as last.session: the row just finished becomes a line in the history.
-            commitRecorder();
+            // Going home no longer ends the row: the session runs until END SESSION, so picking
+            // another game from here carries straight on.
             refreshPersonalBests();
             refreshProgress();
             if (shuffleRecapPending) {
@@ -824,6 +849,8 @@ public class MainActivity extends Activity
         TextView records = chip("RECORDS");
         records.setOnClickListener(v -> showRecords());
         header.addView(records);
+        homeSessionChip = sessionChip();
+        header.addView(homeSessionChip);
         TextView history = chip("HISTORY");
         history.setOnClickListener(v -> showHistory());
         header.addView(history);
@@ -1087,6 +1114,16 @@ public class MainActivity extends Activity
 
     /** Remembers this session's headline numbers for the home screen. */
     private void saveLastSession() {
+        // While a session runs, "last session" is that session so far; endSession writes the
+        // final figures. Before 3.25.0 this was everything since the app opened.
+        if (sessionActive && recorder != null) {
+            if (recorder.metres() >= 20f) {
+                personalBests.putString("last.session", String.format(Locale.US, "%d|%d|%d",
+                        Math.round(recorder.metres()), Math.round(recorder.seconds()),
+                        Math.round(recorder.averageWatts())));
+            }
+            return;
+        }
         if (sessionFirstStrokeMs == 0 || sessionMetres() < 20) {
             return;
         }
@@ -1979,7 +2016,7 @@ public class MainActivity extends Activity
             return;
         }
         saveLastSession();
-        commitRecorder();
+        endSession(false);
         commitJourney();
         commitProfile(RowerProfile.MIN_MINUTES);
         saveMeasuredCalibration();
@@ -2144,18 +2181,171 @@ public class MainActivity extends Activity
      * <p>SHUFFLE is one session, not one per game: while it is switching the recorder is only
      * renamed, so a twenty-minute shuffle lands in the history as a single twenty-minute row.
      */
+    /**
+     * A screen has come to the front. It no longer starts or ends a row - the session does that -
+     * it only names one: the running session adds it to its list, and if none is running it is what
+     * the next one will be called after.
+     */
     private void startRecorder(String title) {
-        if (shuffleSwitching && recorder != null) {
-            recorder.setGame(title);
+        String name = sessionGameName(title);
+        pendingSessionGame = name;
+        if (sessionActive && recorder != null) {
+            recorder.addGame(name);
+        }
+    }
+
+    /** "SHUFFLE  ·  CANYON" is one SHUFFLE session, not a new game at every deal. */
+    private static String sessionGameName(String title) {
+        if (title == null || title.isEmpty()) {
+            return "ROW";
+        }
+        return title.startsWith("SHUFFLE") ? "SHUFFLE" : title;
+    }
+
+    /** START SESSION, or the first stroke with no session running. */
+    private void startSession() {
+        if (sessionActive) {
             return;
         }
         commitRecorder();
-        recorder = new SessionLog.Recorder(title);
+        recorder = new SessionLog.Recorder(pendingSessionGame);
         recorderSeconds = 0f;
         recorderTickMs = 0L;
         recorderMetresBase = -1;
         recorderStrokesBase = -1;
         recorderJoulesBase = -1;
+        sessionActive = true;
+        sessionLastStrokeMs = System.currentTimeMillis();
+        publishSimpleEvent("session-started", true);
+        refreshSessionChips(true);
+    }
+
+    /**
+     * Closes the session: it goes into history (the recorder drops anything under 30 s or without
+     * a stroke), the strip returns to zero, and - when the rower pressed END - a card says what the
+     * session was. Leaving the app, switching rower and the idle timeout end it silently.
+     */
+    private void endSession(boolean byRower) {
+        if (!sessionActive) {
+            return;
+        }
+        sessionActive = false;
+        SessionLog.Recorder r = recorder;
+        float seconds = r == null ? 0f : r.seconds();
+        float metres = r == null ? 0f : r.metres();
+        int strokes = r == null ? 0 : r.strokes();
+        float watts = r == null ? 0f : r.averageWatts();
+        java.util.List<String> games = r == null ? new java.util.ArrayList<String>() : r.games();
+        if (metres >= 20f) {
+            personalBests.putString("last.session", String.format(Locale.US, "%d|%d|%d",
+                    Math.round(metres), Math.round(seconds), Math.round(watts)));
+            if (lastSessionCard != null) {
+                lastSessionCard.setText(lastSessionText());
+            }
+        }
+        commitRecorder();
+        publishSimpleEvent("session-ended", true);
+        refreshSessionChips(true);
+        if (gameStrip != null) {
+            gameStrip.setSession(0, 0);
+            gameStrip.setClock(0, false, false);
+        }
+        if (byRower) {
+            showSessionSummary(seconds, metres, strokes, watts, games);
+        }
+    }
+
+    private void confirmEndSession() {
+        if (!sessionActive) {
+            return;
+        }
+        float metres = recorder == null ? 0f : recorder.metres();
+        float seconds = recorder == null ? 0f : recorder.seconds();
+        new AlertDialog.Builder(this)
+                .setTitle("End this session?")
+                .setMessage(Math.round(metres) + " m  ·  " + PersonalBests.formatTime(seconds)
+                        + " rowing")
+                .setPositiveButton("End session", (d, w) -> endSession(true))
+                .setNegativeButton("Keep rowing", (d, w) -> d.dismiss())
+                .show();
+    }
+
+    private void showSessionSummary(float seconds, float metres, int strokes, float watts,
+                                    java.util.List<String> games) {
+        StringBuilder msg = new StringBuilder();
+        if (seconds < SessionLog.MIN_SECONDS || strokes == 0) {
+            msg.append("Under 30 seconds of rowing, so nothing was saved to history.");
+        } else {
+            float split = metres > 1f ? seconds * 500f / metres : 0f;
+            msg.append(String.format(Locale.US, "%,d m in %s", Math.round(metres),
+                    PersonalBests.formatTime(seconds)));
+            msg.append('\n');
+            msg.append(split > 0 ? PersonalBests.formatPace(split) : "--:--")
+                    .append(" /500 average  ·  ").append(Math.round(watts)).append(" W  ·  ")
+                    .append(strokes).append(" strokes");
+            if (!games.isEmpty()) {
+                msg.append("\n\n");
+                for (int i = 0; i < games.size(); i++) {
+                    msg.append(i == 0 ? "" : "  ·  ").append(games.get(i));
+                }
+            }
+            msg.append("\n\nSaved to history.");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Session complete")
+                .setMessage(msg.toString())
+                .setPositiveButton("Done", (d, w) -> d.dismiss())
+                .setNeutralButton("History", (d, w) -> showHistory())
+                .show();
+    }
+
+    /** One session button, styled for the state it shows. */
+    private TextView sessionChip() {
+        TextView c = chip("");
+        c.setOnClickListener(v -> {
+            if (sessionActive) {
+                confirmEndSession();
+            } else {
+                startSession();
+            }
+        });
+        styleSessionChip(c, sessionLabel());
+        return c;
+    }
+
+    private String sessionLabel() {
+        if (!sessionActive) {
+            return "▶  START SESSION";
+        }
+        float secs = recorder == null ? 0f : recorder.seconds();
+        return "■  END SESSION  " + PersonalBests.formatTime(secs);
+    }
+
+    private void styleSessionChip(TextView c, String label) {
+        c.setText(label);
+        c.setTextColor(getColorCompat(sessionActive ? R.color.warn : R.color.primary));
+    }
+
+    /**
+     * Repaints every session button. Called each UI tick, so it only touches the views when the
+     * label actually changes - once a second while a session runs, never while idle.
+     */
+    private void refreshSessionChips(boolean force) {
+        int second = sessionActive && recorder != null ? (int) recorder.seconds() : -1;
+        if (!force && second == sessionChipSecond) {
+            return;
+        }
+        sessionChipSecond = second;
+        String label = sessionLabel();
+        if (homeSessionChip != null) {
+            styleSessionChip(homeSessionChip, label);
+        }
+        if (gaugesSessionChip != null) {
+            styleSessionChip(gaugesSessionChip, label);
+        }
+        if (gameSessionChip != null) {
+            styleSessionChip(gameSessionChip, label);
+        }
     }
 
     /**
@@ -2166,10 +2356,28 @@ public class MainActivity extends Activity
      * under the recorder and a game's own clock restarts at each switch.
      */
     private void feedRecorder(S4Protocol.Status status) {
-        if (recorder == null) {
+        long now = System.currentTimeMillis();
+        // A stroke landing is what begins a session nobody started, and its absence for ten
+        // minutes is what ends one nobody ended. The first reading only sets the baseline, so the
+        // stale counter at launch can never look like a stroke.
+        boolean stroked = sessionLastStrokeCount >= 0 && status.strokes > sessionLastStrokeCount;
+        if (status.strokes >= 0) {
+            sessionLastStrokeCount = status.strokes;
+        }
+        boolean autoStarted = false;
+        if (stroked) {
+            sessionLastStrokeMs = now;
+            if (!sessionActive) {
+                startSession();
+                autoStarted = true;
+            }
+        }
+        if (sessionActive && now - sessionLastStrokeMs > SESSION_IDLE_END_MS) {
+            endSession(false);
+        }
+        if (recorder == null || !sessionActive) {
             return;
         }
-        long now = System.currentTimeMillis();
         float dt = recorderTickMs == 0L ? 0f : (now - recorderTickMs) / 1000f;
         recorderTickMs = now;
         if (dt < 0f || dt > 5f) {
@@ -2182,7 +2390,9 @@ public class MainActivity extends Activity
         double joules = status.meter.workJoules;
         if (recorderMetresBase < 0) {
             recorderMetresBase = metres;
-            recorderStrokesBase = status.strokes;
+            // A session begun by a stroke counts that stroke; one begun by the button counts from
+            // the next. Distance has no such step - the 057 register lags the catch anyway.
+            recorderStrokesBase = autoStarted ? Math.max(0, status.strokes - 1) : status.strokes;
             recorderJoulesBase = joules;
         }
         // The monitor's counters can be reset under us; re-base rather than log a negative.
@@ -2437,6 +2647,12 @@ public class MainActivity extends Activity
                         "Every game tunes itself to you. WAKE learns your typical power, speed and stroke "
                                 + "rate as you row, so targets stay a stretch, not a wall.\n\n"
                                 + "CONTINUE on the home screen takes you straight back to your last game."},
+                {"Sessions",
+                        "A session starts on your first stroke, or when you tap START SESSION, and it "
+                                + "runs across every game you play: one clock, one distance, one row in "
+                                + "HISTORY.\n\n"
+                                + "Tap END SESSION when you are done to see what you rowed. Leaving WAKE "
+                                + "ends it too, and so do ten minutes without a stroke."},
                 {"What your numbers mean",
                         String.format(Locale.US, "Split: time per 500 m - lower is faster. Yours is typically %s.\n"
                                         + "Stroke rate: strokes per minute - yours is about %d.\n"
@@ -3574,6 +3790,10 @@ public class MainActivity extends Activity
         if (controls != null) {
             header.addView(controls);
         }
+        // Every game gets the session button at the end of its header, so a session can be ended
+        // from wherever the rower finishes - no trip home first.
+        gameSessionChip = sessionChip();
+        header.addView(gameSessionChip);
         root.addView(header);
 
         if (vitals) {
@@ -4117,6 +4337,9 @@ public class MainActivity extends Activity
 
         header.addView(titles, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        gaugesSessionChip = sessionChip();
+        header.addView(gaugesSessionChip);
 
         // Only visible while a shuffle is holding behind this screen.
         shuffleReturnChip = chip("◀  BACK TO SHUFFLE");
@@ -5108,7 +5331,7 @@ public class MainActivity extends Activity
         saveLastSession();
         // Same path as last.session: bank the row, then hand the whole store to the laptop if it
         // happens to be on. Neither can block the exit - the post runs on its own thread.
-        commitRecorder();
+        endSession(false);
         commitJourney();
         saveProgress();
         backupToLaptop(true);
@@ -5415,17 +5638,19 @@ public class MainActivity extends Activity
                     ? (rowing ? R.color.primary : R.color.text_primary)
                     : R.color.text_faint));
 
-            // Time and stroke count are exact counters: step them, never interpolate.
-            elapsedValue.setText(formatElapsed(status.elapsedSeconds));
-            strokesValue.setText(String.valueOf(status.strokes));
+            // Time and stroke count are exact counters: step them, never interpolate. They are
+            // the session's (3.25.0), so this screen agrees with its own END SESSION button and
+            // with the strip in every game; with no session running they read zero, the way a
+            // monitor does before the first stroke. They used to be the S4's lifetime counters.
+            boolean live = sessionActive && recorder != null;
+            elapsedValue.setText(formatElapsed(live ? Math.round(recorder.seconds()) : 0));
+            strokesValue.setText(String.valueOf(live ? recorder.strokes() : 0));
             // Measured from the paddle's pulses (see PulseMeter); "~" until the load-scale test.
             boolean measured = status.meter.source == PulseMeter.EnergySource.PULSES_CALIBRATED;
             kcalValue.setText((measured ? "" : "~") + Math.round(status.meter.kcal()));
             workValue.setText(Math.round(status.meter.workJoules / 1000.0) + " kJ");
 
-            targetDistance = status.distanceMeters > 0
-                    ? status.distanceMeters
-                    : status.derivedDistanceMeters;
+            targetDistance = live ? recorder.metres() : 0;
             targetPace = status.paceSecondsPer500m;
             targetWatts = status.watts;
             // Averaged: a lone 19 among 25s made the needle drop as if a stroke had not
@@ -5541,11 +5766,16 @@ public class MainActivity extends Activity
                     saveProgress();
                 }
                 if (gameStrip != null && currentGame != null) {
-                    // In SHUFFLE the strip's clock is the whole session, not just this game.
-                    double carried = shuffleActive ? shuffleAccumSeconds : 0;
-                    gameStrip.setClock(carried + currentGame.activeSeconds(), currentGame.isClockRunning(),
-                            currentGame.hasClockStarted() || carried > 0);
+                    // The strip is the session's: one clock, one distance and one stroke count
+                    // from START SESSION to END, carried across every game in between - including
+                    // every SHUFFLE deal, which is why the old shuffle carry is no longer needed.
+                    boolean live = sessionActive && recorder != null;
+                    gameStrip.setClock(live ? recorderSeconds : 0,
+                            live && lastStatus != null && lastStatus.stillRowing, live);
+                    gameStrip.setSession(live ? Math.round(recorder.metres()) : 0,
+                            live ? recorder.strokes() : 0);
                 }
+                refreshSessionChips(false);
                 if (sparkline != null && ++tickCount % 6 == 0) {
                     sparkline.addSample(speedGauge.shownValue(), Math.round(shownWatts));
                 }

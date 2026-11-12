@@ -51,6 +51,14 @@ import android.view.MotionEvent;
  * on the rope, against divisions that are 18% apart - so it opens the way up rather than
  * flattening the game.</li>
  * </ul>
+ *
+ * <p>3.25.0 graphics pass (nothing about play changed): a mown pitch that recedes to a vanishing
+ * point, painted touch, centre and win lines with the anchor round's HOLD/BREAK on the grass, a
+ * shaded mud pit, a setting sun in a valley of hazy hills, stars and lit clouds, a near-side crowd
+ * behind a pitch-side board that carries the stats, pullers with jointed limbs, boots that dig in
+ * on the heave and shadows under them, a rope with twist and highlight that sags slack and snaps
+ * straight, and HUD panels and bars in the app's family. Size-only geometry is built once in
+ * {@code buildScene}.
  */
 final class TugOfWarGame extends GameView {
 
@@ -162,7 +170,44 @@ final class TugOfWarGame extends GameView {
     private final RectF tmp = new RectF();
     private final RectF modeButton = new RectF();
     private android.graphics.LinearGradient skyShader;
-    private float skyHeight;
+
+    /* ---------- the scene, built once per view size (3.25.0 graphics pass) ---------- */
+
+    private final android.graphics.Path ropeSpan = new android.graphics.Path();
+    private final android.graphics.Path shape = new android.graphics.Path();
+    private final android.graphics.Path stripePath = new android.graphics.Path();
+    private final android.graphics.Path bandPath = new android.graphics.Path();
+    private final android.graphics.Path hillFar = new android.graphics.Path();
+    private final android.graphics.Path hillNear = new android.graphics.Path();
+    private android.graphics.LinearGradient groundShader;
+    private android.graphics.RadialGradient pitShader;
+    private android.graphics.RadialGradient vignetteShader;
+    private android.graphics.DashPathEffect twist;
+    private float builtW;
+    private float builtH;
+    /** The pitch's perspective: vanishing point, and the screen row the pullers stand on. */
+    private float vpX;
+    private float vpY;
+    private float groundRow;
+    /** Output of {@link #joint}, so limbs are solved without allocating. */
+    private float jx;
+    private float jy;
+    /** HUD panel gradients, keyed by their top and bottom, so a fixed panel never rebuilds one. */
+    private final android.graphics.LinearGradient[] panelShaders = new android.graphics.LinearGradient[12];
+    private final float[] panelTop = new float[12];
+    private final float[] panelBottom = new float[12];
+    private int panelNext;
+    /** Text widths measured as they are drawn, for the backing panels on the next frame. */
+    private float leftBlockW = 300f;
+    private float rightBlockW = 160f;
+    private float gaugeSubW = 150f;
+    private float callW = 260f;
+
+    private static final int OUTLINE = 0xFF161B24;
+    private static final int TROUSERS = 0xFF2A2F3A;
+    private static final int SKIN_SHADE = 0xFFC9975C;
+    private static final int[] SPECTATORS = {0xFF243042, 0xFF3A2C3E, 0xFF2E3A2C, 0xFF40322A, 0xFF1E2A3A, 0xFF35343C};
+    private static final int[] HAIR = {0xFF16120F, 0xFF2B1D14, 0xFF4A3220, 0xFF1C1C22, 0xFF5E4630};
     private Phase lastPhase = Phase.READY;
     private double endedAt;
     private float heave;
@@ -875,14 +920,20 @@ final class TugOfWarGame extends GameView {
         float mx = mid + travel * (float) position;
         drawField(c, w, h, ropeY, mid, mx, watts, them, team, dt);
         paint.setStyle(Paint.Style.FILL);
-        // Win lines.
-        paint.setStrokeWidth(dp(3f));
+        // Win lines: stakes driven in where the painted lines cross the pullers' row.
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(4f));
+        paint.setColor(0x55000000);
+        c.drawLine(mid + travel + dp(2f), ropeY + dp(61f), mid + travel + dp(12f), ropeY + dp(70f), paint);
+        c.drawLine(mid - travel - dp(2f), ropeY + dp(61f), mid - travel - dp(12f), ropeY + dp(70f), paint);
+        paint.setStrokeWidth(dp(3.5f));
         paint.setColor(ACCENT);
-        c.drawLine(mid + travel, ropeY - dp(30f), mid + travel, ropeY + dp(30f), paint);
+        c.drawLine(mid + travel, ropeY - dp(30f), mid + travel, ropeY + dp(60f), paint);
         paint.setColor(BAD);
-        c.drawLine(mid - travel, ropeY - dp(30f), mid - travel, ropeY + dp(30f), paint);
+        c.drawLine(mid - travel, ropeY - dp(30f), mid - travel, ropeY + dp(60f), paint);
         paint.setColor(0xFF2A3648);
         c.drawLine(mid, ropeY - dp(16f), mid, ropeY + dp(16f), paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
         // Marker: a flag tied to the middle of the rope.
         paint.setColor(0xFFE0E0E0);
         c.drawRect(mx - dp(1.5f), ropeY - dp(40f), mx + dp(1.5f), ropeY + dp(4f), paint);
@@ -896,9 +947,18 @@ final class TugOfWarGame extends GameView {
         c.drawPath(rope, paint);
         fx.draw(c);
 
+        // Backing panels for both readouts, sized from the widths measured last frame, so the
+        // captions read against the pitch instead of vanishing into the grass.
+        tmp.set(right - dp(10f) - rightBlockW - dp(14f), ropeY - dp(86f), right + dp(4f), ropeY - dp(22f));
+        panel(c, tmp, dp(10f), 0xA8);
+        boolean eventLine = themEventMul < 0.97f || themEventMul > 1.03f;
+        tmp.set(left - dp(4f), ropeY - dp(86f), left + dp(10f) + leftBlockW + dp(14f),
+                ropeY - dp(50f) + (eventLine ? dp(50f) : dp(37f)));
+        panel(c, tmp, dp(10f), 0xA8);
         // Your side: what is actually on the rope, and the anchor gauge under it.
-        bold(c, Math.round(yours) + " W", right - dp(10f), ropeY - dp(50f), 30f,
-                comebackBoost > 0 ? WARN : ACCENT, Paint.Align.RIGHT);
+        String yw = Math.round(yours) + " W";
+        bold(c, yw, right - dp(10f), ropeY - dp(50f), 30f, comebackBoost > 0 ? WARN : ACCENT, Paint.Align.RIGHT);
+        float rw = textPaint.measureText(yw);
         String mine = "YOU";
         if (comebackBoost > 0) {
             mine = "COMEBACK +35%  ·  " + String.format(java.util.Locale.US, "%.1f s", comebackBoost);
@@ -906,18 +966,22 @@ final class TugOfWarGame extends GameView {
             mine = league.rank() + "  +" + Math.round(league.rankBonus() * 100) + "%  ·  " + watts + " W RAW";
         }
         label(c, mine, right - dp(10f), ropeY - dp(50f) + dp(16f), 9f,
-                comebackBoost > 0 ? WARN : FAINT, Paint.Align.RIGHT);
+                comebackBoost > 0 ? WARN : DIM, Paint.Align.RIGHT);
+        rightBlockW = Math.max(rw, dimPaint.measureText(mine));
         drawAnchorGauge(c, right - dp(10f), ropeY - dp(170f));
         // Their side: name, how they pull, and what they are doing right now.
-        bold(c, Math.round(them) + " W", left + dp(10f), ropeY - dp(50f), 30f, team.shirt, Paint.Align.LEFT);
+        String tw = Math.round(them) + " W";
+        bold(c, tw, left + dp(10f), ropeY - dp(50f), 30f, team.shirt, Paint.Align.LEFT);
+        float lw = textPaint.measureText(tw);
         String who = leagueMode() ? league.divisionName() + "  ·  MATCHDAY " + (league.matchday() + 1)
                 + " / " + TugOfWarLeague.FIXTURES
                 : cup() ? ROUND_NAMES[Math.min(2, cupRound)]
                 : "LEVEL " + level + " " + LEVEL_NAMES[level - 1];
         float shown = team.share * (leagueMode() ? league.divisionStrength() : 1f);
-        label(c, team.name + "  ·  " + who + "  ·  " + Math.round(shown * 100) + "% OF YOUR "
-                        + Math.round(profile.typicalWatts()) + " W",
-                left + dp(10f), ropeY - dp(50f) + dp(16f), 9f, FAINT, Paint.Align.LEFT);
+        String whoLine = team.name + "  ·  " + who + "  ·  " + Math.round(shown * 100) + "% OF YOUR "
+                + Math.round(profile.typicalWatts()) + " W";
+        label(c, whoLine, left + dp(10f), ropeY - dp(50f) + dp(16f), 9f, DIM, Paint.Align.LEFT);
+        lw = Math.max(lw, dimPaint.measureText(whoLine));
         String motto = team.motto;
         int h2hW = league.rivalWins(matchTeam);
         int h2hL = league.rivalLosses(matchTeam);
@@ -926,6 +990,7 @@ final class TugOfWarGame extends GameView {
         }
         label(c, motto, left + dp(10f), ropeY - dp(50f) + dp(29f), 9f,
                 league.nemesis(matchTeam) ? BAD : DIM, Paint.Align.LEFT);
+        leftBlockW = Math.max(lw, dimPaint.measureText(motto));
         if (themEventMul < 0.97f) {
             label(c, "THEY'RE BLOWING AFTER THAT HOLD", left + dp(10f), ropeY - dp(50f) + dp(42f), 9f,
                     ACCENT, Paint.Align.LEFT);
@@ -935,8 +1000,15 @@ final class TugOfWarGame extends GameView {
         if (teamCall != null) {
             float pulse = teamCallUrgent ? 0.6f + 0.4f * (float) Math.abs(Math.sin(sessionSeconds * 6)) : 1f;
             int a = (int) (255 * pulse);
+            // A soft dark pool behind it: the call sits right on the sunlit far grass.
+            float px0 = left + dp(10f) + callW * 0.5f;
+            c.save();
+            c.scale(Math.max(1f, callW / dp(90f)), 1f, px0, ropeY - dp(102f));
+            Fx.glow(c, px0, ropeY - dp(102f), dp(56f), 0x90060B12);
+            c.restore();
             bold(c, teamCall, left + dp(10f), ropeY - dp(96f), 17f,
                     (a << 24) | ((teamCallUrgent ? WARN : TEXT) & 0x00FFFFFF), Paint.Align.LEFT);
+            callW = textPaint.measureText(teamCall);
         }
 
         boolean showBracket = cup() && phase != Phase.PULLING && phase != Phase.REST;
@@ -955,6 +1027,11 @@ final class TugOfWarGame extends GameView {
             }
             titleY = by + bh + dp(34f);
         }
+        // A soft dark pool behind the title, its caption and the score, so they read over the sky.
+        c.save();
+        c.scale(4.6f, 1f, w / 2f, titleY + dp(12f));
+        Fx.glow(c, w / 2f, titleY + dp(12f), dp(72f), 0x90060B12);
+        c.restore();
         // Best of three, the anchor round's clock and the comeback meter stack under the title,
         // which moves down when the bracket or the table is up.
         if (!showBracket && !showTable) {
@@ -1049,7 +1126,7 @@ final class TugOfWarGame extends GameView {
                 }
         }
         bold(c, big, w / 2f, titleY, phase == Phase.PULLING ? 48f : 30f, col, Paint.Align.CENTER);
-        label(c, cap, w / 2f, titleY + dp(20f), 10f, FAINT, Paint.Align.CENTER);
+        label(c, cap, w / 2f, titleY + dp(20f), 10f, DIM, Paint.Align.CENTER);
 
         if (phase != Phase.PULLING) {
             drawModeButton(c, w);
@@ -1103,21 +1180,40 @@ final class TugOfWarGame extends GameView {
 
     private static final int[] CONFETTI = {0xFF35D0BA, 0xFFF0B132, 0xFF6F8CFF, 0xFFF0655D, 0xFFFFFFFF};
 
-    /** Sky, crowd, grass, mud pit, the rope with its sag, and both teams heaving. */
+    /**
+     * Sky, hills, crowd, a mown pitch in perspective with its markings, the mud pit, the rope with
+     * its sag, both teams heaving, and the near-side crowd behind a pitch-side board.
+     *
+     * <p>3.25.0 graphics pass: the lower half of this screen was the largest flat area in the app -
+     * one green with nothing in it. It is now a pitch that recedes: mown stripes converging on a
+     * vanishing point above the horizon, painted touch lines, centre line and win lines, the
+     * anchor round's HOLD and BREAK pegged on the grass, grass tufts, and a crowd in the foreground.
+     * Every gradient and path that depends only on the view size is built once in
+     * {@link #buildScene}.
+     */
     private void drawField(Canvas c, float w, float h, float ropeY, float mid, float mx, int watts, float them,
                            Team team, float dt) {
         float ground = ropeY + dp(60f);
         float horizon = ropeY - dp(112f);
-        if (skyShader == null || skyHeight != horizon) {
-            skyHeight = horizon;
-            skyShader = new android.graphics.LinearGradient(0, 0, 0, horizon, 0xFF1B1036, 0xFFE0875A,
-                    android.graphics.Shader.TileMode.CLAMP);
+        float bankTop = horizon - dp(46f);
+        float travel = w * 0.2f;
+        if (w != builtW || h != builtH) {
+            buildScene(w, h, horizon, ground, mid);
         }
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
         c.drawRect(0, 0, w, horizon, paint);
         paint.setShader(null);
+        drawSkyLife(c, w, horizon, bankTop);
+        // The low sun, half behind the hills, and the hills themselves in two hazy layers.
+        Fx.glow(c, w * 0.5f, bankTop, dp(230f), 0x55FFC080);
+        paint.setColor(0xFFFFE2B0);
+        c.drawCircle(w * 0.5f, bankTop - dp(2f), dp(26f), paint);
+        paint.setColor(0xFF9C6F8E);
+        c.drawPath(hillFar, paint);
+        paint.setColor(0xFF5E4C70);
+        c.drawPath(hillNear, paint);
         Fx.glow(c, w * 0.5f, horizon, dp(160f), 0x66FFB36B);
 
         // The crowd: each half follows its own team, and gets louder as that team's lead grows.
@@ -1126,23 +1222,75 @@ final class TugOfWarGame extends GameView {
         yourLoud += (yourTarget - yourLoud) * Math.min(1f, dt * 2f);
         theirLoud += (theirTarget - theirLoud) * Math.min(1f, dt * 2f);
         float cheer = Math.max(0.2f, Math.max(yourLoud, theirLoud));
-        float bankTop = horizon - dp(46f);
         scenery.drawBank(c, w, bankTop, horizon, sessionSeconds * 0.3, dp(20f), sessionSeconds, cheer);
         drawCrowdNoise(c, w, bankTop, horizon, team, dt);
 
-        paint.setColor(0xFF3E6B35);
+        // The pitch: lit and hazy at the far end, dark and saturated near the viewer, mown in a
+        // checker of stripes running away and bands across.
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(groundShader);
         c.drawRect(0, horizon, w, h, paint);
-        paint.setColor(0xFF4C7F40);
-        for (int i = 0; i < 9; i++) {
-            float y = horizon + (h - horizon) * (i / 9f);
-            c.drawRect(0, y, w, y + dp(1.5f) + i * dp(0.4f), paint);
+        paint.setShader(null);
+        paint.setColor(0x1CF6FFD8);
+        c.drawPath(stripePath, paint);
+        paint.setColor(0x16000000);
+        c.drawPath(bandPath, paint);
+        // Low sunlight spilling across the far grass.
+        c.save();
+        c.scale(4.5f, 1f, w * 0.5f, horizon + dp(8f));
+        Fx.glow(c, w * 0.5f, horizon + dp(8f), dp(110f), 0x44FFC080);
+        c.restore();
+
+        // Painted markings, under the mud.
+        float yFar = horizon + dp(16f);
+        float yNear = Math.min(ground + dp(118f), h - dp(160f));
+        float side = travel + dp(300f);
+        paint.setColor(0xB0F2EFE2);
+        groundLine(c, mid - side, yFar, yNear, dp(2.4f));
+        groundLine(c, mid + side, yFar, yNear, dp(2.4f));
+        crossLine(c, mid - side, mid + side, yFar, dp(1.4f));
+        crossLine(c, mid - side, mid + side, yNear, dp(2.2f));
+        groundLine(c, mid, yFar, yNear, dp(3f));
+        // The win lines, painted in the same colours as their stakes on the rope.
+        paint.setColor((0xC8 << 24) | (ACCENT & 0x00FFFFFF));
+        groundLine(c, mid + travel, yFar, yNear, dp(3.2f));
+        paint.setColor((0xC8 << 24) | (BAD & 0x00FFFFFF));
+        groundLine(c, mid - travel, yFar, yNear, dp(3.2f));
+        if (roundActive) {
+            // The anchor round pegged on the grass: a solid HOLD line, a dashed BREAK line.
+            float hx = mid + travel * (float) roundLine;
+            float kx = mid + travel * (float) (roundLine - ROUND_SLACK);
+            paint.setColor((0xE0 << 24) | (BLUE & 0x00FFFFFF));
+            groundLine(c, hx, yFar, yNear, dp(3.4f));
+            paint.setColor((0xE0 << 24) | (BAD & 0x00FFFFFF));
+            int dashes = 14;
+            for (int i = 0; i < dashes; i += 2) {
+                float a = yFar + (yNear - yFar) * i / dashes;
+                float b = yFar + (yNear - yFar) * (i + 1) / dashes;
+                groundLine(c, kx, a, b, dp(3.4f));
+            }
         }
-        // Mud pit under the centre line.
+        drawGrass(c, w, h, mid, ground);
+
+        // Mud pit under the centre line: churned rim, wet dark middle, the sky caught in it.
         float pitHalf = dp(110f);
-        paint.setColor(0xFF5A3B22);
-        c.drawOval(mid - pitHalf, ground - dp(14f), mid + pitHalf, ground + dp(26f), paint);
-        paint.setColor(0xFF6E4A2B);
-        c.drawOval(mid - dp(80f), ground - dp(8f), mid + dp(70f), ground + dp(14f), paint);
+        c.save();
+        c.translate(mid, ground + dp(6f));
+        c.scale(1f, 21f / 118f);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(pitShader);
+        c.drawCircle(0, 0, dp(118f), paint);
+        paint.setShader(null);
+        c.restore();
+        float sheen = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * 1.3);
+        paint.setColor(((int) (40 + 40 * sheen) << 24) | 0xF0A060);
+        c.drawOval(mid - dp(52f), ground + dp(1f), mid + dp(40f), ground + dp(10f), paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1.5f));
+        paint.setColor(((int) (50 + 60 * sheen) << 24) | 0xFFE6C8);
+        tmp.set(mid - dp(40f), ground + dp(2f), mid + dp(24f), ground + dp(9f));
+        c.drawArc(tmp, 200f, 120f, false, paint);
+        paint.setStyle(Paint.Style.FILL);
         drawSplats(c, dt);
 
         // A heave on every stroke, easing off between.
@@ -1177,26 +1325,6 @@ final class TugOfWarGame extends GameView {
         }
         double sinceEnd = sessionSeconds - endedAt;
 
-        // Rope: hands on each side, sagging a little between the teams.
-        float yourHands = mx + dp(90f);
-        float theirHands = mx - dp(90f);
-        // The rope answers the pull: slack between strokes, snapping taut on the heave, with a
-        // shudder running along it. A rope that never moves is what made this the stillest
-        // screen measured - 0.92 motion against 4.13 for Collector.
-        float taut = Math.max(snap, theirSnap);
-        float sag = dp(10f) - taut * dp(9f);
-        float shudder = taut * dp(3.5f) * (float) Math.sin(sessionSeconds * 34);
-        rope.rewind();
-        rope.moveTo(theirHands - dp(260f), ropeY + dp(2f) - shudder);
-        rope.quadTo((theirHands + mx) / 2f, ropeY + sag + shudder, mx, ropeY - taut * dp(2f));
-        rope.quadTo((yourHands + mx) / 2f, ropeY + sag - shudder,
-                yourHands + dp(260f), ropeY + dp(2f) + shudder);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(5f));
-        paint.setColor(0xFFB89A62);
-        c.drawPath(rope, paint);
-        paint.setStyle(Paint.Style.FILL);
-
         // Who is on the floor: the match loser stays down, but between pulls the side that lost that
         // one picks itself up again before the next.
         float yourFall = phase == Phase.LOST ? (float) Math.min(1, sinceEnd * 2) : 0f;
@@ -1210,7 +1338,84 @@ final class TugOfWarGame extends GameView {
                 yourFall = f;
             }
         }
-        for (int k = 0; k < 3; k++) {
+
+        // Rope: through every fist on each side, sagging between the teams, the free ends lying on
+        // the grass behind each anchor. It answers the pull: slack between strokes, snapping taut on
+        // the heave, with a shudder running along it. A rope that never moves is what made this the
+        // stillest screen measured - 0.92 motion against 4.13 for Collector.
+        float yourHands = mx + dp(90f);
+        float theirHands = mx - dp(90f);
+        float taut = Math.max(snap, theirSnap);
+        float slack = 1f - taut;
+        float sag = dp(3f) + slack * dp(24f);
+        float sagIn = dp(1f) + slack * dp(4.5f);
+        float shudder = taut * dp(3.5f) * (float) Math.sin(sessionSeconds * 34);
+        float markY = ropeY - taut * dp(2f);
+        float yL = ropeY + theirFall * dp(30f);
+        float yR = ropeY + yourFall * dp(30f);
+        float l0 = theirHands + dp(3f);           // their front fist
+        float r0 = yourHands - dp(3f);            // your front fist
+        float grip = dp(78f);
+        ropeSpan.rewind();
+        ropeSpan.moveTo(l0 - 2 * grip, yL);
+        ropeSpan.quadTo(l0 - 1.5f * grip, yL + sagIn, l0 - grip, yL);
+        ropeSpan.quadTo(l0 - 0.5f * grip, yL + sagIn, l0, yL);
+        ropeSpan.quadTo((l0 + mx) / 2f, (yL + markY) / 2f + sag + shudder, mx, markY);
+        ropeSpan.quadTo((r0 + mx) / 2f, (yR + markY) / 2f + sag - shudder, r0, yR);
+        ropeSpan.quadTo(r0 + 0.5f * grip, yR + sagIn, r0 + grip, yR);
+        ropeSpan.quadTo(r0 + 1.5f * grip, yR + sagIn, r0 + 2 * grip, yR);
+        // The tails drop from the last fist and lie on the grass.
+        float lt = l0 - 2 * grip;
+        float rt = r0 + 2 * grip;
+        float swing = shudder * 0.6f;
+        rope.rewind();
+        rope.moveTo(lt, yL);
+        rope.quadTo(lt - dp(46f) + swing, yL + dp(6f), lt - dp(70f), ground + dp(2f));
+        rope.quadTo(lt - dp(95f), ground + dp(9f), lt - dp(140f), ground + dp(6f));
+        rope.moveTo(rt, yR);
+        rope.quadTo(rt + dp(46f) + swing, yR + dp(6f), rt + dp(70f), ground + dp(2f));
+        rope.quadTo(rt + dp(95f), ground + dp(9f), rt + dp(140f), ground + dp(6f));
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        // The span's shadow, thrown toward the viewer on the grass.
+        c.save();
+        c.translate(dp(6f), ground - ropeY + dp(10f));
+        paint.setStrokeWidth(dp(6f));
+        paint.setColor(0x33000000);
+        c.drawPath(ropeSpan, paint);
+        c.restore();
+        // Under, body, twist, then a highlight along the top.
+        for (int pass = 0; pass < 2; pass++) {
+            android.graphics.Path p = pass == 0 ? rope : ropeSpan;
+            paint.setStrokeWidth(dp(7.5f));
+            paint.setColor(0xFF5E4728);
+            c.drawPath(p, paint);
+            paint.setStrokeWidth(dp(5.4f));
+            paint.setColor(mix(0xFFC2A066, 0xFFDCC28A, taut));
+            c.drawPath(p, paint);
+            paint.setPathEffect(twist);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            paint.setStrokeWidth(dp(5.4f));
+            paint.setColor(0x70745A32);
+            c.drawPath(p, paint);
+            paint.setPathEffect(null);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            c.save();
+            c.translate(0, -dp(1.4f));
+            paint.setStrokeWidth(dp(1.6f));
+            paint.setColor(((int) (110 + 90 * taut) << 24) | 0xFFF4D6);
+            c.drawPath(p, paint);
+            c.restore();
+        }
+        // Whipped ends: a knot on each tail.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF8E7244);
+        c.drawCircle(lt - dp(140f), ground + dp(6f), dp(4.5f), paint);
+        c.drawCircle(rt + dp(140f), ground + dp(6f), dp(4.5f), paint);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+
+        // Back pullers first, so each one in front overlaps the one behind it.
+        for (int k = 2; k >= 0; k--) {
             float yx = yourHands + dp(27f) + k * dp(78f);
             float tx = theirHands - dp(27f) - k * dp(78f);
             // The last of your three is the anchor: it braces when the rate is steady.
@@ -1277,6 +1482,269 @@ final class TugOfWarGame extends GameView {
             }
         }
         fx.step(dt, dp(260f));
+
+        drawMotes(c, w, horizon, ground);
+        drawNearCrowd(c, w, h, team);
+        // Pitch-side board along the bottom: the stats and the strength bar sit on it.
+        tmp.set(-dp(12f), h - dp(88f), w + dp(12f), h + dp(12f));
+        panel(c, tmp, 0f, 0xF0);
+        paint.setColor(0x40000000);
+        paint.setStrokeWidth(dp(1f));
+        c.drawLine(w * 0.25f, h - dp(84f), w * 0.25f, h, paint);
+        c.drawLine(w * 0.75f, h - dp(84f), w * 0.75f, h, paint);
+        paint.setColor(0xFFFFFFFF);
+        paint.setShader(vignetteShader);
+        c.drawRect(0, 0, w, h, paint);
+        paint.setShader(null);
+    }
+
+    /**
+     * Everything on the field that depends only on the view size: sky, ground and pit gradients,
+     * the vignette, the mown stripes and bands, and the two hill silhouettes.
+     */
+    private void buildScene(float w, float h, float horizon, float ground, float mid) {
+        builtW = w;
+        builtH = h;
+        float bankTop = horizon - dp(46f);
+        skyShader = new android.graphics.LinearGradient(0, 0, 0, horizon,
+                new int[] {0xFF120A2A, 0xFF35204F, 0xFF9A4F66, 0xFFE58A5A, 0xFFF4B070},
+                new float[] {0f, 0.32f, 0.66f, 0.88f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+        groundShader = new android.graphics.LinearGradient(0, horizon, 0, h,
+                new int[] {0xFF8A9A55, 0xFF5A8A42, 0xFF3C6B33, 0xFF22421D},
+                new float[] {0f, 0.12f, 0.45f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+        pitShader = new android.graphics.RadialGradient(0, 0, dp(118f),
+                new int[] {0xFF2A190D, 0xFF3F2715, 0xFF5A3B22, 0xFF7A5634, 0x007A5634},
+                new float[] {0f, 0.4f, 0.72f, 0.9f, 1f}, android.graphics.Shader.TileMode.CLAMP);
+        vignetteShader = new android.graphics.RadialGradient(w * 0.5f, h * 0.45f, Math.max(w, h) * 0.72f,
+                new int[] {0x00000000, 0x00000000, 0x66000000}, new float[] {0f, 0.6f, 1f},
+                android.graphics.Shader.TileMode.CLAMP);
+        twist = new android.graphics.DashPathEffect(new float[] {dp(3f), dp(4.5f)}, 0f);
+
+        vpX = mid;
+        vpY = horizon - dp(240f);
+        groundRow = ground;
+        // Stripes run away from the viewer: wedges through the vanishing point, every other one lit.
+        float stripe = dp(92f);
+        float sTop = persp(horizon);
+        float sBot = persp(h);
+        int n = (int) Math.ceil(w * 0.5f / (stripe * sTop)) + 1;
+        stripePath.rewind();
+        for (int i = -n; i < n; i += 2) {
+            float a = i * stripe;
+            float b = (i + 1) * stripe;
+            stripePath.moveTo(vpX + a * sTop, horizon);
+            stripePath.lineTo(vpX + b * sTop, horizon);
+            stripePath.lineTo(vpX + b * sBot, h);
+            stripePath.lineTo(vpX + a * sBot, h);
+            stripePath.close();
+        }
+        // Bands across, closer together toward the horizon.
+        bandPath.rewind();
+        int bands = 10;
+        for (int k = 0; k < bands; k += 2) {
+            float y0 = horizon + (h - horizon) * (float) Math.pow(k / (double) bands, 1.6);
+            float y1 = horizon + (h - horizon) * (float) Math.pow((k + 1) / (double) bands, 1.6);
+            bandPath.addRect(0, y0, w, y1, android.graphics.Path.Direction.CW);
+        }
+        // Hills: the far range paler and pinker in the haze, the near one darker.
+        hillFar.rewind();
+        hillFar.moveTo(0, horizon);
+        hillNear.rewind();
+        hillNear.moveTo(0, horizon);
+        float step = dp(24f);
+        for (float x = 0; x <= w + step; x += step) {
+            double u = x / dp(1f);
+            float far = bankTop - dp(6f) - dp(26f) * (float) (0.5 + 0.5 * Math.sin(u * 0.0042 + 0.6))
+                    - dp(9f) * (float) Math.sin(u * 0.013 + 1.7);
+            float near = bankTop + dp(10f) - dp(16f) * (float) (0.5 + 0.5 * Math.sin(u * 0.0066 + 2.4))
+                    - dp(5f) * (float) Math.sin(u * 0.021);
+            // A valley in the middle for the sun to set into, clear of the score above it.
+            double v = (x - w * 0.5f) / dp(170f);
+            float valley = (float) Math.exp(-v * v);
+            hillFar.lineTo(x, far + dp(16f) * valley);
+            hillNear.lineTo(x, near + dp(13f) * valley);
+        }
+        hillFar.lineTo(w + step, horizon);
+        hillFar.close();
+        hillNear.lineTo(w + step, horizon);
+        hillNear.close();
+    }
+
+    /** How much bigger the world is at screen height {@code y} than on the pullers' row. */
+    private float persp(float y) {
+        return (y - vpY) / (groundRow - vpY);
+    }
+
+    /** A line painted on the grass, running away from the viewer through {@code xAtRow} on the pullers' row. */
+    private void groundLine(Canvas c, float xAtRow, float yFar, float yNear, float halfW) {
+        float sF = persp(yFar);
+        float sN = persp(yNear);
+        float xF = vpX + (xAtRow - vpX) * sF;
+        float xN = vpX + (xAtRow - vpX) * sN;
+        shape.rewind();
+        shape.moveTo(xF - halfW * sF, yFar);
+        shape.lineTo(xF + halfW * sF, yFar);
+        shape.lineTo(xN + halfW * sN, yNear);
+        shape.lineTo(xN - halfW * sN, yNear);
+        shape.close();
+        c.drawPath(shape, paint);
+    }
+
+    /** A line painted across the grass at depth {@code y}, between two that run away from the viewer. */
+    private void crossLine(Canvas c, float xL, float xR, float y, float halfH) {
+        float s = persp(y);
+        c.drawRect(vpX + (xL - vpX) * s, y - halfH * s, vpX + (xR - vpX) * s, y + halfH * s, paint);
+    }
+
+    /** Stars in the dusk, and long clouds lit from underneath drifting across. */
+    private void drawSkyLife(Canvas c, float w, float horizon, float bankTop) {
+        paint.setStyle(Paint.Style.FILL);
+        for (int i = 0; i < 26; i++) {
+            float sx = (float) ((i * 0.6180339887) % 1.0) * w;
+            float sy = (float) ((i * 0.7548776662 + 0.1) % 1.0) * horizon * 0.42f;
+            int a = (int) (70 + 60 * Math.sin(sessionSeconds * (1.1 + (i % 5) * 0.3) + i * 2.1));
+            paint.setColor((a << 24) | 0xF4F0FF);
+            c.drawCircle(sx, sy, dp(i % 4 == 0 ? 1.6f : 1.1f), paint);
+        }
+        float span = w + dp(500f);
+        for (int i = 0; i < 6; i++) {
+            float cx = (float) ((i * 0.41 * span + sessionSeconds * dp(4f + 1.5f * i)) % span) - dp(250f);
+            float cy = horizon * (0.2f + 0.12f * i);
+            if (cy > bankTop - dp(24f)) {
+                cy = bankTop - dp(24f) - i * dp(6f);
+            }
+            float cw = dp(170f + 60f * (i % 3));
+            float ch = dp(9f + 4f * (i % 2));
+            float lit = (float) i / 5f;  // lower clouds catch more of the sun
+            int under = mix(0xFF8A5C9A, 0xFFFFB27A, lit);
+            paint.setColor((0x50 << 24) | (mix(0xFF4A3466, 0xFFB27090, lit) & 0x00FFFFFF));
+            tmp.set(cx - cw * 0.5f, cy - ch, cx + cw * 0.5f, cy + ch * 0.4f);
+            c.drawRoundRect(tmp, ch, ch, paint);
+            tmp.set(cx - cw * 0.22f, cy - ch * 1.9f, cx + cw * 0.18f, cy);
+            c.drawRoundRect(tmp, ch, ch, paint);
+            paint.setColor((0x70 << 24) | (under & 0x00FFFFFF));
+            tmp.set(cx - cw * 0.42f, cy + ch * 0.05f, cx + cw * 0.46f, cy + ch * 0.55f);
+            c.drawRoundRect(tmp, ch * 0.3f, ch * 0.3f, paint);
+        }
+    }
+
+    /** Tufts of uncut grass and the odd daisy across the near field, nodding in the breeze. */
+    private void drawGrass(Canvas c, float w, float h, float mid, float ground) {
+        float top = ground + dp(14f);
+        float bottom = h - dp(118f);
+        if (bottom <= top) {
+            return;
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        for (int i = 0; i < 40; i++) {
+            int hs = hash(i * 131 + 17);
+            float tx = (hs % 10007) / 10007f * w;
+            float ty = top + ((hs >>> 14) % 1000) / 1000f * (bottom - top);
+            if (Math.abs(tx - mid) < dp(140f) && ty < ground + dp(36f)) {
+                continue;   // not in the pit
+            }
+            float s = 0.7f + 0.9f * (ty - top) / (bottom - top);
+            float sway = (float) Math.sin(sessionSeconds * 1.6 + i * 0.7) * dp(2f) * s;
+            paint.setStrokeWidth(dp(1.8f) * s);
+            paint.setColor(0xFF2A5424);
+            c.drawLine(tx, ty, tx - dp(4f) * s + sway, ty - dp(9f) * s, paint);
+            c.drawLine(tx, ty, tx + dp(4.5f) * s + sway, ty - dp(8f) * s, paint);
+            paint.setColor(0xFF6E9A48);
+            c.drawLine(tx, ty, tx + sway, ty - dp(12f) * s, paint);
+            if (hs % 5 == 0) {
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(0xE6F6F2E4);
+                c.drawCircle(tx + sway, ty - dp(12.5f) * s, dp(2.2f) * s, paint);
+                paint.setColor(0xFFF0B132);
+                c.drawCircle(tx + sway, ty - dp(12.5f) * s, dp(0.9f) * s, paint);
+                paint.setStyle(Paint.Style.STROKE);
+            }
+        }
+        paint.setStrokeCap(Paint.Cap.BUTT);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** Dust and pollen hanging in the low sunlight over the pitch. */
+    private void drawMotes(Canvas c, float w, float horizon, float ground) {
+        paint.setStyle(Paint.Style.FILL);
+        float band = ground - horizon + dp(60f);
+        for (int i = 0; i < 22; i++) {
+            int hs = hash(i * 977 + 3);
+            float speed = dp(6f + (hs % 9));
+            float x = (float) (((hs % 10007) / 10007.0 * w + sessionSeconds * speed) % w);
+            float y = horizon - dp(30f) + ((hs >>> 12) % 1000) / 1000f * band
+                    + (float) Math.sin(sessionSeconds * 0.9 + i) * dp(6f);
+            int a = (int) (60 + 50 * Math.sin(sessionSeconds * 2.0 + i * 1.3));
+            paint.setColor((a << 24) | 0xFFE6B0);
+            c.drawCircle(x, y, dp(1.7f), paint);
+        }
+    }
+
+    /**
+     * The near-side crowd, seen from behind against the pitch: backlit heads and shoulders behind
+     * the board. Each half cheers its own team, like the far bank - jumping, arms up, scarves high.
+     */
+    private void drawNearCrowd(Canvas c, float w, float h, Team team) {
+        float boardTop = h - dp(88f);
+        float gap = dp(46f);
+        int n = (int) (w / gap) + 2;
+        for (int i = 0; i < n; i++) {
+            int hs = hash(i * 31 + 7);
+            if (hs % 11 == 3) {
+                continue;   // a gap in the row
+            }
+            float x = i * gap + ((hs >>> 3) % 9 - 4) * dp(1.6f);
+            boolean yours = x > w * 0.5f;
+            float loud = yours ? yourLoud : theirLoud;
+            int teamColour = yours ? ACCENT : team.shirt;
+            int base = (hs >>> 9) % 3 == 0 ? mix(teamColour, 0xFF0A0E14, 0.5f)
+                    : SPECTATORS[(hs >>> 5) % SPECTATORS.length];
+            float bob = loud * (float) Math.abs(Math.sin(sessionSeconds * 6.5 + i * 1.7)) * dp(7f);
+            float top = boardTop - dp(26f) - ((hs >>> 12) % 4) * dp(3f) - bob;
+            if (loud > 0.4f && ((hs >>> 14) & 1) == 0) {
+                float wave = (float) Math.sin(sessionSeconds * 8 + i) * dp(4f);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                paint.setStrokeWidth(dp(6.5f));
+                paint.setColor(base);
+                c.drawLine(x - dp(13f), top + dp(9f), x - dp(19f) + wave, top - dp(26f), paint);
+                c.drawLine(x + dp(13f), top + dp(9f), x + dp(19f) + wave, top - dp(26f), paint);
+                paint.setStrokeCap(Paint.Cap.BUTT);
+                paint.setStyle(Paint.Style.FILL);
+                if (loud > 0.6f && (hs >>> 16) % 3 == 0) {
+                    // A scarf held high between the fists.
+                    paint.setColor(teamColour);
+                    c.drawRect(x - dp(21f) + wave, top - dp(35f), x + dp(21f) + wave, top - dp(25f), paint);
+                    paint.setColor(0xDDFFFFFF);
+                    c.drawRect(x - dp(5f) + wave, top - dp(35f), x + dp(5f) + wave, top - dp(25f), paint);
+                }
+                paint.setColor(0xFFB98A58);
+                c.drawCircle(x - dp(19f) + wave, top - dp(28f), dp(4.2f), paint);
+                c.drawCircle(x + dp(19f) + wave, top - dp(28f), dp(4.2f), paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(base);
+            tmp.set(x - dp(20f), top, x + dp(20f), boardTop + dp(30f));
+            c.drawRoundRect(tmp, dp(15f), dp(15f), paint);
+            paint.setColor(HAIR[(hs >>> 18) % HAIR.length]);
+            c.drawCircle(x, top - dp(9f), dp(11.5f), paint);
+            if ((hs >>> 20) % 5 == 0) {
+                // A cap in the team's colour.
+                paint.setColor(mix(teamColour, 0xFF000000, 0.2f));
+                tmp.set(x - dp(12f), top - dp(22f), x + dp(12f), top);
+                c.drawArc(tmp, 180f, 180f, true, paint);
+            }
+            // Rim light from the low sun across the pitch.
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(2f));
+            paint.setColor(0x70FFC488);
+            tmp.set(x - dp(11.5f), top - dp(20.5f), x + dp(11.5f), top + dp(2.5f));
+            c.drawArc(tmp, 210f, 120f, false, paint);
+            tmp.set(x - dp(20f), top, x + dp(20f), top + dp(30f));
+            c.drawArc(tmp, 205f, 130f, false, paint);
+            paint.setStyle(Paint.Style.FILL);
+        }
     }
 
     /**
@@ -1423,6 +1891,9 @@ final class TugOfWarGame extends GameView {
             Fx.glow(c, cx, y, dp(44f), 0x886F8CFF);
         }
         int col = anchor > 0.99f ? BLUE : anchorSteady ? 0xFF9FB2FF : FAINT;
+        float bx = rightX - dp(160f);
+        tmp.set(bx - dp(12f), y - dp(26f), Math.max(rightX + dp(6f), bx + gaugeSubW + dp(12f)), y + dp(33f));
+        panel(c, tmp, dp(10f), 0xB0);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
         paint.setStrokeWidth(dp(3f));
@@ -1434,17 +1905,12 @@ final class TugOfWarGame extends GameView {
         c.drawArc(tmp, 20f, 140f, false, paint);
         paint.setStrokeCap(Paint.Cap.BUTT);
         // Fill bar beside it.
-        paint.setStyle(Paint.Style.FILL);
-        float bx = rightX - dp(160f);
-        float bw = dp(110f);
-        paint.setColor(0x55000000);
-        c.drawRect(bx, y + 2 * s, bx + bw, y + 10 * s, paint);
-        paint.setColor(col);
-        c.drawRect(bx, y + 2 * s, bx + bw * anchor, y + 10 * s, paint);
+        bar(c, bx, y + 2 * s, dp(110f), 8 * s, anchor, col);
         label(c, anchor > 0.99f ? "ANCHORED" : "ANCHOR", bx, y - 4 * s, 10f, col, Paint.Align.LEFT);
         String sub = rateSpread > 20 ? "hold a steady rate" : String.format(java.util.Locale.US,
                 "rate ±%.1f spm  ·  steady ≤ 2.5", rateSpread / 2f);
-        label(c, sub, bx, y + 24 * s, 8.5f, FAINT, Paint.Align.LEFT);
+        label(c, sub, bx, y + 24 * s, 8.5f, DIM, Paint.Align.LEFT);
+        gaugeSubW = dimPaint.measureText(sub);
     }
 
     /* ---------- best of three, anchor rounds, comebacks, the table ---------- */
@@ -1461,9 +1927,19 @@ final class TugOfWarGame extends GameView {
     }
 
     private void drawPip(Canvas c, float x, float y, boolean won, int colour) {
-        paint.setColor(won ? colour : 0xFF2A3648);
-        paint.setStyle(won ? Paint.Style.FILL : Paint.Style.STROKE);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(won ? mix(colour, 0xFF000000, 0.35f) : 0x99060B12);
+        c.drawCircle(x, y, dp(9f), paint);
+        if (won) {
+            Fx.glow(c, x, y, dp(20f), (0x60 << 24) | (colour & 0x00FFFFFF));
+            paint.setColor(colour);
+            c.drawCircle(x, y, dp(7.5f), paint);
+            paint.setColor(0x60FFFFFF);
+            c.drawCircle(x - dp(2.2f), y - dp(2.5f), dp(3f), paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
+        paint.setColor(won ? mix(colour, 0xFFFFFFFF, 0.3f) : 0xFF3A4A60);
         c.drawCircle(x, y, dp(8f), paint);
         paint.setStyle(Paint.Style.FILL);
     }
@@ -1480,9 +1956,11 @@ final class TugOfWarGame extends GameView {
             float margin = (float) Math.max(0, Math.min(1,
                     (position - (roundLine - ROUND_SLACK)) / ROUND_SLACK));
             int col = margin < 0.33f ? BAD : margin < 0.66f ? WARN : BLUE;
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xCC0E1420);
             tmp.set(cx - dp(215f), y - dp(28f), cx + dp(215f), y + dp(40f));
+            panel(c, tmp, dp(10f), 0xE0);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.5f));
+            paint.setColor((0x70 << 24) | (col & 0x00FFFFFF));
             c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
             // Countdown ring on the left of the panel.
             paint.setStyle(Paint.Style.STROKE);
@@ -1499,10 +1977,7 @@ final class TugOfWarGame extends GameView {
                     16f, col, Paint.Align.CENTER);
             float bx = cx - dp(126f);
             float bw = dp(300f);
-            paint.setColor(0x55000000);
-            c.drawRect(bx, y + dp(6f), bx + bw, y + dp(16f), paint);
-            paint.setColor(col);
-            c.drawRect(bx, y + dp(6f), bx + bw * margin, y + dp(16f), paint);
+            bar(c, bx, y + dp(6f), bw, dp(10f), margin, col);
             label(c, margin < 0.33f ? "THE LINE IS GOING"
                             : anchor < 0.5f ? "GET ANCHORED - HOLD A STEADY RATE"
                             : "slack left before the line breaks",
@@ -1511,11 +1986,13 @@ final class TugOfWarGame extends GameView {
             float hx = mid + travel * (float) roundLine;
             float kx = mid + travel * (float) (roundLine - ROUND_SLACK);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2f));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(dp(3f));
             paint.setColor(BLUE);
             c.drawLine(hx, ropeY - dp(46f), hx, ropeY + dp(26f), paint);
             paint.setColor(BAD);
             c.drawLine(kx, ropeY - dp(38f), kx, ropeY + dp(22f), paint);
+            paint.setStrokeCap(Paint.Cap.BUTT);
             paint.setStyle(Paint.Style.FILL);
             label(c, "HOLD", hx, ropeY - dp(50f), 8f, BLUE, Paint.Align.CENTER);
             label(c, "BREAK", kx, ropeY - dp(42f), 8f, BAD, Paint.Align.CENTER);
@@ -1550,11 +2027,8 @@ final class TugOfWarGame extends GameView {
         }
         float bw = dp(300f);
         float bx = cx - bw / 2f;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x66000000);
-        c.drawRect(bx, y, bx + bw, y + dp(14f), paint);
-        paint.setColor(WARN);
-        c.drawRect(bx, y, bx + bw * comeback, y + dp(14f), paint);
+        Fx.glow(c, bx + bw * comeback, y + dp(7f), dp(26f), 0x70F0B132);
+        bar(c, bx, y, bw, dp(14f), comeback, WARN);
         label(c, tauntedThisPull ? "COMEBACK - WIPE THAT GRIN OFF THEM"
                         : "COMEBACK - OUT-PULL THEM FROM BACK HERE",
                 cx, y - dp(6f), 9.5f, WARN, Paint.Align.CENTER);
@@ -1566,11 +2040,7 @@ final class TugOfWarGame extends GameView {
     private void drawStrengthBar(Canvas c, float w, float y) {
         float bw = dp(260f);
         float bx = w / 2f - bw / 2f;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x55000000);
-        c.drawRect(bx, y, bx + bw, y + dp(7f), paint);
-        paint.setColor(BLUE);
-        c.drawRect(bx, y, bx + bw * league.rankProgress(), y + dp(7f), paint);
+        bar(c, bx, y, bw, dp(7f), league.rankProgress(), BLUE);
         String next = league.nextRank();
         label(c, next == null ? "TITAN  ·  nothing above this"
                         : league.rank() + "  ·  " + Math.round(league.ratingToNext()) + " to " + next
@@ -1580,10 +2050,8 @@ final class TugOfWarGame extends GameView {
 
     /** The division table: four sides, points, and the up and down places marked. */
     private void drawLeagueTable(Canvas c, float x, float y, float bw, float bh) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xD90E1420);
         tmp.set(x, y, x + bw, y + bh);
-        c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+        panel(c, tmp, dp(10f), 0xE6);
         float pad = dp(12f);
         float head = y + pad + dp(14f);
         bold(c, "SEASON " + league.season() + "  ·  " + league.divisionName(), x + pad, head, 14f, WARN,
@@ -1641,13 +2109,11 @@ final class TugOfWarGame extends GameView {
         float bh = dp(46f);
         modeButton.set(w - bw - dp(12f), dp(12f), w - dp(12f), dp(12f) + bh);
         int col = cup() ? WARN : leagueMode() ? BLUE : ACCENT;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xCC0E1420);
-        c.drawRoundRect(modeButton, dp(8f), dp(8f), paint);
+        panel(c, modeButton, dp(10f), 0xE0);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.5f));
         paint.setColor(col);
-        c.drawRoundRect(modeButton, dp(8f), dp(8f), paint);
+        c.drawRoundRect(modeButton, dp(10f), dp(10f), paint);
         paint.setStyle(Paint.Style.FILL);
         bold(c, MODE_NAMES[mode], modeButton.centerX(), modeButton.centerY(), 13f, col, Paint.Align.CENTER);
         label(c, MODE_NEXT[mode], modeButton.centerX(), modeButton.centerY() + dp(14f), 8.5f, FAINT,
@@ -1656,10 +2122,8 @@ final class TugOfWarGame extends GameView {
 
     /** Eight teams, three rounds: quarter-finals, semis, final, champion. */
     private void drawBracket(Canvas c, float x, float y, float bw, float bh) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xD90E1420);
         tmp.set(x, y, x + bw, y + bh);
-        c.drawRoundRect(tmp, dp(10f), dp(10f), paint);
+        panel(c, tmp, dp(10f), 0xE6);
         float pad = dp(10f);
         float colW = (bw - pad * 2) / 4f;
         float rh = (bh - pad * 2) / 8f;
@@ -1739,49 +2203,200 @@ final class TugOfWarGame extends GameView {
         }
     }
 
-    /** A stick puller leaning back from the rope; {@code facing} +1 pulls right. */
+    /**
+     * One puller with a body: legs that bend at the knee, boots with the front heel dug in, a torso
+     * with weight that leans back with the heave, arms that reach the rope and fists on it.
+     * {@code facing} +1 pulls right. The low sun sits behind the far crowd, so the chest side (toward
+     * the rope and the centre) catches a rim of light and the back falls into shade.
+     */
     private void drawPuller(Canvas c, float x, float ground, int facing, float lean, int color, int seed, float fall,
                             int hat, float brace, boolean anchorMan) {
         // Drawn at 1.5x around the feet: hands land at ground - 60 dp, which is rope height.
         c.save();
         c.scale(1.5f, 1.5f, x, ground);
-        float len = dp(38f);
-        float hipX = x;
-        float hipY = ground - dp(30f) + fall * dp(22f) + brace * dp(4f);
-        float sx = hipX + facing * (float) Math.sin(lean) * len;
-        float sy = hipY - (float) Math.cos(lean) * len;
+        float f = facing;
+        float up = 1f - fall;
+        // How hard the heels are in: grows with the lean, so a heave visibly digs the boots.
+        float dig = Math.max(0f, Math.min(1f, (lean - 0.3f) / 0.9f)) * up;
+        float len = dp(36f);
+        float hipX = x + f * dig * dp(2.5f);
+        float hipY = ground - dp(30f) + fall * dp(22f) + brace * dp(4f) + dig * dp(6f);
+        float sinL = (float) Math.sin(lean);
+        float cosL = (float) Math.cos(lean);
+        float dx = f * sinL;
+        float dy = -cosL;
+        float sx = hipX + dx * len;
+        float sy = hipY + dy * len;
+        float nx = -f * cosL;     // the chest side
+        float ny = -sinL;
+        float frontFoot = x - f * (dp(18f) + brace * dp(8f));
+        float rearFoot = x - f * dp(4f) + f * brace * dp(6f);
+        float handX = x - f * dp(20f);
+        float handY = ground - dp(40f) + fall * dp(20f);
+        int dark = mix(color, 0xFF000000, 0.4f);
+        int light = mix(color, 0xFFFFFFFF, 0.45f);
+
+        // Shadows: a dark contact patch under the boots and a long soft one thrown toward the viewer.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x2A000000);
+        c.drawOval(x + f * dp(6f) - dp(22f), ground + dp(1f), x + f * dp(6f) + dp(22f), ground + dp(9f), paint);
+        paint.setColor(0x55000000);
+        c.drawOval(x - f * dp(8f) - dp(17f), ground - dp(2.5f), x - f * dp(8f) + dp(17f), ground + dp(3.5f), paint);
+
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeCap(Paint.Cap.ROUND);
-        paint.setStrokeWidth(dp(7f));
-        paint.setColor(0xFF2A2F3A);
-        // Legs braced toward the rope; an anchored puller plants them wider.
-        float frontFoot = hipX - facing * (dp(16f) + brace * dp(8f));
-        c.drawLine(hipX, hipY, frontFoot, ground, paint);
-        c.drawLine(hipX, hipY, hipX - facing * dp(4f) + facing * brace * dp(6f), ground, paint);
+        // Far leg, in shade.
+        float footY = ground - dp(2.5f);
+        joint(hipX, hipY, rearFoot, footY, dp(17.5f), -f, -0.4f);
+        paint.setStrokeWidth(dp(7.5f));
+        paint.setColor(0xFF1B1F27);
+        c.drawLine(hipX, hipY, jx, jy, paint);
+        c.drawLine(jx, jy, rearFoot, footY, paint);
+        drawBoot(c, rearFoot, ground, f, 4f, 0xFF2A1D14);
+        // Far arm, behind the body, hand just behind the near one on the rope.
+        float farHand = handX + f * dp(6f);
+        joint(sx, sy, farHand, handY, dp(21f), 0f, 1f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(5.5f));
+        paint.setColor(dark);
+        c.drawLine(sx, sy, jx, jy, paint);
+        paint.setStrokeWidth(dp(4.6f));
+        paint.setColor(SKIN_SHADE);
+        c.drawLine(jx, jy, farHand, handY, paint);
+        // Torso: an outline, the shirt, the shaded back and the sunlit chest.
+        paint.setStrokeWidth(dp(17.5f));
+        paint.setColor(OUTLINE);
+        c.drawLine(hipX, hipY, sx, sy, paint);
+        paint.setStrokeWidth(dp(15f));
         paint.setColor(color);
         c.drawLine(hipX, hipY, sx, sy, paint);
-        paint.setStrokeWidth(dp(5f));
-        paint.setColor(0xFFF1C27D);
-        float handX = hipX - facing * dp(20f);
-        float handY = ground - dp(40f) + fall * dp(20f);
-        c.drawLine(sx, sy, handX, handY, paint);
+        paint.setStrokeWidth(dp(5.5f));
+        paint.setColor(dark);
+        c.drawLine(hipX - nx * dp(3.8f), hipY - ny * dp(3.8f), sx - nx * dp(3.8f), sy - ny * dp(3.8f), paint);
+        paint.setStrokeWidth(dp(2.2f));
+        paint.setColor(light);
+        c.drawLine(hipX + nx * dp(5f) + dx * dp(3f), hipY + ny * dp(5f) + dy * dp(3f),
+                sx + nx * dp(5f), sy + ny * dp(5f), paint);
+        // Shorts.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(OUTLINE);
+        c.drawCircle(hipX, hipY, dp(8.8f), paint);
+        paint.setColor(TROUSERS);
+        c.drawCircle(hipX, hipY, dp(7.6f), paint);
+        // Near leg, braced toward the rope; an anchored puller plants it wider.
+        joint(hipX, hipY, frontFoot, footY, dp(18f), -f, -0.6f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(8f));
+        paint.setColor(TROUSERS);
+        c.drawLine(hipX, hipY, jx, jy, paint);
+        c.drawLine(jx, jy, frontFoot, footY, paint);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xFF4A5262);
+        c.drawLine(hipX + nx * dp(2.5f), hipY + ny * dp(2.5f), jx, jy - dp(2.5f), paint);
+        // The front boot, toe up and heel in, with a ridge of turf shoved up ahead of it.
+        drawBoot(c, frontFoot, ground, f, 18f + 14f * dig, 0xFF3B2A1E);
+        if (dig > 0.05f) {
+            float rx = frontFoot - f * dp(15f);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(((int) (190 * dig) << 24) | 0x5E4026);
+            c.drawOval(rx - dp(6f), ground - dp(1.5f) - dp(4f) * dig, rx + dp(6f), ground + dp(1.5f), paint);
+            paint.setColor(((int) (150 * dig) << 24) | 0x3E6B35);
+            c.drawCircle(rx - f * dp(2f), ground - dp(2f) - dp(3.5f) * dig, dp(2f), paint);
+        }
         if (anchorMan && brace > 0.3f) {
             // The rope wrapped round the anchor's waist, and the heel dug into a ridge of turf.
+            paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(dp(3.5f));
             paint.setColor(0xFFB89A62);
             c.drawLine(handX, handY, hipX, hipY - dp(3f), paint);
-            c.drawLine(hipX, hipY - dp(3f), hipX + facing * dp(9f), hipY + dp(4f), paint);
+            c.drawLine(hipX, hipY - dp(3f), hipX + f * dp(9f), hipY + dp(4f), paint);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(((int) (220 * brace) << 24) | 0x6B4A2C);
             c.drawOval(frontFoot - dp(9f), ground - dp(5f) * brace, frontFoot + dp(5f), ground + dp(2f), paint);
         }
+        // Neck and head: the chin tucks toward the rope rather than following the spine flat.
+        float headX = sx + f * dp(6f) * sinL;
+        float headY = sy - dp(4f) - cosL * dp(5.5f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(5.5f));
+        paint.setColor(SKIN_SHADE);
+        c.drawLine(sx, sy, headX, headY, paint);
         paint.setStyle(Paint.Style.FILL);
-        float headX = sx + facing * dp(6f) * (float) Math.sin(lean);
-        float headY = sy - dp(9f);
+        paint.setColor(OUTLINE);
+        c.drawCircle(headX, headY, dp(10.4f), paint);
         paint.setColor(0xFFF1C27D);
         c.drawCircle(headX, headY, dp(9f), paint);
+        paint.setColor(0x40000000);
+        c.drawCircle(headX + f * dp(2.5f), headY + dp(1.5f), dp(6.5f), paint);
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(headX - f * dp(1f), headY - dp(0.5f), dp(6.8f), paint);
+        paint.setColor(0xFF1B1F27);
+        c.drawCircle(headX - f * dp(5f), headY - dp(0.5f), dp(1.4f), paint);
         drawHat(c, hat, headX, headY, facing, color, seed);
+        // Near arm over everything, fist closed on the rope.
+        joint(sx, sy, handX, handY, dp(21f), 0f, 1f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(8f));
+        paint.setColor(OUTLINE);
+        c.drawLine(sx, sy, jx, jy, paint);
+        c.drawLine(jx, jy, handX, handY, paint);
+        paint.setStrokeWidth(dp(6.5f));
+        paint.setColor(color);
+        c.drawLine(sx, sy, jx, jy, paint);
+        paint.setStrokeWidth(dp(5.2f));
+        paint.setColor(0xFFF1C27D);
+        c.drawLine(jx, jy, handX, handY, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(OUTLINE);
+        c.drawCircle(handX, handY, dp(4.8f), paint);
+        paint.setColor(0xFFF1C27D);
+        c.drawCircle(handX, handY, dp(3.7f), paint);
         paint.setStrokeCap(Paint.Cap.BUTT);
+        c.restore();
+    }
+
+    /**
+     * Solves a two-segment limb from (ax, ay) to (bx, by), each segment {@code seg} long, the joint
+     * bending toward (px, py). The answer lands in {@link #jx}/{@link #jy} - no allocation. A reach
+     * longer than the limb simply straightens it.
+     */
+    private void joint(float ax, float ay, float bx, float by, float seg, float px, float py) {
+        float ddx = bx - ax;
+        float ddy = by - ay;
+        float d = (float) Math.sqrt(ddx * ddx + ddy * ddy);
+        float cx = (ax + bx) * 0.5f;
+        float cy = (ay + by) * 0.5f;
+        if (d < 0.001f || d >= 2f * seg) {
+            jx = cx;
+            jy = cy;
+            return;
+        }
+        float lift = (float) Math.sqrt(seg * seg - d * d * 0.25f);
+        float qx = -ddy / d;
+        float qy = ddx / d;
+        if (qx * px + qy * py < 0f) {
+            qx = -qx;
+            qy = -qy;
+        }
+        jx = cx + qx * lift;
+        jy = cy + qy * lift;
+    }
+
+    /** A boot with its heel at (x, ground), the toe toward the rope, tilted toe-up by {@code toeUp}. */
+    private void drawBoot(Canvas c, float x, float ground, float f, float toeUp, int colour) {
+        c.save();
+        c.rotate(f * toeUp, x, ground - dp(1f));
+        paint.setStyle(Paint.Style.FILL);
+        float toe = x - f * dp(11f);
+        float heel = x + f * dp(3f);
+        tmp.set(Math.min(toe, heel), ground - dp(6f), Math.max(toe, heel), ground + dp(0.5f));
+        paint.setColor(OUTLINE);
+        c.drawRoundRect(tmp, dp(3.2f), dp(3.2f), paint);
+        tmp.inset(dp(0.9f), dp(0.9f));
+        paint.setColor(colour);
+        c.drawRoundRect(tmp, dp(2.6f), dp(2.6f), paint);
+        paint.setColor(0xFF120D09);
+        c.drawRect(tmp.left, ground - dp(1.6f), tmp.right, ground + dp(0.5f), paint);
         c.restore();
     }
 
@@ -1861,6 +2476,81 @@ final class TugOfWarGame extends GameView {
             default:
                 paint.setColor(seed % 2 == 0 ? 0xFF222222 : 0xFF6B3E1E);
                 c.drawCircle(hx, hy - dp(4f), dp(6f), paint);
+        }
+    }
+
+    /* ---------- drawing helpers (3.25.0) ---------- */
+
+    private static int mix(int a, int b, float t) {
+        int ar = (a >> 16) & 0xFF;
+        int ag = (a >> 8) & 0xFF;
+        int ab = a & 0xFF;
+        int r = (int) (ar + (((b >> 16) & 0xFF) - ar) * t);
+        int g = (int) (ag + (((b >> 8) & 0xFF) - ag) * t);
+        int bl = (int) (ab + ((b & 0xFF) - ab) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    /** A deterministic scatter, so crowd and grass sit still from frame to frame. */
+    private static int hash(int k) {
+        int h = k * 0x45d9f3b;
+        h ^= h >>> 16;
+        h *= 0x45d9f3b;
+        h ^= h >>> 16;
+        return h & 0x7fffffff;
+    }
+
+    private android.graphics.LinearGradient panelGradient(float top, float bottom) {
+        for (int i = 0; i < panelShaders.length; i++) {
+            if (panelShaders[i] != null && panelTop[i] == top && panelBottom[i] == bottom) {
+                return panelShaders[i];
+            }
+        }
+        int i = panelNext;
+        panelNext = (panelNext + 1) % panelShaders.length;
+        panelTop[i] = top;
+        panelBottom[i] = bottom;
+        panelShaders[i] = new android.graphics.LinearGradient(0, top, 0, bottom, 0xFF172236, 0xFF0A111C,
+                android.graphics.Shader.TileMode.CLAMP);
+        return panelShaders[i];
+    }
+
+    /** A HUD panel in the app's family: vertical gradient, a lighter top edge, a hairline border. */
+    private void panel(Canvas c, RectF r, float radius, int alpha) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor((alpha << 24) | 0x00FFFFFF);   // the shader draws at this alpha, on purpose
+        paint.setShader(panelGradient(r.top, r.bottom));
+        c.drawRoundRect(r, radius, radius, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(((alpha * 0xD0 / 255) << 24) | 0x1C2736);
+        c.drawRoundRect(r, radius, radius, paint);
+        paint.setColor(((alpha * 0x60 / 255) << 24) | 0xA8C4E8);
+        c.drawLine(r.left + Math.max(radius, dp(2f)), r.top + dp(1f), r.right - Math.max(radius, dp(2f)),
+                r.top + dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A rounded track with a glossy fill. */
+    private void bar(Canvas c, float x, float y, float bw, float bh, float frac, int colour) {
+        float r = bh / 2f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x66000000);
+        tmp.set(x, y, x + bw, y + bh);
+        c.drawRoundRect(tmp, r, r, paint);
+        float fw = bw * Math.max(0f, Math.min(1f, frac));
+        if (fw < dp(1f)) {
+            return;
+        }
+        float fr = Math.min(r, fw / 2f);
+        paint.setColor(colour);
+        tmp.set(x, y, x + fw, y + bh);
+        c.drawRoundRect(tmp, fr, fr, paint);
+        paint.setColor(0x48FFFFFF);
+        tmp.set(x + fr * 0.5f, y + dp(1f), x + fw - fr * 0.5f, y + bh * 0.45f);
+        if (tmp.width() > 0f) {
+            c.drawRoundRect(tmp, fr * 0.5f, fr * 0.5f, paint);
         }
     }
 

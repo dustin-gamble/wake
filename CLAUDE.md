@@ -198,7 +198,7 @@ something, ask the user to switch streaming on first.** Discovery still runs reg
 Latest source version target:
 
 ```text
-3.19.5-debug
+3.25.0-debug
 ```
 
 ## Self-testing on an emulator (3.19.4)
@@ -1040,6 +1040,85 @@ hero games: `c.save(); c.translate(shake.dx, shake.dy); ...world...; c.restore()
 vignette and speed lines over the top, HUD last so it never shakes.
 
 **The Run's scores are relative to the drag setting** and are for beating yourself only.
+
+## The 3.25.0 graphics pass, and what it found that was not graphics
+
+The rower asked for "a graphics improvement" to every game. Twenty agents each took one game (one
+took the shared `RiverRenderer` / `RiverScenery`, under a no-signature-changes rule, since eight
+games call them), worked from a frame of their game, and were told: how it looks, never how it
+plays. The brief is kept at the top of the 3.25.0 commit message. It held - every game compiled
+together on the first build and ran 38 s of demo rowing with zero fatal exceptions.
+
+**Several "graphics" problems were bugs that had been on screen for months:**
+
+- **The oars rowed backwards.** `RiverRenderer` swung the blade toward the bow on the drive - the
+  reverse of rowing, and the opposite of its own comment. **Crew Boat's eight was drawn backwards
+  too**, stroke seat leading. Both fixed. Nobody had looked at an oar closely enough to see it.
+- **River Explorer's black horizon line** was a 7px gap: the ground strips start 300 m out while
+  the sky stopped 1px below the horizon, so the view background showed through.
+- **Canyon DRIVE's light was backwards** (the sunlit wall was the dark one), and a slot of bare
+  background showed at the far end of the road.
+- **Skyline never fit a tall city.** Its tile shrink was a linear guess capped at 42% that never
+  looked at pixels; at 18 floors the tallest tower ended above the view, through the block counter.
+  It now solves for the tile size that keeps the tallest tower under the top-centre HUD. A small
+  city is unchanged. **This is the persistent-world game, so the rower's city WILL get tall.**
+- **The 3.24 text curve had pushed text into text** in Stroke Coach, Wave Rider and Zombie Run:
+  their word-wrap and bubbles measured at the nominal size, not the drawn one. `GameView.textDp`
+  is now `protected` so a game can measure what it actually draws. **Measure at `textDp`.**
+
+**Two shared allocations, each reported independently by several agents:** `Fx.glow` boxed its
+`Long` cache key on every call (so a cache *hit* still allocated), and its 96 slots were fewer than
+one game uses (Night Grid ~80, Zone Row ~50), so games evicted each other. It is now a direct-mapped
+table of 512 primitive keys. `Fx.vignette` built a new `RadialGradient` per call while Zombie Run,
+Crew Boat and Night Grid call it every frame; it now caches one gradient per size and tint at full
+opacity and applies strength through the **paint's alpha** - the "shader draws at the paint's alpha"
+trap above, used on purpose.
+
+**Zombie Run's torch is the app's first `PorterDuff.Mode.ADD`.** It rendered correctly on the
+emulator; confirm it on the tablet.
+
+**Performance is the open question.** Every pass kept render allocation-free, but draw counts rose
+- Regatta's enclosure ~500 small draws, the river bank ~600, Night Grid's houses ~6 more each.
+None of that can be judged on the swiftshader emulator. Each agent named what to cut first if the
+tablet stutters; those notes are in the 3.25.0 commit message.
+
+## Coast Flight gallery frames must show the tier the tablet runs
+
+The emulator's WebView is current Chrome, so Coast Flight loads **Google Photorealistic 3D** there -
+a tier the tablet's Chrome 70 cannot run. A gallery frame of it promises something the rower's
+machine will never show. Tap the Map card to the **satellite + terrain** tier before capturing, and
+take it with `adb exec-out screencap` (the in-app camera cannot draw WebGL), cropped to `y 24..1032`
+to drop the emulator's status and navigation bars. Watch for the game's fog banks, which grey out the
+whole frame: score a few captures by contrast and keep the clear one.
+
+## Sessions are begun and ended by the rower (3.25.0)
+
+The rower asked for "a session start and end button". Up to 3.24 there was no session at all, only
+screen visits: `startRecorder` committed the previous screen's row and began a new one every time a
+game opened, and going home committed again. A half-hour piece across four games became four rows
+in HISTORY, and the vitals strip restarted at every game while its distance and stroke figures were
+the S4's lifetime counters ("4353 m" on a game just opened).
+
+The model now:
+
+- **A session begins** on START SESSION, or on the **first stroke** with none running - so a row is
+  never lost because someone forgot the button. The first status only sets the stroke baseline, so
+  the stale counter at launch cannot look like a stroke; a session begun by a stroke counts it.
+- **It spans every screen.** `startRecorder(title)` no longer opens or closes anything; it adds the
+  screen to the running session's list (`Recorder.addGame`) or names the next one. History stores
+  the first real game plus a count ("HEAD RACE +2"); GAUGES is never the headline if a game was
+  played. SHUFFLE deals collapse to one "SHUFFLE".
+- **It ends** on END SESSION (confirmed, then a summary card with a HISTORY button), on leaving the
+  app (`onStop`, not for a rotation), on switching rower, on exit, and after **ten minutes without a
+  stroke**. Going HOME does **not** end it.
+- **One set of numbers.** The strip's clock, distance and strokes, and the gauges screen's TIME,
+  DISTANCE and STROKES tiles, all read the session recorder. With no session they read zero. The old
+  shuffle clock carry (`shuffleAccumSeconds` into the strip) is gone because the session already
+  spans the deals; the shuffle's own countdown still runs off each game's clock.
+- The button is on the home header, the gauges header and the end of every game header, refreshed
+  once per whole second (an int compare per tick, not a string per frame).
+- `session-started` and `session-ended` are forced events, so they reach the laptop with streaming
+  off.
 
 ## An incremental build after deleting iCloud duplicates can write a corrupt APK (3.24.0)
 

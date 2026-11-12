@@ -272,14 +272,41 @@ final class SkylineGame extends GameView {
     private float shellX;
 
     // Depth sort, preallocated.
-    private final int[] itemKind = new int[80];
-    private final int[] itemRef = new int[80];
-    private final float[] itemDepth = new float[80];
+    private final int[] itemKind = new int[112];
+    private final int[] itemRef = new int[112];
+    private final float[] itemDepth = new float[112];
     private int itemCount;
 
     // Cached sky.
     private LinearGradient skyShader;
+    private LinearGradient landShader;
     private int skyKey = -1;
+
+    // 3.25 graphics pass: a horizon, a distant skyline in two parallax layers, streets and lamps.
+    /** Horizon line as a share of the view height; the sky gradient ends here and the land begins. */
+    private static final float HORIZON = 0.48f;
+    private final Path farSkyline = new Path();
+    private final Path nearSkyline = new Path();
+    private float skylineBuiltW = -1f;
+    private float skylineBuiltH = -1f;
+    private final float[] skyWinX = new float[140];
+    private final float[] skyWinY = new float[140];
+    private int skyWinCount;
+    /** Street lamps round the city block and the plaza: ground-plane positions. */
+    private static final float[] STREET_LAMP_X = {-0.6f, 1.5f, 3.5f, 4.6f, -0.6f, 1.5f, 3.5f, 4.6f,
+            -0.6f, -0.6f, 4.75f, 6.05f, 4.75f, 6.05f};
+    private static final float[] STREET_LAMP_Y = {-0.6f, -0.6f, -0.6f, -0.6f, 4.6f, 4.6f, 4.6f, 4.6f,
+            1.5f, 3.5f, 1.35f, 1.35f, 2.65f, 2.65f};
+    private static final int K_STREETLAMP = 8;
+    /** Slab thickness under each district, in block units: the city reads as a model on a table. */
+    private static final float SLAB = 0.2f;
+    // HUD panel gradients, cached by their (fixed) top and bottom so nothing is built per frame.
+    private final LinearGradient[] panelShader = new LinearGradient[8];
+    private final int[] panelKeyT = new int[8];
+    private final int[] panelKeyB = new int[8];
+    private int panelNext;
+    /** Turns of the mixer drum on the building site, advanced faster at higher boat speed. */
+    private float mixerSpin;
 
     // Photo mode.
     private boolean photoMode;
@@ -715,6 +742,7 @@ final class SkylineGame extends GameView {
             return;
         }
         step(dt, w, h);
+        mixerSpin = (mixerSpin + dt * (0.15f + boat.value() * 0.12f)) % 1f;
 
         c.save();
         if (!photoMode) {
@@ -1286,10 +1314,22 @@ final class SkylineGame extends GameView {
         // Tile size shrinks as the city grows so it stays on screen.
         float tallScale = 1f - Math.min(0.42f, tallest / (float) maxHeight() * 0.42f);
         gTw = Math.min(w, h) * 0.105f * tallScale * fit;
-        gTh = gTw * 0.52f;
-        gBh = gTw * 0.62f;
         gCx = w * 0.5f;
         gCy = h * 0.64f;
+        // 3.25.0: tallScale above is a guess - a linear shrink capped at 42% - and it never looked at
+        // pixels. On the emulator's 18-floor city the tallest tower ended ~12px ABOVE the top of the
+        // view, through the block counter and under the rush-hour card. This is the real fit: the
+        // tile shrinks exactly as far as it must for the tallest tower, standing on the back half of
+        // the ground, to stop below the top-centre HUD. A small city is unchanged (the cap only
+        // binds once a tower would overflow); a megacity zooms out, as a growing city should.
+        float ceiling = h * 0.21f;
+        float need = tallest * 0.62f + ext * 0.26f;   // in tile widths: tower height + back ground
+        if (need > 0f) {
+            float fitTall = (gCy - ceiling) / need;
+            gTw = Math.max(Math.min(w, h) * 0.025f, Math.min(gTw, fitTall));
+        }
+        gTh = gTw * 0.52f;
+        gBh = gTw * 0.62f;
         gCos = (float) Math.cos(angle);
         gSin = (float) Math.sin(angle);
     }
@@ -1504,38 +1544,65 @@ final class SkylineGame extends GameView {
         // Sky: a slow day-night cycle so a long row visibly passes time. A storm front pulls the
         // whole scene down toward night, so the city darkens with the weather and not just the sky.
         float tod = skyTod();
+        float horizon = h * HORIZON;
         int key = (int) (tod * 48) * 100000 + (int) h;
-        if (skyShader == null || key != skyKey) {
+        if (skyShader == null || landShader == null || key != skyKey) {
             float q = (int) (tod * 48) / 48f;
-            skyShader = new LinearGradient(0, 0, 0, h,
-                    blend(0xFF0B1430, 0xFF2E6FB0, q), blend(0xFF2A1C38, 0xFFBFD9EE, q),
+            // Zenith, a mid band, and a glow at the horizon that goes amber through dusk.
+            float dusk = Math.max(0f, 1f - Math.abs(q - 0.42f) / 0.3f);
+            int zenith = blend(0xFF050A1C, 0xFF2A63A6, q);
+            int mid = blend(0xFF141838, 0xFF6EA2D2, q);
+            int glow = blend(blend(0xFF3E2A58, 0xFFF0DCC0, q), 0xFFFF9050, dusk * 0.55f);
+            skyShader = new LinearGradient(0, 0, 0, horizon,
+                    new int[] {zenith, mid, glow}, new float[] {0f, 0.62f, 1f},
                     Shader.TileMode.CLAMP);
+            // The land below it: hazy at the horizon, dark at the foot of the screen.
+            landShader = new LinearGradient(0, horizon, 0, h,
+                    new int[] {blend(glow, blend(0xFF0C1020, 0xFF5E6A5C, q), 0.55f),
+                            blend(0xFF0A0E1A, 0xFF46523E, q), blend(0xFF05070D, 0xFF2C3428, q)},
+                    new float[] {0f, 0.35f, 1f}, Shader.TileMode.CLAMP);
             skyKey = key;
         }
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
         paint.setShader(skyShader);
-        c.drawRect(0, 0, w, h, paint);
+        c.drawRect(0, 0, w, horizon + 1f, paint);
         paint.setShader(null);
+        if (tod < 0.5f) {
+            // Stars of three sizes, each twinkling on its own phase.
+            float starA = (0.5f - tod) * 2f;
+            for (int i = 0; i < 56; i++) {
+                float tw = 0.55f + 0.45f * (float) Math.sin(sessionSeconds * (1.1 + (i % 5) * 0.37) + i * 1.7);
+                paint.setColor(((int) (starA * tw * 220) << 24) | ((i % 7 == 0) ? 0xFFE6C8 : 0xFFFFFF));
+                float sx = (i * 197 + (i / 9) * 61) % Math.max(1, (int) w);
+                float sy = (i * 131 + (i / 7) * 37) % Math.max(1, (int) (horizon * 0.92f));
+                c.drawCircle(sx, sy, dp(i % 9 == 0 ? 1.9f : i % 3 == 0 ? 1.4f : 0.9f), paint);
+            }
+        }
+        // Sun or moon arcing across.
+        float sunX = w * (0.15f + 0.7f * ((float) ((activeSeconds / 150.0) % 1.0)));
+        float sunY = h * (0.40f - 0.26f * (float) Math.sin(Math.PI * ((activeSeconds / 150.0) % 1.0)));
+        boolean daySun = tod > 0.5f;
+        Fx.glow(c, sunX, sunY, dp(150f), daySun ? 0x33FFE8A8 : 0x22BFD9EE);
+        Fx.glow(c, sunX, sunY, dp(60f), daySun ? 0x66FFE8A8 : 0x55BFD9EE);
+        paint.setColor(daySun ? 0xFFFFE8A8 : 0xFFE9EEF5);
+        c.drawCircle(sunX, sunY, dp(20f), paint);
+        if (daySun) {
+            paint.setColor(0xFFFFF6DA);
+            c.drawCircle(sunX - dp(3f), sunY - dp(3f), dp(13f), paint);
+        } else {
+            // Moon: a few soft maria so it reads as a moon and not a white dot.
+            paint.setColor(0x30404A60);
+            c.drawCircle(sunX - dp(6f), sunY - dp(4f), dp(5.5f), paint);
+            c.drawCircle(sunX + dp(5f), sunY + dp(6f), dp(4f), paint);
+            c.drawCircle(sunX + dp(7f), sunY - dp(7f), dp(2.6f), paint);
+        }
+        drawHorizon(c, w, h, tod, horizon);
         if (rushTint > 0.02f) {
             // Rush hour puts the city under a hard amber light for its two minutes.
             paint.setColor(((int) (rushTint * 54) << 24) | 0xFFB347);
             c.drawRect(0, 0, w, h, paint);
         }
-        if (tod < 0.5f) {
-            paint.setColor(0xFFFFFFFF);
-            paint.setAlpha((int) ((0.5f - tod) * 2 * 200));
-            for (int i = 0; i < 40; i++) {
-                c.drawCircle((i * 197 % Math.max(1, (int) w)), (i * 131 % Math.max(1, (int) (h * 0.5f))), dp(1.1f), paint);
-            }
-            paint.setAlpha(255);
-        }
-        // Sun or moon arcing across.
-        float sunX = w * (0.15f + 0.7f * ((float) ((activeSeconds / 150.0) % 1.0)));
-        float sunY = h * (0.40f - 0.26f * (float) Math.sin(Math.PI * ((activeSeconds / 150.0) % 1.0)));
-        Fx.glow(c, sunX, sunY, dp(60f), tod > 0.5f ? 0x66FFE8A8 : 0x55BFD9EE);
-        paint.setColor(tod > 0.5f ? 0xFFFFE8A8 : 0xFFE9EEF5);
-        c.drawCircle(sunX, sunY, dp(20f), paint);
         drawSkyTraffic(c, w, h, tod);
         if (stormIntensity > 0.02f) {
             drawStormSky(c, w, h);
@@ -1572,6 +1639,9 @@ final class SkylineGame extends GameView {
             addItem(K_SHELL, 0, shellX, 5.35f);
         }
         addItem(K_LANDMARK, 0, PLAZA_X, PLAZA_Y);
+        for (int i = 0; i < STREET_LAMP_X.length; i++) {
+            addItem(K_STREETLAMP, i, STREET_LAMP_X[i], STREET_LAMP_Y[i]);
+        }
         float bridgeDepth = depth(BRIDGE_X, 5.2f);
         for (int i = 0; i < residents.length; i++) {
             Resident r = residents[i];
@@ -1585,7 +1655,7 @@ final class SkylineGame extends GameView {
                 }
             }
         }
-        // Insertion sort: under 80 items, no allocation.
+        // Insertion sort: about a hundred items at most, no allocation.
         for (int i = 1; i < itemCount; i++) {
             float d = itemDepth[i];
             int k = itemKind[i];
@@ -1625,6 +1695,9 @@ final class SkylineGame extends GameView {
                 case K_SHELL:
                     drawShell(c, tod);
                     break;
+                case K_STREETLAMP:
+                    drawStreetLamp(c, ref, tod);
+                    break;
                 default:
                     drawResident(c, residents[ref]);
                     break;
@@ -1658,6 +1731,136 @@ final class SkylineGame extends GameView {
     /** Daylight as the city actually sees it: the storm front takes most of it away. */
     private float skyTod() {
         return timeOfDay() * (1f - 0.72f * Math.min(1f, stormIntensity));
+    }
+
+    /* ---------------------------------------------------------------- horizon ---------- */
+
+    /**
+     * 3.25: the land below the horizon and a distant city in two layers. The far layer is pale and
+     * hazy, the near one darker with lit windows after dusk, and both slide with the camera's turn
+     * (the near one faster) so the backdrop moves with the city instead of sitting on a flat colour.
+     */
+    private void drawHorizon(Canvas c, float w, float h, float tod, float horizon) {
+        if (skylineBuiltW != w || skylineBuiltH != h) {
+            buildSkyline(w, h);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(landShader);
+        c.drawRect(0, horizon, w, h, paint);
+        paint.setShader(null);
+
+        float offFar = wrap(-angle * dp(60f), w);
+        float offNear = wrap(-angle * dp(115f), w);
+        paint.setColor(blend(0xFF1E2040, 0xFF9DB0C4, tod));
+        for (int k = 0; k < 2; k++) {
+            c.save();
+            c.translate(offFar - k * w, 0f);
+            c.drawPath(farSkyline, paint);
+            c.restore();
+        }
+        paint.setColor(blend(0xFF0B0F1E, 0xFF5E6C7C, tod));
+        for (int k = 0; k < 2; k++) {
+            c.save();
+            c.translate(offNear - k * w, 0f);
+            c.drawPath(nearSkyline, paint);
+            c.restore();
+        }
+        float lights = Math.max(0f, Math.min(1f, (0.6f - tod) * 3f));
+        if (lights > 0.02f) {
+            long slot = (long) (sessionSeconds / 6.0);
+            float ww = dp(2.4f);
+            float wh = dp(3.2f);
+            for (int i = 0; i < skyWinCount; i++) {
+                // A few windows switch off and on every few seconds, so the far city is alive.
+                if (((i * 2654435761L + slot * 40503L) >>> 9 & 7L) == 0L) {
+                    continue;
+                }
+                paint.setColor(((int) (lights * 200) << 24) | (i % 3 == 0 ? 0xCFE2FF : 0xFFD890));
+                for (int k = 0; k < 2; k++) {
+                    float x = skyWinX[i] + offNear - k * w;
+                    if (x > -ww && x < w) {
+                        c.drawRect(x, skyWinY[i], x + ww, skyWinY[i] + wh, paint);
+                    }
+                }
+            }
+            // Light pollution: a sodium glow along the horizon over the far city.
+            c.save();
+            c.translate(w * 0.5f, horizon);
+            c.scale(1f, 0.2f);
+            Fx.glow(c, 0f, 0f, w * 0.45f, ((int) (lights * 0x58) << 24) | 0xFF9A5A);
+            c.restore();
+        }
+    }
+
+    private static float wrap(float v, float span) {
+        float r = v % span;
+        return r < 0f ? r + span : r;
+    }
+
+    /** Builds the two distant skyline silhouettes once per view size, from a fixed seed. */
+    private void buildSkyline(float w, float h) {
+        skylineBuiltW = w;
+        skylineBuiltH = h;
+        float base = h * HORIZON + dp(2f);
+        farSkyline.rewind();
+        nearSkyline.rewind();
+        long s = 0x2545F4914F6CDD1DL;
+        farSkyline.moveTo(0f, base);
+        float x = 0f;
+        while (x < w) {
+            s = s * 6364136223846793005L + 1442695040888963407L;
+            float bw = Math.min(w - x, dp(16f) + ((s >>> 33) & 0xFF) / 255f * dp(34f));
+            float bh = h * (0.016f + ((s >>> 45) & 0xFF) / 255f * 0.046f);
+            farSkyline.lineTo(x, base - bh);
+            farSkyline.lineTo(x + bw, base - bh);
+            x += Math.max(1f, bw);
+        }
+        farSkyline.lineTo(w, base);
+        farSkyline.close();
+
+        s = 0x5DEECE66DL;
+        nearSkyline.moveTo(0f, base);
+        x = 0f;
+        skyWinCount = 0;
+        while (x < w) {
+            s = s * 6364136223846793005L + 1442695040888963407L;
+            float bw = Math.min(w - x, dp(22f) + ((s >>> 33) & 0xFF) / 255f * dp(46f));
+            int kind = (int) ((s >>> 25) & 7);
+            float bh = kind == 0 ? h * 0.008f : h * (0.022f + ((s >>> 45) & 0xFF) / 255f * 0.068f);
+            float top = base - bh;
+            nearSkyline.lineTo(x, top);
+            if (kind >= 6 && bw > dp(30f)) {
+                // A set-back crown, and on some an antenna.
+                float ext = bh * 0.35f;
+                float cx = x + bw * 0.5f;
+                nearSkyline.lineTo(x + bw * 0.22f, top);
+                nearSkyline.lineTo(x + bw * 0.22f, top - ext);
+                if (kind == 7) {
+                    nearSkyline.lineTo(cx - dp(1.5f), top - ext);
+                    nearSkyline.lineTo(cx - dp(1.5f), top - ext - dp(16f));
+                    nearSkyline.lineTo(cx + dp(1.5f), top - ext - dp(16f));
+                    nearSkyline.lineTo(cx + dp(1.5f), top - ext);
+                }
+                nearSkyline.lineTo(x + bw * 0.78f, top - ext);
+                nearSkyline.lineTo(x + bw * 0.78f, top);
+            }
+            nearSkyline.lineTo(x + bw, top);
+            if (bh > dp(16f) && bw > dp(14f)) {
+                int n = 2 + (int) ((s >>> 20) & 3);
+                for (int k = 0; k < n && skyWinCount < skyWinX.length; k++) {
+                    s = s * 6364136223846793005L + 1442695040888963407L;
+                    float fx0 = ((s >>> 33) & 0xFF) / 255f;
+                    float fy0 = ((s >>> 45) & 0xFF) / 255f;
+                    skyWinX[skyWinCount] = x + dp(4f) + fx0 * (bw - dp(10f));
+                    skyWinY[skyWinCount] = top + dp(5f) + fy0 * (bh - dp(12f));
+                    skyWinCount++;
+                }
+            }
+            x += Math.max(1f, bw);
+        }
+        nearSkyline.lineTo(w, base);
+        nearSkyline.close();
     }
 
     /* ---------------------------------------------------------------- storm ---------- */
@@ -1753,16 +1956,82 @@ final class SkylineGame extends GameView {
 
     private void drawGround(Canvas c, float tod, boolean forPhoto) {
         paint.setStyle(Paint.Style.FILL);
-        plate(c, -0.6f, -0.6f, GRID - 0.4f, GRID - 0.4f, blend(0xFF15202E, 0xFF3F4A56, tod));
-        // The plaza where the weekly landmark goes up.
-        plate(c, GRID - 0.4f, 1.2f, 6.2f, 2.8f, blend(0xFF1E2532, 0xFF7C7F88, tod));
+        // 3.25: every district is a slab with a visible edge, so the city stands on the land like a
+        // model rather than being painted onto it. Sides first, then all the tops over them, so a
+        // neighbouring slab's side can never land on a top.
+        int sideLit = blend(0xFF222A3A, 0xFF5A6068, tod);
+        int sideDark = blend(0xFF131925, 0xFF3A3F46, tod);
+        slabSides(c, -0.6f, -0.6f, GRID - 0.4f, GRID - 0.4f, sideLit, sideDark);
+        slabSides(c, GRID - 0.4f, 1.2f, 6.2f, 2.8f, sideLit, sideDark);
+        if (parkOpen) {
+            slabSides(c, -2.2f, -0.6f, -0.6f, GRID - 0.4f, blend(0xFF1A1610, 0xFF6A5638, tod),
+                    blend(0xFF100D09, 0xFF4A3C26, tod));
+        }
+        if (bridgeOpen) {
+            slabSides(c, minX, GRID - 0.4f, maxX, 6.4f, blend(0xFF0A1420, 0xFF2E5A80, tod),
+                    blend(0xFF060C14, 0xFF1E3E5C, tod));
+        }
+
+        // The city block: pavement, a grid of streets with centre dashes, and a kerb.
+        plate(c, -0.6f, -0.6f, GRID - 0.4f, GRID - 0.4f, blend(0xFF1C2635, 0xFF7A7F86, tod));
+        int road = blend(0xFF0D121B, 0xFF3A4048, tod);
+        for (int k = 0; k <= GRID; k++) {
+            float r0 = k - 0.6f;
+            float r1 = k - 0.4f;
+            plate(c, r0, -0.6f, r1, GRID - 0.4f, road);
+            plate(c, -0.6f, r0, GRID - 0.4f, r1, road);
+        }
+        paint.setStrokeWidth(Math.max(dp(1f), gTw * 0.014f));
+        paint.setColor(blend(0x66B09A60, 0xAAF0E2B0, tod));
+        for (int k = 0; k <= GRID; k++) {
+            float r = k - 0.5f;
+            for (int j = 0; j < GRID; j++) {
+                project(r, j - 0.18f, 0f);
+                float ax = px;
+                float ay = py;
+                project(r, j + 0.18f, 0f);
+                c.drawLine(ax, ay, px, py, paint);
+                project(j - 0.18f, r, 0f);
+                ax = px;
+                ay = py;
+                project(j + 0.18f, r, 0f);
+                c.drawLine(ax, ay, px, py, paint);
+            }
+        }
+        kerb(c, -0.6f, -0.6f, GRID - 0.4f, GRID - 0.4f, blend(0xFF2E3A4C, 0xFFB4B8BE, tod));
+
+        // The plaza where the weekly landmark goes up: paving, a border and a compass of rings.
+        plate(c, GRID - 0.4f, 1.2f, 6.2f, 2.8f, blend(0xFF222A38, 0xFF8C8F96, tod));
+        kerb(c, GRID - 0.3f, 1.3f, 6.1f, 2.7f, blend(0xFF2E3848, 0xFFA8AAB0, tod));
+        ellipse(c, PLAZA_X, PLAZA_Y, 0.76f, blend(0xFF1C2230, 0xFF7E8188, tod));
         ellipse(c, PLAZA_X, PLAZA_Y, 0.62f, blend(0xFF283040, 0xFF9A9CA4, tod));
+        paint.setStrokeWidth(Math.max(dp(1f), gTw * 0.012f));
+        paint.setColor(blend(0xFF323A4A, 0xFFB4B6BC, tod));
+        for (int k = 0; k < 8; k++) {
+            double a = k * Math.PI / 4 + Math.PI / 8;
+            project(PLAZA_X + (float) Math.cos(a) * 0.62f, PLAZA_Y + (float) Math.sin(a) * 0.62f, 0f);
+            float ax = px;
+            float ay = py;
+            project(PLAZA_X + (float) Math.cos(a) * 0.76f, PLAZA_Y + (float) Math.sin(a) * 0.76f, 0f);
+            c.drawLine(ax, ay, px, py, paint);
+        }
+        kerb(c, GRID - 0.4f, 1.2f, 6.2f, 2.8f, blend(0xFF2E3A4C, 0xFFB4B8BE, tod));
 
         if (parkOpen) {
             plate(c, -2.2f, -0.6f, -0.6f, GRID - 0.4f, blend(0xFF10261A, 0xFF4E8A4A, tod));
+            // Mown stripes across the lawn.
+            int stripe = blend(0xFF132C1E, 0xFF5A9654, tod);
+            for (int k = 0; k < 6; k++) {
+                float y0 = -0.6f + k * 0.87f;
+                plate(c, -2.2f, y0, -0.6f, y0 + 0.43f, stripe);
+            }
             plate(c, -1.2f, -0.6f, -1.0f, GRID - 0.4f, blend(0xFF3A3526, 0xFFC9B98A, tod));
+            ellipse(c, -1.7f, 2.1f, 0.42f * Math.max(0.2f, parkReveal), blend(0xFF2A2E36, 0xFFA8A49A, tod));
             ellipse(c, -1.7f, 2.1f, 0.34f * Math.max(0.2f, parkReveal), blend(0xFF0E2238, 0xFF4C8FC4, tod));
+            kerb(c, -2.2f, -0.6f, -0.6f, GRID - 0.4f, blend(0xFF1E3424, 0xFF7AAE6A, tod));
         } else if (!forPhoto) {
+            // Staked out: a faint lot under the outline.
+            plate(c, -2.2f, -0.6f, -0.6f, GRID - 0.4f, 0x10E6EDF7);
             outline(c, -2.2f, -0.6f, -0.6f, GRID - 0.4f);
             project(-1.4f, 2f, 0f);
             bold(c, "PARK", px, py, 11f, 0x88E6EDF7, Paint.Align.CENTER);
@@ -1771,7 +2040,33 @@ final class SkylineGame extends GameView {
 
         if (bridgeOpen) {
             plate(c, minX, GRID - 0.4f, maxX, 5.8f, blend(0xFF0A1A2C, 0xFF3F7FB8, tod));
+            // Deeper water down the middle of the channel.
+            plate(c, minX, 4.95f, maxX, 5.45f, blend(0xFF08152A, 0xFF346EA6, tod));
             plate(c, minX, 5.8f, maxX, 6.4f, blend(0xFF13241A, 0xFF5B7F4C, tod));
+            // Embankments: a pale stone edge on both banks.
+            int bank = blend(0xFF2A3444, 0xFFB8B4A8, tod);
+            plate(c, minX, GRID - 0.4f, maxX, GRID - 0.32f, bank);
+            plate(c, minX, 5.72f, maxX, 5.8f, bank);
+            // At night the lit city lies on the water as broken gold streaks under each tower row.
+            float lamps = Math.max(0f, Math.min(1f, (0.5f - tod) * 4f));
+            if (lamps > 0.02f) {
+                paint.setStrokeWidth(Math.max(dp(1.5f), gTw * 0.03f));
+                for (int gx = 0; gx < GRID; gx++) {
+                    if (height[gx][GRID - 1] <= 0) {
+                        continue;
+                    }
+                    for (int k = 0; k < 3; k++) {
+                        float shim = (float) Math.sin(sessionSeconds * 2.1 + gx * 1.3 + k * 2.0) * 0.06f;
+                        float yy = 4.72f + k * 0.16f;
+                        paint.setColor(((int) (lamps * (150 - k * 40)) << 24) | 0xFFD890);
+                        project(gx - 0.22f + shim, yy, 0f);
+                        float ax = px;
+                        float ay = py;
+                        project(gx + 0.22f - shim - k * 0.05f, yy, 0f);
+                        c.drawLine(ax, ay, px, py, paint);
+                    }
+                }
+            }
             // Ripples drifting downstream.
             paint.setStrokeWidth(dp(1.5f));
             paint.setColor(tod > 0.4f ? 0x66FFFFFF : 0x33BFD9EE);
@@ -1791,6 +2086,128 @@ final class SkylineGame extends GameView {
             bold(c, "RIVER AND BRIDGE", px, py, 11f, 0x88E6EDF7, Paint.Align.CENTER);
             label(c, "AT " + BRIDGE_AT + " BLOCKS", px, py + dp(13f), 8.5f, 0x88E6EDF7, Paint.Align.CENTER);
         }
+        drawGroundLight(c, tod);
+    }
+
+    /**
+     * Light on the ground, after every top and before anything that stands up. By day each tower
+     * throws a soft shadow away from the light (it comes from the right, like the faces' shading);
+     * after dark, pools of warm light gather at the foot of every lit tower and under each lamp.
+     */
+    private void drawGroundLight(Canvas c, float tod) {
+        paint.setStyle(Paint.Style.FILL);
+        int shadowA = (int) (0x14 + 0x3C * tod);
+        paint.setColor(shadowA << 24);
+        for (int idx = 0; idx < GRID * GRID; idx++) {
+            int gx = idx % GRID;
+            int gy = idx / GRID;
+            int floors = height[gx][gy];
+            if (floors <= 0) {
+                continue;
+            }
+            project(gx, gy, 0f);
+            float bx = px;
+            float by = py;
+            float len = Math.min(floors * gBh * 0.45f, gTw * 2.6f);
+            float dx = -len;
+            float dy = len * 0.32f;
+            // The convex hull of the footprint and its offset copy: convex paths are the cheap ones.
+            path.reset();
+            path.moveTo(bx + gTw, by);
+            path.lineTo(bx, by - gTh);
+            path.lineTo(bx + dx, by - gTh + dy);
+            path.lineTo(bx - gTw + dx, by + dy);
+            path.lineTo(bx + dx, by + gTh + dy);
+            path.lineTo(bx, by + gTh);
+            path.close();
+            c.drawPath(path, paint);
+        }
+        float lampOn = lampLevel(tod);
+        for (int idx = 0; idx < GRID * GRID; idx++) {
+            int gx = idx % GRID;
+            int gy = idx / GRID;
+            int floors = height[gx][gy];
+            if (floors <= 0) {
+                continue;
+            }
+            float on = lightsOn(idx, tod);
+            if (on <= 0.05f) {
+                continue;
+            }
+            // Brighter under taller, busier towers: what spills out of the windows lands here.
+            float a = on * (0.45f + 0.55f * litShare) * Math.min(1f, 0.4f + floors / 8f);
+            project(gx, gy, 0f);
+            groundPool(c, px, py, gTw * 1.45f, ((int) (a * 0x70) << 24) | 0xFFC878);
+        }
+        if (lampOn > 0.02f) {
+            int col = ((int) (lampOn * 0x80) << 24) | 0xFFE2A0;
+            for (int i = 0; i < STREET_LAMP_X.length; i++) {
+                project(STREET_LAMP_X[i], STREET_LAMP_Y[i], 0f);
+                groundPool(c, px + gTw * 0.14f, py, gTw * 0.62f, col);
+            }
+            if (parkOpen && parkReveal >= 0.5f) {
+                for (int i = 0; i < LAMP_Y.length; i++) {
+                    project(-0.95f, LAMP_Y[i], 0f);
+                    groundPool(c, px + gTw * 0.14f, py, gTw * 0.62f, col);
+                }
+            }
+        }
+    }
+
+    /** A glow squashed into the ground plane. */
+    private void groundPool(Canvas c, float x, float y, float r, int argb) {
+        c.save();
+        c.translate(x, y);
+        c.scale(1f, 0.52f);
+        Fx.glow(c, 0f, 0f, r, argb);
+        c.restore();
+    }
+
+    /** How far a tower's night lights are on: staggered so they come on tower by tower at dusk. */
+    private float lightsOn(int seedIdx, float tod) {
+        float night = 1f - tod;
+        float stagger = ((seedIdx * 37) % 25) / 25f;
+        return Math.max(0f, Math.min(1f, (night - 0.35f - stagger * 0.25f) * 5f));
+    }
+
+    /**
+     * The visible edges of a district's slab: each side quad drops {@link #SLAB} below the ground.
+     * Back sides are drawn too but the slab's own top covers them.
+     */
+    private void slabSides(Canvas c, float x0, float y0, float x1, float y1, int lit, int dark) {
+        project((x0 + x1) / 2f, (y0 + y1) / 2f, 0f);
+        float cx = px;
+        for (int e = 0; e < 4; e++) {
+            float ax = e == 0 || e == 3 ? x0 : x1;
+            float ay = e < 2 ? y0 : y1;
+            float bx = e == 0 || e == 1 ? x1 : x0;
+            float by = e == 0 ? y0 : e == 1 ? y1 : e == 2 ? y1 : y0;
+            path.reset();
+            project(ax, ay, 0f);
+            path.moveTo(px, py);
+            float mx = px;
+            project(bx, by, 0f);
+            path.lineTo(px, py);
+            mx = (mx + px) / 2f;
+            project(bx, by, -SLAB);
+            path.lineTo(px, py);
+            project(ax, ay, -SLAB);
+            path.lineTo(px, py);
+            path.close();
+            // Faces turned toward the light (on the right) are the lighter of the two.
+            paint.setColor(mx > cx ? lit : dark);
+            c.drawPath(path, paint);
+        }
+    }
+
+    /** A pale kerb line round a district's edge. */
+    private void kerb(Canvas c, float x0, float y0, float x1, float y1, int color) {
+        quadPath(x0, y0, x1, y1, 0f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(dp(1.5f), gTw * 0.03f));
+        paint.setColor(color);
+        c.drawPath(path, paint);
+        paint.setStyle(Paint.Style.FILL);
     }
 
     private void plate(Canvas c, float x0, float y0, float x1, float y1, int color) {
@@ -1848,13 +2265,24 @@ final class SkylineGame extends GameView {
         project(TREE_X[i], TREE_Y[i], 0f);
         float s = gTw * g;
         float sway = (float) Math.sin(sessionSeconds * 1.3 + i) * s * 0.03f;
-        paint.setColor(blend(0xFF2A1E14, 0xFF6B4A2E, tod));
-        c.drawRect(px - s * 0.05f, py - s * 0.32f, px + s * 0.05f, py, paint);
+        paint.setStyle(Paint.Style.FILL);
+        // Contact shadow, then a trunk shaded on its left, then a canopy of three clumps lit from
+        // the right like the towers, with a highlight on the lit crown.
+        paint.setColor(0x38000000);
+        c.drawOval(px - s * 0.26f, py - s * 0.07f, px + s * 0.22f, py + s * 0.07f, paint);
+        int bark = blend(0xFF2A1E14, 0xFF6B4A2E, tod);
+        paint.setColor(bark);
+        c.drawRect(px - s * 0.05f, py - s * 0.34f, px + s * 0.05f, py, paint);
+        paint.setColor(blend(bark, 0xFF000000, 0.35f));
+        c.drawRect(px - s * 0.05f, py - s * 0.34f, px - s * 0.01f, py, paint);
         int leaf = blend(0xFF12301C, (i % 2 == 0) ? 0xFF4FA048 : 0xFF6BB45A, tod);
+        paint.setColor(blend(leaf, 0xFF000000, 0.32f));
+        c.drawCircle(px + sway - s * 0.1f, py - s * 0.41f, s * 0.17f, paint);
         paint.setColor(leaf);
-        c.drawCircle(px + sway, py - s * 0.45f, s * 0.22f, paint);
-        paint.setColor(blend(leaf, 0xFFFFFFFF, 0.12f));
-        c.drawCircle(px + sway - s * 0.07f, py - s * 0.55f, s * 0.13f, paint);
+        c.drawCircle(px + sway + s * 0.09f, py - s * 0.43f, s * 0.17f, paint);
+        c.drawCircle(px + sway, py - s * 0.56f, s * 0.19f, paint);
+        paint.setColor(blend(leaf, 0xFFFFFFFF, 0.2f));
+        c.drawCircle(px + sway + s * 0.07f, py - s * 0.62f, s * 0.1f, paint);
     }
 
     private void drawLamp(Canvas c, int i, float tod) {
@@ -1862,15 +2290,39 @@ final class SkylineGame extends GameView {
             return;
         }
         project(-0.95f, LAMP_Y[i], 0f);
-        float s = gTw;
+        lampPost(c, px, py, gTw, lampLevel(tod));
+    }
+
+    private void drawStreetLamp(Canvas c, int i, float tod) {
+        project(STREET_LAMP_X[i], STREET_LAMP_Y[i], 0f);
+        lampPost(c, px, py, gTw, lampLevel(tod));
+    }
+
+    /** 0 by day, 1 at night, easing through dusk. */
+    private static float lampLevel(float tod) {
+        return Math.max(0f, Math.min(1f, (0.5f - tod) * 6f));
+    }
+
+    /** A street lamp: base, pole, arm and a hooded lantern that glows after dusk. */
+    private void lampPost(Canvas c, float x, float y, float s, float on) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x40000000);
+        c.drawOval(x - s * 0.08f, y - s * 0.03f, x + s * 0.08f, y + s * 0.03f, paint);
         paint.setColor(0xFF2A3446);
-        c.drawRect(px - s * 0.02f, py - s * 0.55f, px + s * 0.02f, py, paint);
-        boolean night = tod < 0.45f;
-        if (night) {
-            Fx.glow(c, px, py - s * 0.58f, s * 0.45f, 0x66FFE6A8);
+        c.drawRect(x - s * 0.022f, y - s * 0.6f, x + s * 0.022f, y, paint);
+        c.drawRect(x - s * 0.045f, y - s * 0.08f, x + s * 0.045f, y, paint);
+        c.drawRect(x, y - s * 0.6f, x + s * 0.14f, y - s * 0.575f, paint);
+        paint.setColor(0xFF4A5668);
+        c.drawRect(x + s * 0.005f, y - s * 0.6f, x + s * 0.022f, y - s * 0.08f, paint);
+        float hx = x + s * 0.14f;
+        float hy = y - s * 0.565f;
+        if (on > 0.02f) {
+            Fx.glow(c, hx, hy + s * 0.03f, s * 0.42f, ((int) (on * 0x70) << 24) | 0xFFE6A8);
         }
-        paint.setColor(night ? 0xFFFFE6A8 : 0xFF9AA5B1);
-        c.drawCircle(px, py - s * 0.58f, s * 0.06f, paint);
+        paint.setColor(blend(0xFF9AA5B1, 0xFFFFF1C4, on));
+        c.drawCircle(hx, hy + s * 0.03f, s * 0.035f, paint);
+        paint.setColor(0xFF1E2634);
+        c.drawRect(hx - s * 0.055f, hy - s * 0.02f, hx + s * 0.055f, hy + s * 0.012f, paint);
     }
 
     private void drawFountain(Canvas c, float tod) {
@@ -2281,9 +2733,7 @@ final class SkylineGame extends GameView {
         int roof = blend(color, 0xFFFFFFFF, 0.16f);
 
         // Night lights switch on tower by tower as dusk falls rather than all at once.
-        float night = 1f - tod;
-        float stagger = ((seedIdx * 37) % 25) / 25f;
-        float on = Math.max(0f, Math.min(1f, (night - 0.35f - stagger * 0.25f) * 5f));
+        float on = lightsOn(seedIdx, tod);
 
         paint.setStyle(Paint.Style.FILL);
         if (doorGlow[gx][gy] > 0f) {
@@ -2316,6 +2766,12 @@ final class SkylineGame extends GameView {
         path.lineTo(sx - tw, sy);
         path.close();
         c.drawPath(path, paint);
+        // 3.25: the roof's two front edges catch the light, the right one more.
+        paint.setStrokeWidth(Math.max(dp(1.2f), tw * 0.025f));
+        paint.setColor(0x55FFFFFF);
+        c.drawLine(sx - tw, sy, sx, sy + th, paint);
+        paint.setColor(0x88FFFFFF);
+        c.drawLine(sx, sy + th, sx + tw, sy, paint);
         if (on > 0.05f) {
             // A lit crown on every tower you have built.
             int crown = blend(color, 0xFFFFFFFF, 0.65f);
@@ -2326,6 +2782,27 @@ final class SkylineGame extends GameView {
             paint.setStyle(Paint.Style.FILL);
             Fx.glow(c, sx, sy, tw * 0.9f, ((int) (on * 0x50) << 24) | (crown & 0xFFFFFF));
         }
+
+        // Ambient occlusion: the foot of each face darkens toward the ground in two soft steps, so
+        // the tower sits on the street instead of floating on it. One convex quad per face per step.
+        float fade = Math.min(bodyH, bh * 2.2f);
+        paint.setColor(0x24000000);
+        for (int k = 1; k <= 2; k++) {
+            float top = bodyH - fade * k / 2f;
+            for (int f = -1; f <= 1; f += 2) {
+                path.reset();
+                path.moveTo(sx + f * tw, sy + top);
+                path.lineTo(sx, sy + th + top);
+                path.lineTo(sx, sy + th + bodyH);
+                path.lineTo(sx + f * tw, sy + bodyH);
+                path.close();
+                c.drawPath(path, paint);
+            }
+        }
+        // The front corner, where the shadowed face meets the lit one.
+        paint.setStrokeWidth(Math.max(dp(1f), tw * 0.02f));
+        paint.setColor(((on > 0.05f ? 0x30 : 0x48) << 24) | (blend(color, 0xFFFFFFFF, 0.5f) & 0xFFFFFF));
+        c.drawLine(sx, sy + th, sx, sy + th + bodyH, paint);
 
         drawStyle(c, gx, gy, sx, sy, tw, th, bh, bodyH, color, tod, on);
 
@@ -2588,16 +3065,26 @@ final class SkylineGame extends GameView {
      */
     private void drawSkyTraffic(Canvas c, float w, float h, float tod) {
         double t = sessionSeconds;
-        int cloudAlpha = (int) (60 + 150 * tod);
+        // Clouds: a shaded base, three puffs and a lit crown. At night they are dark, moonlit at the
+        // top edge only, where a flat grey oval read as a saucer against the stars.
+        int body = blend(0xFF2A3350, 0xFFF4F7FB, tod);
+        int shade = blend(0xFF161C30, 0xFFC4D0DE, tod);
+        int lit = blend(0xFF55607E, 0xFFFFFFFF, tod);
+        int cloudAlpha = (int) (90 + 120 * tod);
         paint.setStyle(Paint.Style.FILL);
         for (int i = 0; i < 5; i++) {
             float span = w + dp(400f);
             float cx = (float) (((i * 431 + 60) + t * dp(6f + i * 2f)) % span) - dp(200f);
             float cy = h * (0.10f + (i % 3) * 0.08f);
             float sc = 0.7f + (i % 2) * 0.4f;
-            paint.setColor((cloudAlpha << 24) | 0xFFFFFF);
-            c.drawOval(cx - dp(80f) * sc, cy - dp(12f) * sc, cx + dp(80f) * sc, cy + dp(12f) * sc, paint);
-            c.drawOval(cx - dp(38f) * sc, cy - dp(28f) * sc, cx + dp(40f) * sc, cy + dp(4f) * sc, paint);
+            paint.setColor((cloudAlpha << 24) | (shade & 0xFFFFFF));
+            c.drawOval(cx - dp(80f) * sc, cy - dp(10f) * sc, cx + dp(80f) * sc, cy + dp(13f) * sc, paint);
+            paint.setColor((cloudAlpha << 24) | (body & 0xFFFFFF));
+            c.drawOval(cx - dp(62f) * sc, cy - dp(22f) * sc, cx - dp(4f) * sc, cy + dp(6f) * sc, paint);
+            c.drawOval(cx - dp(30f) * sc, cy - dp(34f) * sc, cx + dp(36f) * sc, cy + dp(4f) * sc, paint);
+            c.drawOval(cx + dp(14f) * sc, cy - dp(20f) * sc, cx + dp(66f) * sc, cy + dp(6f) * sc, paint);
+            paint.setColor(((cloudAlpha * 2 / 3) << 24) | (lit & 0xFFFFFF));
+            c.drawOval(cx - dp(22f) * sc, cy - dp(32f) * sc, cx + dp(22f) * sc, cy - dp(14f) * sc, paint);
         }
         // A plane every 24 s, left to right, high up.
         double lap = (t % 24) / 24;
@@ -2669,59 +3156,196 @@ final class SkylineGame extends GameView {
         float ground = h * 0.86f;
         float left = w * 0.02f;
         float right = w * 0.30f;
-        // Floodlights after dark.
-        if (tod < 0.5f) {
+        float lamp = lampLevel(tod);
+        paint.setStyle(Paint.Style.FILL);
+        // 3.25: the yard has a surface - packed gravel with a kerb along its front edge.
+        paint.setColor(blend(0xFF1C1A18, 0xFF6A6252, tod));
+        c.drawRect(left - dp(8f), ground - dp(4f), right + dp(8f), ground + dp(12f), paint);
+        paint.setColor(blend(0xFF2C2A26, 0xFF8A8270, tod));
+        c.drawRect(left - dp(8f), ground - dp(4f), right + dp(8f), ground - dp(2f), paint);
+        paint.setColor(blend(0xFF343C48, 0xFFA4A8AE, tod));
+        c.drawRect(left - dp(8f), ground + dp(10f), right + dp(8f), ground + dp(14f), paint);
+        // Floodlights after dark: a mast, a twin-lamp head, a cone of light and a pool on the gravel.
+        if (lamp > 0.02f) {
             for (int i = 0; i < 2; i++) {
                 float lx = left + dp(40f) + i * dp(120f);
-                Fx.glow(c, lx, ground - dp(10f), dp(90f), 0x33FFE6A8);
-                paint.setColor(0xFF2A3446);
-                c.drawRect(lx - dp(2f), ground - dp(70f), lx + dp(2f), ground, paint);
-                paint.setColor(0xFFFFE6A8);
-                c.drawRect(lx - dp(9f), ground - dp(78f), lx + dp(9f), dp(6f) + ground - dp(78f), paint);
+                float ly = ground - dp(75f);
+                path.reset();
+                path.moveTo(lx - dp(8f), ly + dp(4f));
+                path.lineTo(lx + dp(8f), ly + dp(4f));
+                path.lineTo(lx + dp(62f), ground);
+                path.lineTo(lx - dp(62f), ground);
+                path.close();
+                paint.setColor(((int) (lamp * 0x1C) << 24) | 0xFFE6A8);
+                c.drawPath(path, paint);
+                groundPool(c, lx, ground + dp(2f), dp(80f), ((int) (lamp * 0x60) << 24) | 0xFFE6A8);
             }
         }
-        // Site hut.
-        paint.setColor(0xFF6E7684);
+        for (int i = 0; i < 2; i++) {
+            float lx = left + dp(40f) + i * dp(120f);
+            paint.setColor(0xFF2A3446);
+            c.drawRect(lx - dp(2f), ground - dp(70f), lx + dp(2f), ground, paint);
+            c.drawRect(lx - dp(11f), ground - dp(72f), lx + dp(11f), ground - dp(70f), paint);
+            for (int k = -1; k <= 1; k += 2) {
+                float hx = lx + k * dp(6f);
+                paint.setColor(0xFF1E2634);
+                c.drawRect(hx - dp(5f), ground - dp(80f), hx + dp(5f), ground - dp(72f), paint);
+                paint.setColor(blend(0xFF6E7684, 0xFFFFF1C4, lamp));
+                c.drawRect(hx - dp(4f), ground - dp(75f), hx + dp(4f), ground - dp(72f), paint);
+            }
+            if (lamp > 0.02f) {
+                Fx.glow(c, lx, ground - dp(74f), dp(22f), ((int) (lamp * 0x90) << 24) | 0xFFF1C4);
+            }
+        }
+        // Site hut: shadow, a two-tone cabin with a roof overhang, a lit window and a door.
+        paint.setColor(0x48000000);
+        c.drawOval(left - dp(6f), ground - dp(4f), left + dp(96f), ground + dp(6f), paint);
+        paint.setColor(blend(0xFF3A404C, 0xFF7E8694, tod));
         c.drawRect(left, ground - dp(46f), left + dp(86f), ground, paint);
-        paint.setColor(0xFF4C535E);
-        c.drawRect(left, ground - dp(52f), left + dp(86f), ground - dp(44f), paint);
-        paint.setColor(tod < 0.5f ? 0xFFFFE6A8 : 0xFF2A3446);
+        paint.setColor(blend(0xFF2E3440, 0xFF666E7C, tod));
+        c.drawRect(left, ground - dp(12f), left + dp(86f), ground, paint);
+        paint.setColor(blend(0xFF262C36, 0xFF4C535E, tod));
+        c.drawRect(left - dp(5f), ground - dp(53f), left + dp(91f), ground - dp(45f), paint);
+        paint.setColor(blend(0xFF3A424E, 0xFF7C8492, tod));
+        c.drawRect(left - dp(5f), ground - dp(53f), left + dp(91f), ground - dp(51f), paint);
+        paint.setColor(ACCENT);
+        c.drawRect(left, ground - dp(44f), left + dp(86f), ground - dp(41f), paint);
+        boolean hutLit = tod < 0.5f;
+        if (hutLit) {
+            Fx.glow(c, left + dp(21f), ground - dp(28f), dp(26f), 0x55FFE6A8);
+        }
+        paint.setColor(hutLit ? 0xFFFFE6A8 : blend(0xFF2A3446, 0xFF8FB0CC, tod));
         c.drawRect(left + dp(12f), ground - dp(36f), left + dp(30f), ground - dp(20f), paint);
+        paint.setColor(0xFF2A3446);
+        c.drawRect(left + dp(20.5f), ground - dp(36f), left + dp(21.5f), ground - dp(20f), paint);
         paint.setColor(0xFF35404E);
         c.drawRect(left + dp(52f), ground - dp(34f), left + dp(72f), ground, paint);
-        // Fence with a gap for the gate.
+        paint.setColor(0xFFB9C2CE);
+        c.drawCircle(left + dp(68f), ground - dp(17f), dp(1.5f), paint);
+        // Materials inside the fence: a stack of steel beams and a pallet of bricks.
+        float mx = left + dp(214f);
+        paint.setColor(0x40000000);
+        c.drawOval(mx - dp(6f), ground - dp(4f), mx + dp(140f), ground + dp(5f), paint);
+        for (int k = 0; k < 3; k++) {
+            float by = ground - dp(6f) - k * dp(6f);
+            float inset = k * dp(8f);
+            paint.setColor(k == 1 ? 0xFF8A4E36 : 0xFF6E7684);
+            c.drawRect(mx + inset, by - dp(5f), mx + dp(86f) - inset * 0.5f, by, paint);
+            paint.setColor(0x40FFFFFF);
+            c.drawRect(mx + inset, by - dp(5f), mx + dp(86f) - inset * 0.5f, by - dp(4f), paint);
+        }
+        float bx0 = mx + dp(98f);
+        paint.setColor(0xFF6B4A2E);
+        c.drawRect(bx0 - dp(2f), ground - dp(4f), bx0 + dp(36f), ground, paint);
+        for (int r = 0; r < 3; r++) {
+            for (int k = 0; k < 3; k++) {
+                float bx = bx0 + k * dp(11.5f) + (r % 2) * dp(2f);
+                float by = ground - dp(4f) - r * dp(6f);
+                paint.setColor(blend(0xFF5A2A22, 0xFFB4563E, tod * 0.8f + 0.2f * ((r + k) % 2)));
+                c.drawRect(bx, by - dp(5f), bx + dp(10.5f), by, paint);
+            }
+        }
+        // Fence: posts, two rails and a mesh between them, with a gap for the gate.
+        float gate0 = left + dp(150f);
+        float gate1 = left + dp(196f);
+        paint.setColor(0x22C8D2DC);
+        c.drawRect(left + dp(96f), ground - dp(30f), gate0 + dp(3f), ground, paint);
+        c.drawRect(gate1, ground - dp(30f), right, ground, paint);
         paint.setColor(0xFF5A6472);
         for (float fx0 = left + dp(96f); fx0 < right; fx0 += dp(18f)) {
-            if (fx0 > left + dp(150f) && fx0 < left + dp(196f)) {
+            if (fx0 > gate0 && fx0 < gate1) {
                 continue;
             }
-            c.drawRect(fx0, ground - dp(30f), fx0 + dp(3f), ground, paint);
+            c.drawRect(fx0, ground - dp(32f), fx0 + dp(3f), ground, paint);
         }
-        c.drawRect(left + dp(96f), ground - dp(30f), right, ground - dp(27f), paint);
-        // Parked truck with a tipper bed.
-        float tx = right - dp(74f);
+        c.drawRect(left + dp(96f), ground - dp(30f), gate0 + dp(3f), ground - dp(27f), paint);
+        c.drawRect(gate1, ground - dp(30f), right, ground - dp(27f), paint);
+        c.drawRect(left + dp(96f), ground - dp(6f), gate0 + dp(3f), ground - dp(4f), paint);
+        c.drawRect(gate1, ground - dp(6f), right, ground - dp(4f), paint);
+        // Hazard barrier across the top of the gate and a cone each side.
+        float barY = ground - dp(22f);
+        for (int k = 0; k < 4; k++) {
+            float x0 = gate0 + dp(4f) + k * dp(10.5f);
+            paint.setColor(k % 2 == 0 ? 0xFFF0B132 : 0xFF1E2634);
+            c.drawRect(x0, barY, x0 + dp(10.5f), barY + dp(5f), paint);
+        }
+        for (int k = 0; k < 2; k++) {
+            float cx = k == 0 ? gate0 + dp(10f) : gate1 - dp(8f);
+            path.reset();
+            path.moveTo(cx - dp(6f), ground);
+            path.lineTo(cx + dp(6f), ground);
+            path.lineTo(cx + dp(1.5f), ground - dp(15f));
+            path.lineTo(cx - dp(1.5f), ground - dp(15f));
+            path.close();
+            paint.setColor(0xFFE0582E);
+            c.drawPath(path, paint);
+            paint.setColor(0xFFF4F1E8);
+            c.drawRect(cx - dp(3.6f), ground - dp(9f), cx + dp(3.6f), ground - dp(6.5f), paint);
+        }
+        // A concrete mixer parked by the fence: its drum turns faster the harder you row.
+        float tx = right - dp(78f);
+        paint.setColor(0x50000000);
+        c.drawOval(tx - dp(4f), ground - dp(4f), tx + dp(80f), ground + dp(5f), paint);
+        paint.setColor(0xFF2A2F3A);
+        c.drawRect(tx + dp(2f), ground - dp(14f), tx + dp(76f), ground - dp(8f), paint);
         paint.setColor(0xFFE0582E);
-        c.drawRoundRect(tx, ground - dp(30f), tx + dp(34f), ground - dp(8f), dp(3f), dp(3f), paint);
-        paint.setColor(0xFF9AA5B1);
-        c.drawRect(tx + dp(34f), ground - dp(24f), tx + dp(72f), ground - dp(8f), paint);
-        paint.setColor(0xFF2A3446);
-        c.drawCircle(tx + dp(12f), ground - dp(6f), dp(6f), paint);
-        c.drawCircle(tx + dp(56f), ground - dp(6f), dp(6f), paint);
+        c.drawRoundRect(tx, ground - dp(32f), tx + dp(26f), ground - dp(8f), dp(4f), dp(4f), paint);
+        paint.setColor(0xFFB8441E);
+        c.drawRect(tx + dp(18f), ground - dp(32f) + dp(4f), tx + dp(26f), ground - dp(8f), paint);
+        paint.setColor(tod > 0.4f ? 0xFF8FB0CC : 0xFF2A3446);
+        c.drawRoundRect(tx + dp(3f), ground - dp(29f), tx + dp(15f), ground - dp(20f), dp(2f), dp(2f), paint);
+        if (lamp > 0.02f) {
+            Fx.glow(c, tx, ground - dp(14f), dp(16f), ((int) (lamp * 0x88) << 24) | 0xFFF1C4);
+        }
+        float dx0 = tx + dp(28f);
+        float dx1 = tx + dp(76f);
+        float dcy = ground - dp(24f);
+        float dhh = dp(11f);
+        paint.setColor(0xFFB9C0CA);
+        c.drawOval(dx0, dcy - dhh, dx1, dcy + dhh, paint);
+        paint.setColor(0xFF8C94A0);
+        c.drawOval(dx0 + dp(2f), dcy, dx1 - dp(2f), dcy + dhh, paint);
+        paint.setColor(0x66FFFFFF);
+        c.drawOval(dx0 + dp(8f), dcy - dhh + dp(2f), dx1 - dp(10f), dcy - dhh + dp(6f), paint);
+        paint.setStrokeWidth(dp(2.2f));
+        paint.setColor(0xFFE0582E);
+        float dw = dx1 - dx0;
+        for (int k = 0; k < 4; k++) {
+            float u = (float) (((k / 4.0) + mixerSpin) % 1.0);
+            float x = dx0 + dw * (0.08f + 0.84f * u);
+            float e = 2f * u - 1f;
+            float hh = dhh * (float) Math.sqrt(Math.max(0f, 1f - e * e)) * 0.8f;
+            c.drawLine(x - dp(3f), dcy - hh, x + dp(3f), dcy + hh, paint);
+        }
+        paint.setColor(0xFF6E7684);
+        c.drawRect(dx1 - dp(2f), dcy - dp(6f), dx1 + dp(3f), dcy + dp(4f), paint);
+        for (int k = 0; k < 3; k++) {
+            float wx = k == 0 ? tx + dp(12f) : tx + dp(48f) + (k - 1) * dp(16f);
+            paint.setColor(0xFF1E232C);
+            c.drawCircle(wx, ground - dp(6f), dp(6f), paint);
+            paint.setColor(0xFF9AA5B1);
+            c.drawCircle(wx, ground - dp(6f), dp(2.4f), paint);
+        }
         // Foreman pacing the fence line, turning at each end.
         float span = right - left - dp(130f);
         float walk = (float) ((t * dp(26f)) % (span * 2));
         float fxp = left + dp(104f) + (walk < span ? walk : span * 2 - walk);
         boolean facing = walk < span;
         float step = (float) Math.sin(t * 6) * dp(4f);
-        paint.setColor(0xFFF5C518);
-        c.drawRect(fxp - dp(5f), ground - dp(26f), fxp + dp(5f), ground - dp(12f), paint);
+        paint.setColor(0x48000000);
+        c.drawOval(fxp - dp(8f), ground - dp(2f), fxp + dp(8f), ground + dp(3f), paint);
         paint.setColor(0xFF2A2F3A);
         c.drawRect(fxp - dp(4f) + step, ground - dp(12f), fxp - dp(1f) + step, ground, paint);
         c.drawRect(fxp + dp(1f) - step, ground - dp(12f), fxp + dp(4f) - step, ground, paint);
+        paint.setColor(0xFFF5C518);
+        c.drawRoundRect(fxp - dp(5.5f), ground - dp(26f), fxp + dp(5.5f), ground - dp(11f), dp(2f), dp(2f), paint);
+        paint.setColor(0xFFE6EDF7);
+        c.drawRect(fxp - dp(5.5f), ground - dp(19f), fxp + dp(5.5f), ground - dp(17.5f), paint);
         paint.setColor(0xFFF1C27D);
         c.drawCircle(fxp, ground - dp(31f), dp(5f), paint);
         paint.setColor(0xFFF5C518);
         c.drawArc(fxp - dp(6f), ground - dp(39f), fxp + dp(6f), ground - dp(27f), 180, 180, true, paint);
+        c.drawRect(fxp - dp(7.5f), ground - dp(33.5f), fxp + dp(7.5f), ground - dp(32f), paint);
         paint.setColor(0xFF2A2F3A);
         c.drawCircle(fxp + (facing ? dp(2f) : -dp(2f)), ground - dp(31f), dp(1.2f), paint);
     }
@@ -2729,6 +3353,9 @@ final class SkylineGame extends GameView {
     /* ---------------------------------------------------------------- HUD ---------- */
 
     private void drawHud(Canvas c, float w, float h) {
+        // Its own card (3.25.0): it is the one HUD figure drawn over the city's centre, and on a tall
+        // city it was printed straight onto the rooftops and could not be read.
+        panel(c, w * 0.5f - dp(118f), dp(2f), w * 0.5f + dp(118f), dp(58f));
         bold(c, String.valueOf(lifetime), w * 0.5f, dp(34f), 34f, ACCENT, Paint.Align.CENTER);
         label(c, "BLOCKS IN THE CITY", w * 0.5f, dp(48f), 9f, FAINT, Paint.Align.CENTER);
         String next = null;
@@ -2764,6 +3391,62 @@ final class SkylineGame extends GameView {
     }
 
     /* ---------------------------------------------------------------- HUD panels ---------- */
+
+    /**
+     * 3.25: one look for every HUD card - rounded, a dark vertical gradient in the app's panel
+     * colour, a hairline outline and a lighter top edge - in place of flat translucent black boxes.
+     */
+    private void panel(Canvas c, float l, float t, float r, float b) {
+        float rad = dp(10f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(panelGradient(t, b));
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x661C2736);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x2EFFFFFF);
+        c.drawRect(l + rad, t, r - rad, t + dp(1f), paint);
+    }
+
+    private LinearGradient panelGradient(float t, float b) {
+        int kt = (int) t;
+        int kb = (int) b;
+        for (int i = 0; i < panelShader.length; i++) {
+            if (panelShader[i] != null && panelKeyT[i] == kt && panelKeyB[i] == kb) {
+                return panelShader[i];
+            }
+        }
+        int i = panelNext;
+        panelNext = (panelNext + 1) % panelShader.length;
+        panelShader[i] = new LinearGradient(0, kt, 0, kb, 0xD8152031, 0xD80A0F18, Shader.TileMode.CLAMP);
+        panelKeyT[i] = kt;
+        panelKeyB[i] = kb;
+        return panelShader[i];
+    }
+
+    /** A rounded progress bar: track, fill, and a gloss along the top of the fill. */
+    private void bar(Canvas c, float l, float t, float r, float b, float f, int col) {
+        float rad = (b - t) / 2f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x33FFFFFF);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        float x = l + (r - l) * Math.max(0f, Math.min(1f, f));
+        if (x <= l) {
+            return;
+        }
+        paint.setColor(col);
+        c.drawRoundRect(l, t, x, b, rad, rad, paint);
+        if (x - l > rad * 2.4f) {
+            paint.setColor(0x44FFFFFF);
+            float gh = (b - t) * 0.3f;
+            c.drawRoundRect(l + rad * 0.7f, t + (b - t) * 0.14f, x - rad * 0.7f, t + (b - t) * 0.14f + gh,
+                    gh / 2f, gh / 2f, paint);
+        }
+    }
 
     /** Stars, the tier's name, and what the next one unlocks. */
     private void drawRatingPanel(Canvas c, float w) {
@@ -2817,9 +3500,7 @@ final class SkylineGame extends GameView {
         float y0 = dp(58f);
         float wpx = dp(268f);
         float hpx = dp(96f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x44000000);
-        c.drawRoundRect(x0, y0, x0 + wpx, y0 + hpx, dp(8f), dp(8f), paint);
+        panel(c, x0, y0, x0 + wpx, y0 + hpx);
         label(c, "THIS WEEK", x0 + dp(10f), y0 + dp(14f), 8.5f, FAINT, Paint.Align.LEFT);
         String verdict;
         int colr;
@@ -2847,6 +3528,13 @@ final class SkylineGame extends GameView {
             c.drawRect(bx, top, bx + bw, base, paint);
             paint.setColor(i == 0 ? (passedLastWeek ? 0xFF35D0BA : 0xFF6F8CFF) : 0xFF5D6B80);
             c.drawRect(bx, base - bh2, bx + bw, base, paint);
+            if (bh2 > dp(2f)) {
+                // Lit from the right like the city: a highlight down one edge, shade down the other.
+                paint.setColor(0x30FFFFFF);
+                c.drawRect(bx + bw - dp(8f), base - bh2, bx + bw - dp(3f), base, paint);
+                paint.setColor(0x26000000);
+                c.drawRect(bx, base - bh2, bx + dp(6f), base, paint);
+            }
             // Floor lines, so the column reads as a stack of storeys rather than a bar.
             paint.setColor(0x33000000);
             for (float yy = base - dp(6f); yy > base - bh2; yy -= dp(6f)) {
@@ -2855,8 +3543,13 @@ final class SkylineGame extends GameView {
             if (i == 0 && passedLastWeek) {
                 Fx.glow(c, bx + bw / 2f, base - bh2, dp(30f), 0x66FFD24A);
             }
+            // A full column would push its figure up into the panel's title: it goes inside instead.
+            float numY = base - bh2 - dp(5f);
+            if (numY < top + dp(4f)) {
+                numY = base - bh2 + dp(15f);
+            }
             bold(c, String.valueOf(i == 0 ? weekFloors : lastWeekFloors), bx + bw / 2f,
-                    base - bh2 - dp(5f), 11f, i == 0 ? TEXT : DIM, Paint.Align.CENTER);
+                    numY, 11f, i == 0 ? TEXT : DIM, Paint.Align.CENTER);
             label(c, i == 0 ? "NOW" : "LAST WEEK", bx + bw / 2f, base + dp(13f), 8f, FAINT,
                     Paint.Align.CENTER);
         }
@@ -2873,9 +3566,7 @@ final class SkylineGame extends GameView {
         float x0 = w - dp(392f);
         float x1 = w - dp(96f);
         float y0 = dp(122f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x44000000);
-        c.drawRoundRect(x0, y0, x1, y0 + dp(80f), dp(8f), dp(8f), paint);
+        panel(c, x0, y0, x1, y0 + dp(80f));
         if (!requestOpen) {
             label(c, "THE CITIZENS", x0 + dp(12f), y0 + dp(20f), 8.5f, FAINT, Paint.Align.LEFT);
             String line = !hasClockStarted() ? "A DELEGATION IS ON ITS WAY"
@@ -2895,11 +3586,7 @@ final class SkylineGame extends GameView {
         bold(c, done + " / " + requestNeed, x1 - dp(12f), y0 + dp(42f), 15f,
                 f >= 1f ? ACCENT : TEXT, Paint.Align.RIGHT);
         float by = y0 + dp(54f);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(x0 + dp(12f), by, x1 - dp(12f), by + dp(9f), dp(4.5f), dp(4.5f), paint);
-        paint.setColor(col);
-        c.drawRoundRect(x0 + dp(12f), by, x0 + dp(12f) + (x1 - x0 - dp(24f)) * f, by + dp(9f),
-                dp(4.5f), dp(4.5f), paint);
+        bar(c, x0 + dp(12f), by, x1 - dp(12f), by + dp(9f), f, col);
         label(c, "FLOORS THIS SESSION - IT GOES ON YOUR TALLEST NEW TOWER", x0 + dp(12f),
                 by + dp(22f), 8f, FAINT, Paint.Align.LEFT);
     }
@@ -2922,8 +3609,7 @@ final class SkylineGame extends GameView {
             float f = Math.min(1f, done / (float) Math.max(1, rushTarget));
             float elapsed = 1f - Math.max(0f, rushLeft) / RUSH_SECONDS;
             boolean behind = f < elapsed;
-            paint.setColor(0x66000000);
-            c.drawRoundRect(x0, y0, x1, y0 + dp(78f), dp(8f), dp(8f), paint);
+            panel(c, x0, y0, x1, y0 + dp(78f));
             int secs = (int) Math.ceil(Math.max(0f, rushLeft));
             boolean urgent = secs <= 10;
             float beat = urgent ? 1f + 0.12f * (float) Math.abs(Math.sin(sessionSeconds * 6)) : 1f;
@@ -2933,11 +3619,7 @@ final class SkylineGame extends GameView {
             bold(c, done + " / " + rushTarget + " FLOORS", cx, y0 + dp(24f), 14f,
                     behind ? WARN : ACCENT, Paint.Align.CENTER);
             float by = y0 + dp(36f);
-            paint.setColor(0x33FFFFFF);
-            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), dp(7f), dp(7f), paint);
-            paint.setColor(behind ? WARN : ACCENT);
-            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * f, by + dp(14f),
-                    dp(7f), dp(7f), paint);
+            bar(c, x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), f, behind ? WARN : ACCENT);
             // The pace line: where the city expects you to be this second.
             float px2 = x0 + dp(14f) + (x1 - x0 - dp(28f)) * Math.min(1f, elapsed);
             paint.setColor(0xFFFFFFFF);
@@ -2948,8 +3630,7 @@ final class SkylineGame extends GameView {
         }
 
         if (stormPhase != STORM_NONE) {
-            paint.setColor(0x66000000);
-            c.drawRoundRect(x0, y0, x1, y0 + dp(78f), dp(8f), dp(8f), paint);
+            panel(c, x0, y0, x1, y0 + dp(78f));
             String title = stormPhase == STORM_WARNING ? "STORM INCOMING"
                     : stormPhase == STORM_OVERHEAD ? "STORM OVERHEAD" : "STORM CLEARING";
             bold(c, title, x0 + dp(14f), y0 + dp(24f), 13f, stormPhase == STORM_OVERHEAD ? BAD : WARN,
@@ -2962,11 +3643,8 @@ final class SkylineGame extends GameView {
                         TEXT, Paint.Align.RIGHT);
             }
             float by = y0 + dp(36f);
-            paint.setColor(0x33FFFFFF);
-            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), dp(7f), dp(7f), paint);
-            paint.setColor(shield > 0.55f ? 0xFF7FD8FF : shield > 0.25f ? WARN : BAD);
-            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * shield,
-                    by + dp(14f), dp(7f), dp(7f), paint);
+            bar(c, x0 + dp(14f), by, x1 - dp(14f), by + dp(14f), shield,
+                    shield > 0.55f ? 0xFF7FD8FF : shield > 0.25f ? WARN : BAD);
             label(c, "STORM SHIELD - YOUR POWER RIGHT NOW", x0 + dp(14f), y0 + dp(66f), 9f,
                     shield > 0.55f ? ACCENT : WARN, Paint.Align.LEFT);
             if (stormNoteT > 0f && stormNote != null) {
@@ -2977,24 +3655,20 @@ final class SkylineGame extends GameView {
         }
 
         if (damageTotal > 0) {
-            paint.setColor(0x66000000);
-            c.drawRoundRect(x0, y0, x1, y0 + dp(60f), dp(8f), dp(8f), paint);
+            panel(c, x0, y0, x1, y0 + dp(60f));
             bold(c, "REPAIRS", x0 + dp(14f), y0 + dp(24f), 13f, WARN, Paint.Align.LEFT);
             bold(c, damageTotal + (damageTotal == 1 ? " FLOOR" : " FLOORS"), x1 - dp(14f),
                     y0 + dp(24f), 14f, WARN, Paint.Align.RIGHT);
             float by = y0 + dp(32f);
             float f = Math.min(1f, concrete / REPAIR_COST);
-            paint.setColor(0x33FFFFFF);
-            c.drawRoundRect(x0 + dp(14f), by, x1 - dp(14f), by + dp(10f), dp(5f), dp(5f), paint);
-            paint.setColor(WARN);
-            c.drawRoundRect(x0 + dp(14f), by, x0 + dp(14f) + (x1 - x0 - dp(28f)) * f, by + dp(10f),
-                    dp(5f), dp(5f), paint);
+            bar(c, x0 + dp(14f), by, x1 - dp(14f), by + dp(10f), f, WARN);
             label(c, "EVERY STROKE GOES INTO THE REPAIRS - NOTHING NEW UNTIL THEY ARE DONE",
                     cx, y0 + dp(54f), 8.5f, FAINT, Paint.Align.CENTER);
             return;
         }
 
-        // Idle: the offer.
+        // Idle: the offer, on a card so it stays readable over the tops of a tall city.
+        panel(c, x0, y0 - dp(8f), x1, y0 + dp(68f));
         rushBtn.set(cx - dp(120f), y0, cx + dp(120f), y0 + dp(44f));
         boolean ready = rushAvailable();
         float pulse = ready ? 0.5f + 0.5f * (float) Math.abs(Math.sin(sessionSeconds * 2.2)) : 0f;
@@ -3018,16 +3692,13 @@ final class SkylineGame extends GameView {
         float x0 = w - dp(360f);
         float x1 = w - dp(100f);
         float y = dp(22f);
+        panel(c, x0 - dp(12f), y - dp(16f), x1 + dp(12f), y + dp(landmarkDone ? 60f : 72f));
         label(c, "THIS WEEK'S LANDMARK", x0, y, 8.5f, FAINT, Paint.Align.LEFT);
         label(c, landmarksBuilt + " BUILT", x1, y, 8.5f, FAINT, Paint.Align.RIGHT);
         bold(c, LANDMARK_NAMES[landmarkKind], x0, y + dp(18f), 14f, TEXT, Paint.Align.LEFT);
         float f = landmarkFraction();
         float by = y + dp(26f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(x0, by, x1, by + dp(9f), dp(4.5f), dp(4.5f), paint);
-        paint.setColor(landmarkDone ? ACCENT : WARN);
-        c.drawRoundRect(x0, by, x0 + (x1 - x0) * f, by + dp(9f), dp(4.5f), dp(4.5f), paint);
+        bar(c, x0, by, x1, by + dp(9f), f, landmarkDone ? ACCENT : WARN);
         long now = System.currentTimeMillis();
         long localDays = (now + zone.getOffset(now)) / 86400000L;
         int daysLeft = (int) (7 - (localDays + 3) % 7);
@@ -3047,13 +3718,11 @@ final class SkylineGame extends GameView {
 
     private void drawPhotoButton(Canvas c) {
         photoBtn.set(dp(14f), dp(12f), dp(118f), dp(46f));
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x55000000);
-        c.drawRoundRect(photoBtn, dp(8f), dp(8f), paint);
+        panel(c, photoBtn.left, photoBtn.top, photoBtn.right, photoBtn.bottom);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(1.2f));
         paint.setColor(0x88E6EDF7);
-        c.drawRoundRect(photoBtn, dp(8f), dp(8f), paint);
+        c.drawRoundRect(photoBtn, dp(10f), dp(10f), paint);
         // Camera glyph.
         float gx = photoBtn.left + dp(22f);
         float gy = photoBtn.centerY();
@@ -3081,29 +3750,120 @@ final class SkylineGame extends GameView {
         float baseX = dp(40f);
         float baseY = h * 0.62f;
         float topY = h * 0.14f;
+        boolean night = skyTod() < 0.45f;
+        int steel = 0xFFF0B132;
+        int steelDark = 0xFFB07E1E;
         paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFFF0B132);
-        c.drawRect(baseX - dp(4f), topY, baseX + dp(4f), baseY, paint);
-        for (float y = topY + dp(12f); y < baseY; y += dp(18f)) {
-            paint.setStrokeWidth(dp(1.5f));
-            c.drawLine(baseX - dp(4f), y, baseX + dp(4f), y + dp(12f), paint);
+        // Footing: a concrete pad with a shadow on the ground.
+        paint.setColor(0x50000000);
+        c.drawOval(baseX - dp(26f), baseY + dp(6f), baseX + dp(26f), baseY + dp(14f), paint);
+        paint.setColor(0xFF6E7684);
+        c.drawRect(baseX - dp(18f), baseY, baseX + dp(18f), baseY + dp(10f), paint);
+        paint.setColor(0xFF9AA2AE);
+        c.drawRect(baseX - dp(18f), baseY, baseX + dp(18f), baseY + dp(2f), paint);
+        // Mast: two chords with zigzag lacing and a tie at every section, the shadowed chord darker.
+        float mw = dp(6f);
+        paint.setStrokeWidth(dp(2.6f));
+        paint.setColor(steelDark);
+        c.drawLine(baseX - mw, topY, baseX - mw, baseY, paint);
+        paint.setColor(steel);
+        c.drawLine(baseX + mw, topY, baseX + mw, baseY, paint);
+        paint.setStrokeWidth(dp(1.3f));
+        boolean flip = false;
+        for (float y = topY + dp(6f); y + dp(12f) <= baseY; y += dp(12f)) {
+            c.drawLine(flip ? baseX + mw : baseX - mw, y, flip ? baseX - mw : baseX + mw, y + dp(12f), paint);
+            flip = !flip;
         }
-        c.drawRect(baseX - dp(10f), topY - dp(4f), baseX + dp(150f), topY + dp(4f), paint);
+        for (float y = topY + dp(6f); y <= baseY; y += dp(48f)) {
+            c.drawLine(baseX - mw, y, baseX + mw, y, paint);
+        }
+        // Tower head: an A-frame above the slewing ring, a red light on top.
+        float apexY = topY - dp(36f);
+        paint.setStrokeWidth(dp(2f));
+        c.drawLine(baseX - mw, topY - dp(5f), baseX, apexY, paint);
+        c.drawLine(baseX + mw, topY - dp(5f), baseX, apexY, paint);
+        paint.setStrokeWidth(dp(1.1f));
+        c.drawLine(baseX - mw * 0.5f, topY - dp(18f), baseX + mw * 0.5f, topY - dp(18f), paint);
+        boolean blink = ((int) (sessionSeconds * 1.2)) % 2 == 0;
+        if (blink) {
+            Fx.glow(c, baseX, apexY - dp(3f), dp(10f), 0x88FF4D4D);
+        }
+        paint.setColor(blink ? 0xFFFF4D4D : 0x66FF4D4D);
+        c.drawCircle(baseX, apexY - dp(3f), dp(2.6f), paint);
+        // Jib: a triangular truss tapering to the tip, and a short counter-jib with its weights.
+        float jibEnd = baseX + dp(150f);
+        float jTop = topY - dp(5f);
+        float jBot = topY + dp(5f);
+        paint.setColor(steel);
+        paint.setStrokeWidth(dp(2.2f));
+        c.drawLine(baseX - dp(30f), jBot, jibEnd, jBot, paint);
+        c.drawLine(baseX - dp(26f), jTop, jibEnd - dp(10f), jTop, paint);
+        c.drawLine(jibEnd - dp(10f), jTop, jibEnd, jBot, paint);
+        paint.setStrokeWidth(dp(1.2f));
+        flip = false;
+        for (float x = baseX - dp(26f); x + dp(10f) <= jibEnd - dp(10f); x += dp(10f)) {
+            c.drawLine(x, flip ? jTop : jBot, x + dp(10f), flip ? jBot : jTop, paint);
+            flip = !flip;
+        }
+        // Pendant ties from the apex to the jib and the counter-jib.
+        paint.setColor(0xFFB9C2CE);
+        paint.setStrokeWidth(dp(1f));
+        c.drawLine(baseX, apexY, baseX + dp(104f), jTop, paint);
+        c.drawLine(baseX, apexY, baseX - dp(26f), jTop, paint);
+        paint.setColor(0xFF7C8492);
+        c.drawRect(baseX - dp(34f), jBot, baseX - dp(14f), jBot + dp(14f), paint);
+        paint.setColor(0xFF9AA2AE);
+        c.drawRect(baseX - dp(34f), jBot, baseX - dp(14f), jBot + dp(2f), paint);
+        paint.setColor(0xFF5A6270);
+        c.drawRect(baseX - dp(34f), jBot + dp(7f), baseX - dp(14f), jBot + dp(8f), paint);
+        // Operator's cab under the jib, lit at night.
+        paint.setColor(0xFFD9DEE6);
+        c.drawRoundRect(baseX + mw, jBot, baseX + mw + dp(18f), jBot + dp(15f), dp(2f), dp(2f), paint);
+        paint.setColor(night ? 0xFFFFE6A8 : 0xFF6F8CB0);
+        c.drawRect(baseX + mw + dp(6f), jBot + dp(3f), baseX + mw + dp(16f), jBot + dp(10f), paint);
         float hookX = baseX + dp(120f);
-        paint.setColor(0xFF9AA5B1);
-        paint.setStrokeWidth(dp(1.5f));
-        c.drawLine(hookX, topY + dp(4f), hookX, topY + dp(46f), paint);
-        // Hopper: fills with concrete toward the next block.
+        // Trolley on the jib, two falls of cable to the hook block, and slings to the hopper.
+        paint.setColor(0xFF3A4454);
+        c.drawRect(hookX - dp(8f), jBot - dp(1f), hookX + dp(8f), jBot + dp(5f), paint);
         float hopW = dp(64f);
         float hopH = dp(54f);
         float hx = hookX - hopW / 2f;
         float hy = topY + dp(46f);
-        paint.setColor(0x55FFFFFF);
+        float blockY = topY + dp(28f);
+        paint.setColor(0xFF9AA5B1);
+        paint.setStrokeWidth(dp(1.1f));
+        c.drawLine(hookX - dp(3f), jBot + dp(5f), hookX - dp(3f), blockY, paint);
+        c.drawLine(hookX + dp(3f), jBot + dp(5f), hookX + dp(3f), blockY, paint);
+        c.drawLine(hookX, blockY + dp(6f), hx + dp(4f), hy, paint);
+        c.drawLine(hookX, blockY + dp(6f), hx + hopW - dp(4f), hy, paint);
+        paint.setColor(steel);
+        c.drawRoundRect(hookX - dp(6f), blockY, hookX + dp(6f), blockY + dp(7f), dp(2f), dp(2f), paint);
+        // Hopper: a steel skip that fills with concrete toward the next block.
+        paint.setColor(0xCC141B26);
         c.drawRect(hx, hy, hx + hopW, hy + hopH, paint);
         boolean repairing = damageTotal > 0;
         float full = Math.min(1f, concrete / (repairing ? REPAIR_COST : cost(nextUnits)));
-        paint.setColor(repairing ? WARN : nextUnits >= 3 ? ACCENT : nextUnits == 2 ? BLUE : WARN);
+        int fillCol = repairing ? WARN : nextUnits >= 3 ? ACCENT : nextUnits == 2 ? BLUE : WARN;
+        paint.setColor(fillCol);
         c.drawRect(hx, hy + hopH * (1f - full), hx + hopW, hy + hopH, paint);
+        if (full > 0.02f) {
+            // The surface of the pour catches the light; the near wall darkens it toward the base.
+            paint.setColor(blend(fillCol, 0xFFFFFFFF, 0.35f));
+            c.drawRect(hx, hy + hopH * (1f - full), hx + hopW, hy + hopH * (1f - full) + dp(3f), paint);
+            paint.setColor(0x26000000);
+            c.drawRect(hx, hy + hopH * (1f - full * 0.4f), hx + hopW, hy + hopH, paint);
+        }
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2f));
+        paint.setColor(0xFF5A6474);
+        c.drawRect(hx, hy, hx + hopW, hy + hopH, paint);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x55B9C2CE);
+        c.drawLine(hx + hopW / 3f, hy, hx + hopW / 3f, hy + hopH, paint);
+        c.drawLine(hx + hopW * 2f / 3f, hy, hx + hopW * 2f / 3f, hy + hopH, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF7C8696);
+        c.drawRect(hx - dp(3f), hy - dp(3f), hx + hopW + dp(3f), hy + dp(1f), paint);
         bold(c, repairing ? "REPAIR" : nextUnits + (nextUnits == 1 ? " FLOOR" : " FLOORS"), hookX,
                 hy + hopH + dp(16f), 11f,
                 repairing ? WARN : nextUnits > 1 ? ACCENT : TEXT, Paint.Align.CENTER);

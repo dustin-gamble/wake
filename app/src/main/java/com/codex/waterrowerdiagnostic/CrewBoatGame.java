@@ -102,6 +102,60 @@ final class CrewBoatGame extends GameView {
     private android.graphics.LinearGradient skyShader;
     private float skyShaderTop = -1f;
 
+    /* ---------- 3.25.0 graphics: scratch state, all allocated once ---------- */
+
+    /** Reused for arcs (the rowers' caps). */
+    private final RectF oval = new RectF();
+    /** Per-seat pose for the boat being drawn, filled before any of it is painted. */
+    private final float[] kPhase = new float[SEATS];
+    private final float[] kDrive = new float[SEATS];
+    private final float[] kTired = new float[SEATS];
+    private final float[] kHipX = new float[SEATS];
+    private final float[] kHipY = new float[SEATS];
+    private final float[] kKneeX = new float[SEATS];
+    private final float[] kKneeY = new float[SEATS];
+    private final float[] kFootX = new float[SEATS];
+    private final float[] kShX = new float[SEATS];
+    private final float[] kShY = new float[SEATS];
+    private final float[] kSin = new float[SEATS];
+    private final float[] kCos = new float[SEATS];
+    private final float[] kTorso = new float[SEATS];
+    private final float[] kHeadX = new float[SEATS];
+    private final float[] kHeadY = new float[SEATS];
+    private final float[] kElX = new float[SEATS];
+    private final float[] kElY = new float[SEATS];
+    private final float[] kHandX = new float[SEATS];
+    private final float[] kHandY = new float[SEATS];
+    private final float[] kPinX = new float[SEATS];
+    private final float[] kBladeX = new float[SEATS];
+    private final float[] kBladeY = new float[SEATS];
+    private final float[] kDepth = new float[SEATS];
+    private final float[] kSquare = new float[SEATS];
+    /** Speed (m/s) of the boat about to be drawn, for its bow wave and wake. */
+    private float drawSpeed;
+    private float frameDt;
+    /** Skin tones for the two crews, picked per seat by hash so the boats are not clones. */
+    private static final int[] SKIN = {0xFFF1C9A0, 0xFFDDA676, 0xFFB57A4E, 0xFF8A5638, 0xFFEBBE92, 0xFFC98E62};
+    private static final int PANEL_TOP = 0xEB17243A;
+    private static final int PANEL_BOTTOM = 0xEB0A111C;
+
+    /** Vertical two-colour gradients, cached by their span and colours (hull, panels, shore). */
+    private static final int SHADER_SLOTS = 16;
+    private final android.graphics.LinearGradient[] vShader = new android.graphics.LinearGradient[SHADER_SLOTS];
+    private final float[] vTop = new float[SHADER_SLOTS];
+    private final float[] vBottom = new float[SHADER_SLOTS];
+    private final int[] vC0 = new int[SHADER_SLOTS];
+    private final int[] vC1 = new int[SHADER_SLOTS];
+    private int vNext;
+
+    /** HUD captions that change during a race, rebuilt only when what they say changes. */
+    private String marginLabel = "";
+    private int marginKey = Integer.MIN_VALUE;
+    private String statusLabel = "";
+    private long statusKey = Long.MIN_VALUE;
+    private String arrowLabel = "";
+    private int arrowKey = Integer.MIN_VALUE;
+
     private Seat seat = Seat.STROKE;
     private Phase phase = Phase.READY;
     private double raceStart;
@@ -847,6 +901,7 @@ final class CrewBoatGame extends GameView {
             return;
         }
         fx.step(dt, dp(260f));
+        frameDt = dt;
         float speed = boat.value();
         double sinceStroke = lastStrokeAt < 0 ? 99 : sessionSeconds - lastStrokeAt;
         boolean rowing = sinceStroke < crewInterval * 2.2;
@@ -919,8 +974,9 @@ final class CrewBoatGame extends GameView {
         if (fatigue > 0.35f && rowing && Math.random() < dt * fatigue * 6) {
             int i = (int) (Math.random() * SEATS);
             float len = w * 0.62f;
-            float sx = w * 0.5f + len * 0.36f - i * len * 0.8f / SEATS;
-            float sy = (h * 0.30f) + (h * 0.58f) * 0.62f - dp(52f);
+            // Stroke sits at the stern, on the left: the boat travels bow first, to the right.
+            float sx = w * 0.5f - len * 0.36f + i * len * 0.8f / SEATS - dp(20f);
+            float sy = (h * 0.30f) + (h * 0.58f) * 0.62f - dp(62f);
             fx.spawn(sx, sy, (float) (Math.random() - 0.5) * dp(40f), -dp(40f), 0.7f, dp(2f), 0xDD9FD8FF, true);
         }
 
@@ -932,6 +988,7 @@ final class CrewBoatGame extends GameView {
         drawBank(c, w, h, waterTop, ppm);
         river.advance(moving, dt, ppm);
         river.drawWater(c, waterTop, waterBottom, w);
+        drawBankReflection(c, w, waterTop, waterBottom);
         drawNearShore(c, w, h, waterBottom, ppm);
         drawBuoys(c, w, waterTop, waterBottom, ppm);
         // The water below the eight was the emptiest band on any screen surveyed.
@@ -952,24 +1009,29 @@ final class CrewBoatGame extends GameView {
         if (rivalSurge > 0.2f) {
             Fx.glow(c, rivalX, rivalY, rivalLen * 0.45f, 0x22F0655D);
         }
+        drawSpeed = phase == Phase.RACING ? (float) profile.typicalSpeed() : 0f;
         drawEight(c, rivalX, rivalLen, rivalY, 0.72f, RIVAL_CREW, 0xFF8A2E2E, -1, 0.9f, rivalLag,
                 rivalPhase, -1f, 0f, rivalBladeWasIn, false);
         if (rawRivalX != rivalX) {
             // Off screen: an arrow at the edge with the margin, so the race never disappears.
             boolean ahead = rawRivalX > rivalX;
             float ax = ahead ? w - dp(24f) : dp(24f);
+            drawPanel(c, ax - dp(22f), rivalY - dp(48f), ax + dp(22f), rivalY + dp(10f), dp(10f), PANEL_TOP, PANEL_BOTTOM);
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xCC0A1420);
-            c.drawRoundRect(ax - dp(20f), rivalY - dp(46f), ax + dp(20f), rivalY + dp(8f), dp(8f), dp(8f), paint);
             paint.setColor(RIVAL_CREW);
-            path.reset();
+            path.rewind();
             float dir = ahead ? 1f : -1f;
             path.moveTo(ax + dir * dp(12f), rivalY - dp(26f));
             path.lineTo(ax - dir * dp(8f), rivalY - dp(38f));
             path.lineTo(ax - dir * dp(8f), rivalY - dp(14f));
             path.close();
             c.drawPath(path, paint);
-            bold(c, String.valueOf(Math.round(Math.abs(gap))) + "m", ax, rivalY + dp(4f), 10f, TEXT, Paint.Align.CENTER);
+            int gapM = (int) Math.round(Math.abs(gap));
+            if (gapM != arrowKey) {
+                arrowKey = gapM;
+                arrowLabel = gapM + "m";
+            }
+            bold(c, arrowLabel, ax, rivalY + dp(4f), 10f, TEXT, Paint.Align.CENTER);
         }
 
         float eightY = waterTop + (waterBottom - waterTop) * 0.62f;
@@ -1007,6 +1069,7 @@ final class CrewBoatGame extends GameView {
         eightCx = w * 0.5f;
         eightLen = w * 0.62f;
         eightYNow = eightY;
+        drawSpeed = moving;
         drawEight(c, w * 0.5f, w * 0.62f, eightY, 1f, PLAYER_CREW, 0xFF2F6E93, youSeat, sync, seatLag,
                 basePhase, youPhase, fatigue, bladeWasIn, true);
         fx.draw(c);
@@ -1022,10 +1085,11 @@ final class CrewBoatGame extends GameView {
             Fx.vignette(c, w, h, 0.2f + 0.2f * fatigue, 0x5A1A1A);
         }
         if (sessionSeconds < rivalCallUntil) {
-            drawCoxCall(c, rivalCall, rivalX + rivalLen * 0.46f, rivalY - dp(20f), w, 0xF2FFD9D6, 0xFF5A1410, 13f);
+            // The cox sits in the stern, which is the left end now that the boats travel bow first.
+            drawCoxCall(c, rivalCall, rivalX - rivalLen * 0.46f + dp(5f), rivalY - dp(60f), w, 0xF2FFD9D6, 0xFF5A1410, 13f);
         }
         if (sessionSeconds < coxUntil) {
-            drawCoxCall(c, coxCall, w * 0.5f + w * 0.62f * 0.46f, eightY - dp(24f), w, 0xF2FFFFFF, 0xFF3A2A06, 16f);
+            drawCoxCall(c, coxCall, w * 0.5f - w * 0.62f * 0.46f + dp(5f), eightY - dp(70f), w, 0xF2FFFFFF, 0xFF3A2A06, 16f);
         }
         double toGo = raceMeters - yourMeters;
         if (phase == Phase.RACING && toGo < 150) {
@@ -1051,6 +1115,8 @@ final class CrewBoatGame extends GameView {
      */
     private void finishRace() {
         phase = Phase.DONE;
+        statusKey = Long.MIN_VALUE; // the result line is new
+
         tenActive = false;
         finishTime = sessionSeconds - raceStart;
         double margin = yourMeters - rivalMeters;
@@ -1152,11 +1218,11 @@ final class CrewBoatGame extends GameView {
         // HUD: sync meter, swing, gap.
         float cx = w / 2f;
         // 3.19.5: the HUD sits on the light sky, so it gets dark pills (seen unreadable on the emulator).
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x990A1420);
-        c.drawRoundRect(cx - dp(170f), dp(6f), cx + dp(170f), dp(116f), dp(14f), dp(14f), paint);
-        c.drawRoundRect(dp(8f), dp(12f), dp(330f), dp(122f), dp(10f), dp(10f), paint);
-        c.drawRoundRect(w - dp(320f), dp(12f), w - dp(8f), dp(64f), dp(10f), dp(10f), paint);
+        // 3.25.0: near-opaque gradient panels with a lit top edge, one corner radius throughout -
+        // at 60% alpha the clouds showed through and the captions sat on mottled sky.
+        drawPanel(c, cx - dp(170f), dp(6f), cx + dp(170f), dp(116f), dp(14f), PANEL_TOP, PANEL_BOTTOM);
+        drawPanel(c, dp(8f), dp(12f), dp(330f), dp(122f), dp(14f), PANEL_TOP, PANEL_BOTTOM);
+        drawPanel(c, w - dp(320f), dp(12f), w - dp(8f), dp(64f), dp(14f), PANEL_TOP, PANEL_BOTTOM);
         int syncPct = Math.round(sync * 100);
         if (syncPct != syncLabelKey) {
             syncLabelKey = syncPct;
@@ -1165,10 +1231,7 @@ final class CrewBoatGame extends GameView {
         bold(c, syncLabel, cx, dp(44f), 38f, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD, Paint.Align.CENTER);
         label(c, swing >= 6 ? swingCaption() : "CREW SYNC", cx, dp(62f), 10f,
                 swing >= 6 ? ACCENT : FAINT, Paint.Align.CENTER);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(cx - dp(160f), dp(72f), cx + dp(160f), dp(80f), dp(4f), dp(4f), paint);
-        paint.setColor(sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD);
-        c.drawRoundRect(cx - dp(160f), dp(72f), cx - dp(160f) + dp(320f) * sync, dp(80f), dp(4f), dp(4f), paint);
+        drawBar(c, cx - dp(160f), dp(72f), cx + dp(160f), dp(80f), sync, sync > 0.85f ? ACCENT : sync > 0.6f ? WARN : BAD);
         drawTwentyTrack(c, cx);
 
         // Left: seat, rate, the crew's legs, their morale and where the season stands.
@@ -1187,17 +1250,11 @@ final class CrewBoatGame extends GameView {
         label(c, fatigue > 0.5f ? "CREW TIRING" : "CREW LEGS", dp(16f), dp(52f), 10f, fatigue > 0.5f ? BAD : DIM, Paint.Align.LEFT);
         float barL = dp(120f);
         float barR = dp(318f);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(barL, dp(44f), barR, dp(52f), dp(4f), dp(4f), paint);
         float legs = 1f - fatigue;
-        paint.setColor(legs > 0.6f ? ACCENT : legs > 0.35f ? WARN : BAD);
-        c.drawRoundRect(barL, dp(44f), barL + (barR - barL) * legs, dp(52f), dp(4f), dp(4f), paint);
+        drawBar(c, barL, dp(44f), barR, dp(52f), legs, legs > 0.6f ? ACCENT : legs > 0.35f ? WARN : BAD);
         // Morale: kept between sessions, moved by this one.
         label(c, "MORALE", dp(16f), dp(76f), 10f, DIM, Paint.Align.LEFT);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(barL, dp(68f), barR, dp(76f), dp(4f), dp(4f), paint);
-        paint.setColor(moraleColor());
-        c.drawRoundRect(barL, dp(68f), barL + (barR - barL) * morale, dp(76f), dp(4f), dp(4f), paint);
+        drawBar(c, barL, dp(68f), barR, dp(76f), morale, moraleColor());
         label(c, moraleWord(morale), barR, dp(64f), 10f, moraleColor(), Paint.Align.RIGHT);
         // The season.
         if (regattaDay) {
@@ -1219,6 +1276,7 @@ final class CrewBoatGame extends GameView {
         float cl = w - dp(308f);
         float cr = w - dp(20f);
         float cy = dp(46f);
+        paint.setStyle(Paint.Style.FILL);
         paint.setColor(0x44FFFFFF);
         c.drawRect(cl, cy - dp(1f), cr, cy + dp(1f), paint);
         paint.setColor(0xFFF2F2F2);
@@ -1229,17 +1287,23 @@ final class CrewBoatGame extends GameView {
         c.drawRoundRect(rx - dp(12f), cy - dp(9f), rx + dp(12f), cy - dp(3f), dp(3f), dp(3f), paint);
         paint.setColor(PLAYER_CREW);
         c.drawRoundRect(yx - dp(12f), cy + dp(3f), yx + dp(12f), cy + dp(9f), dp(3f), dp(3f), paint);
-        String margin;
         double abs = Math.abs(gap);
-        if (abs < SEAT_METRES * 0.5) {
-            margin = "LEVEL";
-        } else if (abs < EIGHT_METRES) {
-            margin = String.format(java.util.Locale.US, "%d SEAT%s %s", Math.round(abs / SEAT_METRES),
-                    Math.round(abs / SEAT_METRES) == 1 ? "" : "S", gap > 0 ? "UP" : "DOWN");
-        } else {
-            margin = String.format(java.util.Locale.US, "%.1f LENGTHS %s", abs / EIGHT_METRES, gap > 0 ? "UP" : "DOWN");
+        int up = gap > 0 ? 1 : 0;
+        int mKey = abs < SEAT_METRES * 0.5 ? 0
+                : abs < EIGHT_METRES ? 1000000 + (int) Math.round(abs / SEAT_METRES) * 2 + up
+                : 2000000 + (int) Math.round(abs / EIGHT_METRES * 10) * 2 + up;
+        if (mKey != marginKey) {
+            marginKey = mKey;
+            if (abs < SEAT_METRES * 0.5) {
+                marginLabel = "LEVEL";
+            } else if (abs < EIGHT_METRES) {
+                marginLabel = String.format(java.util.Locale.US, "%d SEAT%s %s", Math.round(abs / SEAT_METRES),
+                        Math.round(abs / SEAT_METRES) == 1 ? "" : "S", gap > 0 ? "UP" : "DOWN");
+            } else {
+                marginLabel = String.format(java.util.Locale.US, "%.1f LENGTHS %s", abs / EIGHT_METRES, gap > 0 ? "UP" : "DOWN");
+            }
         }
-        bold(c, margin, cl, dp(30f), 12f, gap >= 0 ? ACCENT : BAD, Paint.Align.LEFT);
+        bold(c, marginLabel, cl, dp(30f), 12f, gap >= 0 ? ACCENT : BAD, Paint.Align.LEFT);
         if (rivalSurge > 0.3f) {
             bold(c, "THEY'RE MOVING", cr, dp(30f), 11f, BAD, Paint.Align.RIGHT);
         }
@@ -1253,21 +1317,37 @@ final class CrewBoatGame extends GameView {
             drawCrewRoom(c, cx, w, h);
         }
 
-        String status;
-        if (phase == Phase.READY) {
-            status = seat == Seat.STROKE ? "TAKE A STROKE - THE CREW FOLLOWS YOUR RHYTHM"
-                    : "TAKE A STROKE - THEN MATCH THE STROKE SEAT'S RHYTHM";
-        } else if (phase == Phase.DONE) {
-            status = (lastWasRegatta ? (won ? "REGATTA WON  ·  " : "REGATTA LOST  ·  ")
-                    : won ? "YOUR CREW WON  ·  " : "BEATEN  ·  ") + clock(finishTime)
-                    + (newBest ? "  ·  NEW BEST" : "") + (bestTen > 0 ? "  ·  BEST TEN " + bestTen + "/10" : "")
-                    + (perfectTwenties > 0 ? "  ·  " + perfectTwenties + "x PERFECT 20" : "")
-                    + "  ·  tap to race again";
+        long sKey;
+        if (phase == Phase.RACING) {
+            sKey = ((Math.round(abs) * 2 + (gap >= 0 ? 1 : 0)) * 100000L + Math.round(yourMeters)) * 100000L
+                    + Math.round((float) (sessionSeconds - raceStart)) * 4L + (raceMeters == REGATTA_METERS ? 1 : 0);
         } else {
-            status = String.format(java.util.Locale.US, "%s%.0f m  ·  %d of %d m  ·  %s", gap >= 0 ? "+" : "−",
-                    Math.abs(gap), Math.round(yourMeters), raceMeters, clock(sessionSeconds - raceStart));
+            // finishRace() clears the key, so a new result is composed once.
+            sKey = -1L - phase.ordinal() * 8L - seat.ordinal();
         }
-        bold(c, status, cx, h - dp(14f), 12f, phase == Phase.DONE && won ? ACCENT : TEXT, Paint.Align.CENTER);
+        if (sKey != statusKey) {
+            statusKey = sKey;
+            if (phase == Phase.READY) {
+                statusLabel = seat == Seat.STROKE ? "TAKE A STROKE - THE CREW FOLLOWS YOUR RHYTHM"
+                        : "TAKE A STROKE - THEN MATCH THE STROKE SEAT'S RHYTHM";
+            } else if (phase == Phase.DONE) {
+                statusLabel = (lastWasRegatta ? (won ? "REGATTA WON  ·  " : "REGATTA LOST  ·  ")
+                        : won ? "YOUR CREW WON  ·  " : "BEATEN  ·  ") + clock(finishTime)
+                        + (newBest ? "  ·  NEW BEST" : "") + (bestTen > 0 ? "  ·  BEST TEN " + bestTen + "/10" : "")
+                        + (perfectTwenties > 0 ? "  ·  " + perfectTwenties + "x PERFECT 20" : "")
+                        + "  ·  tap to race again";
+            } else {
+                statusLabel = String.format(java.util.Locale.US, "%s%.0f m  ·  %d of %d m  ·  %s", gap >= 0 ? "+" : "−",
+                        Math.abs(gap), Math.round(yourMeters), raceMeters, clock(sessionSeconds - raceStart));
+            }
+        }
+        // A pill under the line: it sits on the near bank, which is busy with reeds now.
+        textPaint.setTextSize(dp(textDp(12f)));
+        float sw = textPaint.measureText(statusLabel);
+        float sy = h - dp(14f);
+        drawPanel(c, cx - sw / 2f - dp(18f), sy - dp(22f), cx + sw / 2f + dp(18f), sy + dp(8f), dp(14f),
+                PANEL_TOP, PANEL_BOTTOM);
+        bold(c, statusLabel, cx, sy, 12f, phase == Phase.DONE && won ? ACCENT : TEXT, Paint.Align.CENTER);
     }
 
     /** "SWING · n STROKES IN TIME", rebuilt only when n changes. */
@@ -1364,9 +1444,11 @@ final class CrewBoatGame extends GameView {
     /** Ten pips, one per stroke of the ten: gold if it beat your average, red if it did not. */
     private void drawTenPanel(Canvas c, float cx) {
         float top = dp(126f);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(tenFlash > 0 ? 0xCC3A2A06 : 0xB30A1420);
-        c.drawRoundRect(cx - dp(170f), top, cx + dp(170f), top + dp(58f), dp(12f), dp(12f), paint);
+        if (tenFlash > 0) {
+            drawPanel(c, cx - dp(170f), top, cx + dp(170f), top + dp(58f), dp(14f), 0xEB5A400C, 0xEB2E2004);
+        } else {
+            drawPanel(c, cx - dp(170f), top, cx + dp(170f), top + dp(58f), dp(14f), PANEL_TOP, PANEL_BOTTOM);
+        }
         String target;
         if (baselineKind == 0 || baselineKind == 2) {
             target = "POWER TEN  ·  BEAT " + Math.round(effortBaseline * TEN_RATIO) + " W";
@@ -1380,8 +1462,11 @@ final class CrewBoatGame extends GameView {
             float px = x0 + i * pip + pip / 2f;
             float py = top + dp(40f);
             if (i < tenStrokes) {
+                float pr = dp(8f) + (i == tenStrokes - 1 ? tenFlash * dp(4f) : 0f);
                 paint.setColor(tenResults[i] ? 0xFFF0B132 : BAD);
-                c.drawCircle(px, py, dp(8f) + (i == tenStrokes - 1 ? tenFlash * dp(4f) : 0f), paint);
+                c.drawCircle(px, py, pr, paint);
+                paint.setColor(0x59FFFFFF); // a glossy cap, lit from above
+                c.drawCircle(px + pr * 0.2f, py - pr * 0.35f, pr * 0.45f, paint);
             } else {
                 paint.setColor(0x44FFFFFF);
                 c.drawCircle(px, py, dp(6f), paint);
@@ -1398,9 +1483,7 @@ final class CrewBoatGame extends GameView {
         float ph = dp(292f);
         float top = Math.max(dp(136f), h * 0.19f);
         panel.set(cx - pw / 2f, top, cx + pw / 2f, top + ph);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xE6081120);
-        c.drawRoundRect(panel, dp(16f), dp(16f), paint);
+        drawPanel(c, panel.left, panel.top, panel.right, panel.bottom, dp(16f), 0xF2132036, 0xF2070D18);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
         paint.setColor(regattaDay ? 0xFFF0B132 : 0x5535D0BA);
@@ -1443,11 +1526,7 @@ final class CrewBoatGame extends GameView {
                 : "each day is worth +1% in the regatta", x, y + dp(92f), 10f, DIM, Paint.Align.LEFT);
         label(c, "CUPS WON  ·  " + regattaWins, x, y + dp(116f), 11f, regattaWins > 0 ? WARN : FAINT, Paint.Align.LEFT);
         label(c, "MORALE  ·  " + moraleWord(morale), x, y + dp(136f), 11f, moraleColor(), Paint.Align.LEFT);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0x33FFFFFF);
-        c.drawRoundRect(x, y + dp(144f), x + colW - dp(20f), y + dp(152f), dp(4f), dp(4f), paint);
-        paint.setColor(moraleColor());
-        c.drawRoundRect(x, y + dp(144f), x + (colW - dp(20f)) * morale, y + dp(152f), dp(4f), dp(4f), paint);
+        drawBar(c, x, y + dp(144f), x + colW - dp(20f), y + dp(152f), morale, moraleColor());
     }
 
     /** Seat races: the finishing margin from each seat, per 1000 m, and which seat you are worth more in. */
@@ -1531,9 +1610,11 @@ final class CrewBoatGame extends GameView {
     }
 
     private void drawSeatButton(Canvas c, RectF r, String title, String sub, boolean on) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(on ? 0xE635D0BA : 0xCC0A1420);
-        c.drawRoundRect(r, dp(14f), dp(14f), paint);
+        if (on) {
+            drawPanel(c, r.left, r.top, r.right, r.bottom, dp(14f), 0xFF4FE3CD, 0xFF22A894);
+        } else {
+            drawPanel(c, r.left, r.top, r.right, r.bottom, dp(14f), PANEL_TOP, PANEL_BOTTOM);
+        }
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(dp(2f));
         paint.setColor(on ? 0xFFFFFFFF : 0x88FFFFFF);
@@ -1543,10 +1624,15 @@ final class CrewBoatGame extends GameView {
         label(c, sub, r.centerX(), r.top + dp(44f), 10f, on ? 0xFF0A1420 : DIM, Paint.Align.CENTER);
     }
 
-    /** Sky, a far bank of trees and a crowd along it with flags, scrolling with the boat. */
+    /**
+     * Sky, two ranges of hills, two rows of trees, and a regatta crowd behind a banner fence, each
+     * scrolling at its own depth. 3.25.0: this was one row of flat circles and a crowd of
+     * rectangles. The light comes from the sun, high on the right, everywhere on the screen.
+     */
     private void drawBank(Canvas c, float w, float h, float waterTop, float ppm) {
         if (skyShader == null || skyShaderTop != waterTop) {
-            skyShader = new android.graphics.LinearGradient(0, 0, 0, waterTop, 0xFF3D78B8, 0xFFBFDDF2,
+            skyShader = new android.graphics.LinearGradient(0, 0, 0, waterTop,
+                    new int[] {0xFF2C5F9E, 0xFF5E95CF, 0xFFD3E8F4}, new float[] {0f, 0.55f, 1f},
                     android.graphics.Shader.TileMode.CLAMP);
             skyShaderTop = waterTop;
         }
@@ -1555,56 +1641,220 @@ final class CrewBoatGame extends GameView {
         paint.setShader(skyShader);
         c.drawRect(0, 0, w, waterTop, paint);
         paint.setShader(null);
-        // Clouds.
-        paint.setColor(0xCCFFFFFF);
+        // The sun, high on the right: every highlight below sits on the side facing it.
+        float sunX = w * 0.74f;
+        float sunY = waterTop * 0.36f;
+        Fx.glow(c, sunX, sunY, dp(230f), 0x40FFF1C8);
+        Fx.glow(c, sunX, sunY, dp(64f), 0x90FFF8E1);
+        paint.setColor(0xFFFFFBEE);
+        c.drawCircle(sunX, sunY, dp(18f), paint);
+        // Clouds: sunlit lobes over a flat, shaded base.
+        double scroll = scenery * ppm;
         for (int i = 0; i < 4; i++) {
-            float cx = (float) (((i * 520 + 100) - scenery * ppm * 0.08) % (w + dp(260f)));
+            float cx = (float) (((i * 520 + 100) - scroll * 0.08) % (w + dp(260f)));
             if (cx < -dp(130f)) {
                 cx += w + dp(260f);
             }
             float cy = waterTop * (0.25f + (i % 2) * 0.18f);
-            c.drawOval(cx - dp(60f), cy - dp(14f), cx + dp(60f), cy + dp(14f), paint);
-            c.drawOval(cx - dp(30f), cy - dp(26f), cx + dp(34f), cy + dp(6f), paint);
+            float k = dp(1f) * (0.85f + 0.2f * (i % 3));
+            paint.setColor(0xF2F4F8FC);
+            c.drawCircle(cx - 30f * k, cy - 4f * k, 15f * k, paint);
+            c.drawCircle(cx + 2f * k, cy - 11f * k, 24f * k, paint);
+            c.drawCircle(cx + 33f * k, cy - 3f * k, 14f * k, paint);
+            paint.setColor(0xFFFFFFFF);
+            c.drawCircle(cx + 9f * k, cy - 17f * k, 14f * k, paint);
+            paint.setColor(0xFFD6E3EF);
+            c.drawRoundRect(cx - 54f * k, cy + 1f * k, cx + 54f * k, cy + 13f * k, 6f * k, 6f * k, paint);
         }
-        // Trees on the far bank.
+
         float bankY = waterTop - dp(4f);
-        paint.setColor(0xFF3F7A45);
-        c.drawRect(0, bankY - dp(10f), w, waterTop, paint);
-        float treeGap = dp(70f);
-        float off = (float) ((scenery * ppm * 0.4) % treeGap);
-        for (float x = -off; x < w + treeGap; x += treeGap) {
-            int k = (int) Math.floor((x + scenery * ppm * 0.4) / treeGap);
-            float r = dp(22f) + ((k * 7) % 3) * dp(6f);
-            paint.setColor(((k & 1) == 0) ? 0xFF2F6B3A : 0xFF3A7D44);
-            c.drawCircle(x, bankY - dp(18f) - r * 0.4f, r, paint);
+        float horizon = bankY - dp(10f);
+        // Hills, paler and bluer the further away they are.
+        drawHills(c, w, horizon, scroll * 0.12, dp(62f), 0xFFA3C3CB, 0.0031f, 1.7f);
+        drawHills(c, w, horizon, scroll * 0.2, dp(38f), 0xFF83AE9A, 0.0057f, 0.4f);
+        // The far tree line: small and hazy.
+        float farGap = dp(44f);
+        double farScroll = scroll * 0.3;
+        float farOff = (float) (farScroll % farGap);
+        for (float x = -farOff - farGap; x < w + farGap; x += farGap) {
+            int k = (int) Math.floor((x + farScroll) / farGap + 0.5);
+            int hh = hash(k);
+            float r = dp(13f) + (hh % 4) * dp(3f);
+            float tx = x + ((hh >>> 4) % 9 - 4) * dp(2f);
+            paint.setColor(0xFF5E9474);
+            c.drawCircle(tx, horizon - r * 0.55f, r, paint);
+            paint.setColor(0xFF74A786);
+            c.drawCircle(tx + r * 0.3f, horizon - r * 0.85f, r * 0.55f, paint);
         }
+        // The near tree line: trunks and layered canopies, lit on the sun side, a poplar here and there.
+        float treeGap = dp(70f);
+        double treeScroll = scroll * 0.4;
+        float off = (float) (treeScroll % treeGap);
+        float yb = bankY - dp(8f);
+        for (float x = -off - treeGap; x < w + treeGap; x += treeGap) {
+            int k = (int) Math.floor((x + treeScroll) / treeGap + 0.5);
+            int hh = hash(k * 31 + 7);
+            float r = dp(20f) + (hh % 4) * dp(4f);
+            float tx = x + ((hh >>> 5) % 11 - 5) * dp(2f);
+            paint.setColor(0xFF4A3524);
+            c.drawRect(tx - dp(2.5f), yb - r * 1.1f, tx + dp(2.5f), yb, paint);
+            if ((hh >>> 9) % 3 == 0) {
+                paint.setColor(0xFF2B6138);
+                c.drawOval(tx - r * 0.5f, yb - r * 3.0f, tx + r * 0.5f, yb - r * 0.6f, paint);
+                paint.setColor(0xFF3F8148);
+                c.drawOval(tx - r * 0.05f, yb - r * 2.8f, tx + r * 0.42f, yb - r * 1.2f, paint);
+            } else {
+                paint.setColor(0xFF2A5D35);
+                c.drawCircle(tx - r * 0.55f, yb - r * 1.05f, r * 0.72f, paint);
+                paint.setColor(0xFF2F6A3A);
+                c.drawCircle(tx, yb - r * 1.45f, r, paint);
+                paint.setColor(0xFF367640);
+                c.drawCircle(tx + r * 0.6f, yb - r * 1.1f, r * 0.7f, paint);
+                paint.setColor(0xFF4C9053);
+                c.drawCircle(tx + r * 0.32f, yb - r * 1.8f, r * 0.48f, paint);
+            }
+        }
+        // The bank itself: a lit top edge and a dark lip where it drops into the water.
+        paint.setColor(0xFF4C8A49);
+        c.drawRect(0, horizon, w, waterTop, paint);
+        paint.setColor(0xFF6DAA5F);
+        c.drawRect(0, horizon, w, horizon + dp(2f), paint);
+        paint.setColor(0xFF2D5A30);
+        c.drawRect(0, waterTop - dp(3f), w, waterTop, paint);
+
         // The crowd along the bank: heads bobbing, flags waving - louder in a close race or a ten.
         float fanGap = dp(18f);
-        float foff = (float) ((scenery * ppm * 0.9) % fanGap);
+        double fanScroll = scroll * 0.9;
+        float foff = (float) (fanScroll % fanGap);
         // Regatta day brings a crowd that is up on its feet before the start.
         boolean roar = sync > 0.8f || tenActive || regattaDay || sessionSeconds < swingBonusUntil
                 || (phase == Phase.RACING && Math.abs(yourMeters - rivalMeters) < SEAT_METRES * 2);
+        // Marquees behind the crowd, at the crowd's own depth.
+        for (float x = -foff - fanGap * 4; x < w + fanGap * 4; x += fanGap) {
+            int k = (int) Math.floor((x + fanScroll) / fanGap + 0.5);
+            if (hash(k * 13 + 5) % 23 != 0) {
+                continue;
+            }
+            float tw = dp(34f);
+            paint.setColor(0xFFF2F1EA);
+            c.drawRect(x - tw, bankY - dp(40f), x + tw, bankY - dp(8f), paint);
+            paint.setColor(0xFFCFCDC3); // the side away from the sun
+            c.drawRect(x - tw, bankY - dp(40f), x - tw * 0.3f, bankY - dp(8f), paint);
+            path.rewind();
+            path.moveTo(x - tw - dp(4f), bankY - dp(40f));
+            path.lineTo(x, bankY - dp(60f));
+            path.lineTo(x + tw + dp(4f), bankY - dp(40f));
+            path.close();
+            paint.setColor((k & 1) == 0 ? 0xFFD9453A : 0xFF2F6E93);
+            c.drawPath(path, paint);
+            paint.setColor(0xFF9AA5B1);
+            c.drawRect(x - dp(1f), bankY - dp(70f), x + dp(1f), bankY - dp(60f), paint);
+        }
         int[] shirts = SHIRTS;
-        for (float x = -foff; x < w + fanGap; x += fanGap) {
-            int k = (int) Math.floor((x + scenery * ppm * 0.9) / fanGap);
+        for (float x = -foff - fanGap; x < w + fanGap; x += fanGap) {
+            int k = (int) Math.floor((x + fanScroll) / fanGap + 0.5);
+            int hh = hash(k);
             float cheer = roar ? (float) Math.abs(Math.sin(sessionSeconds * 8 + k)) * dp(6f) : 0f;
-            paint.setColor(shirts[Math.abs(k) % shirts.length]);
-            c.drawRect(x - dp(5f), bankY - dp(20f) - cheer, x + dp(5f), bankY - dp(6f), paint);
-            paint.setColor(0xFFF1C27D);
-            c.drawCircle(x, bankY - dp(25f) - cheer, dp(4f), paint);
+            float top = bankY - dp(21f) - ((hh >>> 3) % 3) * dp(2f) - cheer;
+            paint.setColor(shirts[hh % shirts.length]);
+            c.drawRoundRect(x - dp(5f), top, x + dp(5f), bankY - dp(4f), dp(3f), dp(3f), paint);
+            int skin = SKIN[(hh >>> 6) % SKIN.length];
+            if (roar && (hh >>> 8) % 3 == 0) {
+                // Arms up.
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeCap(Paint.Cap.ROUND);
+                paint.setStrokeWidth(dp(2.2f));
+                paint.setColor(skin);
+                c.drawLine(x - dp(4f), top + dp(2f), x - dp(8f), top - dp(9f), paint);
+                c.drawLine(x + dp(4f), top + dp(2f), x + dp(8f), top - dp(9f), paint);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setStrokeCap(Paint.Cap.BUTT);
+            }
+            paint.setColor(skin);
+            c.drawCircle(x, top - dp(4.5f), dp(4.2f), paint);
             if (k % 5 == 0) {
                 paint.setColor(0xFF9AA5B1);
-                c.drawRect(x + dp(4f), bankY - dp(44f) - cheer, x + dp(5.5f), bankY - dp(20f) - cheer, paint);
+                c.drawRect(x + dp(4f), top - dp(23f), x + dp(5.5f), top + dp(1f), paint);
                 float wave = (float) Math.sin(sessionSeconds * 6 + k) * dp(4f);
                 paint.setColor(shirts[(Math.abs(k) + 2) % shirts.length]);
-                path.reset();
-                path.moveTo(x + dp(5.5f), bankY - dp(44f) - cheer);
-                path.lineTo(x + dp(22f), bankY - dp(40f) - cheer + wave);
-                path.lineTo(x + dp(5.5f), bankY - dp(34f) - cheer);
+                path.rewind();
+                path.moveTo(x + dp(5.5f), top - dp(23f));
+                path.lineTo(x + dp(22f), top - dp(19f) + wave);
+                path.lineTo(x + dp(5.5f), top - dp(13f));
                 path.close();
                 c.drawPath(path, paint);
             }
         }
+        // A banner fence along the water's edge, in front of the crowd.
+        float bannerW = dp(96f);
+        float boff = (float) (fanScroll % bannerW);
+        for (float x = -boff - bannerW; x < w + bannerW; x += bannerW) {
+            int k = (int) Math.floor((x + fanScroll) / bannerW + 0.5);
+            int m = ((k % 3) + 3) % 3;
+            paint.setColor(m == 0 ? 0xFF1F3A68 : m == 1 ? 0xFFE9EEF3 : 0xFF8C2F39);
+            c.drawRect(x + dp(1f), bankY - dp(11f), x + bannerW - dp(1f), bankY - dp(1f), paint);
+            paint.setColor(0x55FFFFFF);
+            c.drawRect(x + dp(1f), bankY - dp(11f), x + bannerW - dp(1f), bankY - dp(9.5f), paint);
+            paint.setColor(0xFF9AA5B1);
+            c.drawRect(x - dp(1f), bankY - dp(14f), x + dp(1f), bankY, paint);
+        }
+    }
+
+    /** One range of hills as a single filled path, sampled at points fixed to the ground. */
+    private void drawHills(Canvas c, float w, float base, double scroll, float amp, int color, float freq,
+                           float seed) {
+        float step = dp(40f);
+        float off = (float) (scroll % step);
+        path.rewind();
+        path.moveTo(-step * 2f, base + dp(2f));
+        for (float x = -off - step; x <= w + step * 2f; x += step) {
+            double wx = x + scroll;
+            float y = base - amp * (0.55f + 0.3f * (float) Math.sin(wx * freq + seed)
+                    + 0.15f * (float) Math.sin(wx * freq * 2.7 + seed * 2));
+            path.lineTo(x, y);
+        }
+        path.lineTo(w + step * 2f, base + dp(2f));
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(color);
+        c.drawPath(path, paint);
+    }
+
+    /**
+     * Over the water, under everything on it: the bank's shadow in the water, the bright line where
+     * they meet, and glints under the sun that shimmer in place.
+     */
+    private void drawBankReflection(Canvas c, float w, float waterTop, float waterBottom) {
+        float band = dp(34f);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(vertical(waterTop, waterTop + band, 0x80163A2A, 0x00163A2A));
+        c.drawRect(0, waterTop, w, waterTop + band, paint);
+        paint.setShader(null);
+        paint.setColor(0x30FFFFFF);
+        c.drawRect(0, waterTop, w, waterTop + dp(1.5f), paint);
+        float sunX = w * 0.74f;
+        float gTop = waterTop + dp(14f);
+        float gBand = (waterBottom - waterTop) * 0.16f;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(dp(2f));
+        for (int j = 0; j < 14; j++) {
+            int hh = hash(j * 97 + 3);
+            float a = 0.5f + 0.5f * (float) Math.sin(sessionSeconds * (2.0 + (hh % 5) * 0.4) + j * 1.7);
+            if (a < 0.25f) {
+                continue;
+            }
+            float gy = gTop + (hh % 100) / 100f * gBand;
+            // The glitter path widens toward the viewer.
+            float spread = dp(40f) + (gy - gTop) * 2.2f;
+            float gx = sunX + (((hh >>> 7) % 200) / 100f - 1f) * spread;
+            float len = dp(8f) + ((hh >>> 3) % 4) * dp(5f);
+            paint.setColor(((int) (a * 170) << 24) | 0x00FFF4D8);
+            c.drawLine(gx - len / 2f, gy, gx + len / 2f, gy, paint);
+        }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
     }
 
     /**
@@ -1612,59 +1862,199 @@ final class CrewBoatGame extends GameView {
      * bottom third was empty by construction - puddles could not reach it and chop was too quiet
      * to carry it. Grass and reeds scroll fastest of anything on screen, which is what sells the
      * speed at this distance. Drawn before the buoys: the near lane is at waterBottom itself.
+     * 3.25.0: a shaded meadow with a wet stony edge, reeds in clumps with bulrush heads, and flowers.
      */
     private void drawNearShore(Canvas c, float w, float h, float waterBottom, float ppm) {
-        paint.setStyle(android.graphics.Paint.Style.FILL);
-        paint.setColor(0xFF2F5E33);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(vertical(waterBottom, h, 0xFF3F7C3F, 0xFF16301A));
         c.drawRect(0, waterBottom, w, h, paint);
-        float gap = dp(22f);
+        paint.setShader(null);
+        paint.setColor(0xFF6E5F40);
+        c.drawRect(0, waterBottom, w, waterBottom + dp(5f), paint);
+        paint.setColor(0xFF9C8A62);
+        c.drawRect(0, waterBottom, w, waterBottom + dp(1.5f), paint);
         double scroll = scenery * ppm * 1.2;
+        // Stones on the edge and flowers in the grass: the nearest things on screen.
+        float sGap = dp(38f);
+        float soff = (float) (scroll % sGap);
+        for (float x = -soff - sGap; x < w + sGap; x += sGap) {
+            int k = (int) Math.floor((x + scroll) / sGap + 0.5);
+            int hh = hash(k * 7 + 11);
+            if (hh % 3 == 0) {
+                float sr = dp(4f) + ((hh >>> 4) % 4) * dp(1.5f);
+                float sy = waterBottom + dp(2f);
+                paint.setColor(0xFF5D5A52);
+                c.drawOval(x - sr * 1.4f, sy - sr * 0.2f, x + sr * 1.4f, sy + sr, paint);
+                paint.setColor(0xFF8E8A80);
+                c.drawOval(x - sr * 0.5f, sy, x + sr * 1.15f, sy + sr * 0.45f, paint);
+            }
+            if (hh % 5 == 1) {
+                float fx0 = x + dp(8f);
+                float fy = waterBottom + dp(26f) + ((hh >>> 6) % 5) * dp(9f);
+                paint.setColor(((hh >>> 9) & 1) == 0 ? 0xFFF4F1E4 : 0xFFF0C64A);
+                c.drawCircle(fx0, fy, dp(3.2f), paint);
+                paint.setColor(0xFFD9902E);
+                c.drawCircle(fx0, fy, dp(1.3f), paint);
+            }
+        }
+        float gap = dp(24f);
         float off = (float) (scroll % gap);
-        paint.setStrokeWidth(dp(3f));
+        float base = waterBottom + dp(9f);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
         for (float rx = -off - gap; rx < w + gap; rx += gap) {
             int k = (int) Math.floor((rx + scroll) / gap + 0.5);
-            float tall = dp(14f) + (Math.abs(k * 7) % 4) * dp(5f);
+            int hh = hash(k);
+            float tall = dp(16f) + (hh % 5) * dp(5f);
             float sway = (float) Math.sin(sessionSeconds * 2 + k) * dp(3f);
-            paint.setColor((k & 1) == 0 ? 0xFF4E8F4F : 0xFF6BAA5C);
-            c.drawLine(rx, waterBottom + dp(8f), rx + sway, waterBottom + dp(8f) - tall, paint);
+            paint.setStrokeWidth(dp(3f));
+            paint.setColor(0xFF3C7A3E);
+            c.drawLine(rx - dp(3f), base, rx - dp(7f) + sway * 0.7f, base - tall * 0.72f, paint);
+            paint.setColor(0xFF5E9E52);
+            c.drawLine(rx, base, rx + sway, base - tall, paint);
+            paint.setStrokeWidth(dp(2.4f));
+            paint.setColor(0xFF7DBA63); // the blade facing the sun
+            c.drawLine(rx + dp(3f), base, rx + dp(7f) + sway * 0.8f, base - tall * 0.8f, paint);
+            if (hh % 4 == 0) {
+                // A bulrush on its own stem.
+                float tx = rx + dp(1f) + sway * 1.1f;
+                float ty = base - tall - dp(8f);
+                paint.setStrokeWidth(dp(1.6f));
+                paint.setColor(0xFF6B8F4E);
+                c.drawLine(rx + dp(1f), base, tx, ty, paint);
+                paint.setStrokeWidth(dp(5f));
+                paint.setColor(0xFF6B4A2B);
+                c.drawLine(tx, ty, tx + sway * 0.1f, ty - dp(9f), paint);
+            }
         }
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
         paint.setColor(0xFF24491F);
         c.drawRect(0, waterBottom + dp(9f), w, waterBottom + dp(12f), paint);
     }
 
-    /** Lane buoys every 25 m, red and white, bobbing past. */
+    /** Lane buoys every 25 m, red and white, bobbing past on their lane lines. */
     private void drawBuoys(Canvas c, float w, float waterTop, float waterBottom, float ppm) {
         float gapPx = 25f * ppm;
         float off = (float) ((yourMeters * ppm) % gapPx);
+        float r = dp(5f);
+        paint.setStyle(Paint.Style.FILL);
         for (int lane = 0; lane < 2; lane++) {
             float y = waterTop + (waterBottom - waterTop) * (lane == 0 ? 0.40f : 0.88f);
+            paint.setColor(0x1FFFFFFF);
+            c.drawRect(0, y - dp(0.5f), w, y + dp(0.5f), paint);
             for (float x = -off; x < w + gapPx; x += gapPx) {
                 int k = (int) Math.floor((x + yourMeters * ppm) / gapPx);
-                float bob = (float) Math.sin(sessionSeconds * 3 + k) * dp(2f);
-                paint.setColor((k & 1) == 0 ? 0xFFF0655D : 0xFFFFFFFF);
-                c.drawCircle(x, y + bob, dp(5f), paint);
+                float by = y + (float) Math.sin(sessionSeconds * 3 + k) * dp(2f);
+                boolean red = (k & 1) == 0;
+                paint.setColor(0x55000000);
+                c.drawOval(x - r * 1.5f, by + r * 0.5f, x + r * 1.5f, by + r * 1.3f, paint);
+                // Shaded body, then the lit side toward the sun, then a highlight.
+                paint.setColor(red ? 0xFFA9372F : 0xFFAAB4BF);
+                c.drawCircle(x, by, r, paint);
+                paint.setColor(red ? 0xFFF0655D : 0xFFFFFFFF);
+                c.drawCircle(x + r * 0.16f, by - r * 0.16f, r * 0.8f, paint);
+                paint.setColor(0xCCFFFFFF);
+                c.drawCircle(x + r * 0.38f, by - r * 0.4f, r * 0.28f, paint);
             }
         }
+    }
+
+    /* ---------- drawing helpers (3.25.0) ---------- */
+
+    /** A HUD panel: vertical gradient, a hairline border and a lit top edge. One look everywhere. */
+    private void drawPanel(Canvas c, float l, float t, float r, float b, float rad, int c0, int c1) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(vertical(t, b, c0, c1));
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(1f));
+        paint.setColor(0x24FFFFFF);
+        c.drawRoundRect(l + dp(0.5f), t + dp(0.5f), r - dp(0.5f), b - dp(0.5f), rad, rad, paint);
+        paint.setColor(0x3DFFFFFF);
+        c.drawLine(l + rad, t + dp(1f), r - rad, t + dp(1f), paint);
+        paint.setStyle(Paint.Style.FILL);
+    }
+
+    /** A rounded bar with a glossy fill. */
+    private void drawBar(Canvas c, float l, float t, float r, float b, float frac, int color) {
+        float rad = (b - t) * 0.5f;
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x2EFFFFFF);
+        c.drawRoundRect(l, t, r, b, rad, rad, paint);
+        float f = Float.isNaN(frac) ? 0f : Math.max(0f, Math.min(1f, frac));
+        if (f <= 0f) {
+            return;
+        }
+        float fr = l + (r - l) * f;
+        paint.setColor(color);
+        c.drawRoundRect(l, t, fr, b, rad, rad, paint);
+        if (fr - l > rad * 2f) {
+            paint.setColor(0x47FFFFFF);
+            c.drawRoundRect(l + rad * 0.5f, t + dp(1f), fr - rad * 0.5f, t + (b - t) * 0.45f, rad * 0.5f, rad * 0.5f, paint);
+        }
+    }
+
+    /** A cached vertical gradient: built once per span and colour pair, never per frame. */
+    private android.graphics.LinearGradient vertical(float top, float bottom, int c0, int c1) {
+        for (int i = 0; i < SHADER_SLOTS; i++) {
+            if (vShader[i] != null && vTop[i] == top && vBottom[i] == bottom && vC0[i] == c0 && vC1[i] == c1) {
+                return vShader[i];
+            }
+        }
+        int i = vNext;
+        vNext = (vNext + 1) % SHADER_SLOTS;
+        vShader[i] = new android.graphics.LinearGradient(0, top, 0, bottom, c0, c1,
+                android.graphics.Shader.TileMode.CLAMP);
+        vTop[i] = top;
+        vBottom[i] = bottom;
+        vC0[i] = c0;
+        vC1[i] = c1;
+        return vShader[i];
+    }
+
+    private static float smooth(float a, float b, float x) {
+        float t = (x - a) / (b - a);
+        t = t < 0f ? 0f : t > 1f ? 1f : t;
+        return t * t * (3f - 2f * t);
+    }
+
+    /** Deterministic scatter for scenery: the same tree is the same tree every time it scrolls by. */
+    private static int hash(int k) {
+        k ^= k >>> 16;
+        k *= 0x7feb352d;
+        k ^= k >>> 15;
+        k *= 0x846ca68b;
+        k ^= k >>> 16;
+        return k & 0x7fffffff;
     }
 
     private void drawCoxCall(Canvas c, String text, float x, float y, float w, int bg, int ink, float size) {
         // The rival's cox can be off screen; keep the bubble's tail pointing at something visible.
         x = Math.max(dp(20f), Math.min(w - dp(20f), x));
-        textPaint.setTextSize(dp(size));
+        // Measured at the size bold() really draws: measuring at the raw size made every bubble
+        // about a fifth too narrow, so the ends of a long call hung out over the water.
+        float ts = dp(textDp(size));
+        textPaint.setTextSize(ts);
         float tw = textPaint.measureText(text);
         float bx = Math.max(dp(8f), Math.min(w - tw - dp(40f), x - tw / 2f - dp(12f)));
-        float bh = dp(size * 2f);
+        float bh = Math.max(dp(size * 2f), ts * 1.6f);
         float by = y - bh - dp(4f);
         paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x40000000); // a soft drop shadow lifts the bubble off the water
+        c.drawRoundRect(bx + dp(2f), by + dp(4f), bx + tw + dp(26f), by + bh + dp(4f), dp(12f), dp(12f), paint);
         paint.setColor(bg);
         c.drawRoundRect(bx, by, bx + tw + dp(24f), by + bh, dp(12f), dp(12f), paint);
-        path.reset();
+        path.rewind();
         path.moveTo(bx + tw * 0.7f, by + bh - dp(1f));
         path.lineTo(bx + tw * 0.7f + dp(14f), by + bh - dp(1f));
         path.lineTo(x, y);
         path.close();
         c.drawPath(path, paint);
-        bold(c, text, bx + dp(12f) + tw / 2f, by + bh * 0.5f + dp(size * 0.36f), size, ink, Paint.Align.CENTER);
+        bold(c, text, bx + dp(12f) + tw / 2f, by + bh * 0.5f + ts * 0.36f, size, ink, Paint.Align.CENTER);
     }
 
     /**
@@ -1673,8 +2063,9 @@ final class CrewBoatGame extends GameView {
      */
     private void drawMateBubble(Canvas c, float w) {
         float spacing = eightLen * 0.8f / SEATS;
-        float x = eightCx + eightLen * 0.36f - mateSeat * spacing;
-        float y = eightYNow - dp(50f);
+        // Their head: the stroke seat is at the stern (left) and the crew sits toward the bow.
+        float x = eightCx - eightLen * 0.36f + mateSeat * spacing - dp(30f);
+        float y = eightYNow - dp(78f);
         // A little bob so a speaking rower is easy to find among eight of them.
         float bob = (float) Math.sin(sessionSeconds * 9) * dp(2f);
         drawCoxCall(c, mateText, x, y + bob, w, 0xF2D7ECFF, 0xFF0B2438, 12f);
@@ -1713,7 +2104,15 @@ final class CrewBoatGame extends GameView {
     }
 
     /**
-     * An eight, side on: rowers lean and slide, oars sweep and dip - in time or not.
+     * An eight, side on, travelling bow first to the right: the cox in the stern facing the crew,
+     * stroke nearest the cox, and eight sweep oars alternating near side and far side.
+     *
+     * <p>3.25.0: the rowers are people now - legs that fold at the catch, a seat running on its
+     * slide, a back that swings, arms that draw the handle in - and they move in the real order:
+     * legs, then body, then arms on the drive, the reverse on the recovery. A crew in time is eight
+     * copies of one shape; a ragged one visibly is not. The shell runs on under the crew as they
+     * come forward (the run between strokes), sits level when they are together, and rocks when
+     * they are not. That is the swing, drawn.
      *
      * @param s         scale, 1 for your boat and smaller for the far lane
      * @param youSeat   the seat to mark as you, or -1
@@ -1724,16 +2123,12 @@ final class CrewBoatGame extends GameView {
     private void drawEight(Canvas c, float cx, float len, float waterY, float s, int crewColor, int stripe,
                            int youSeat, float crewSync, float[] lags, float basePhase, float youPhase,
                            float tired, boolean[] wasIn, boolean player) {
-        float beam = dp(16f) * s;
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(0xFFE8E2D0);
-        c.drawRoundRect(cx - len / 2f, waterY - beam, cx + len / 2f, waterY + beam * 0.3f, beam, beam, paint);
-        paint.setColor(stripe);
-        c.drawRect(cx - len / 2f, waterY - beam * 0.25f, cx + len / 2f, waterY + beam * 0.3f, paint);
+        // The crew is drawn 20% larger than the 3.24 figures: read from the seat, they were specks.
+        float u = dp(1f) * s * 1.2f;
         float spacing = len * 0.8f / SEATS;
+        // Pass 1: where each seat is in the stroke.
+        float comp = 0f;
         for (int i = 0; i < SEATS; i++) {
-            // Stroke seat (i = 0) is at the stern, on the right, facing the stern like a real crew.
-            float seatX = cx + len * 0.36f - i * spacing;
             float t = player ? tired * (0.45f + 0.55f * seatWeak[i]) : 0f;
             float phaseT;
             if (i == youSeat && youPhase >= 0f) {
@@ -1748,64 +2143,377 @@ final class CrewBoatGame extends GameView {
                 phaseT = basePhase + spread * lags[i];
             }
             phaseT = phaseT - (float) Math.floor(phaseT);
+            kPhase[i] = phaseT;
+            kTired[i] = t;
             float drive = phaseT < 0.35f ? phaseT / 0.35f : 1f - (phaseT - 0.35f) / 0.65f;
-            // A tired rower cuts the slide short and sags forward over the knees.
-            float slide = drive * spacing * 0.3f * (1f - 0.3f * t);
-            float bodyX = seatX - slide;
-            float hipY = waterY - beam;
-            float torso = dp(26f) * s * (1f - 0.28f * t);
-            float lean = (0.5f - drive) * dp(8f) * s + t * dp(8f) * s;
-            float shoulderX = bodyX + lean;
-            float shoulderY = hipY - torso;
-            int body = i == youSeat ? ACCENT : mix(crewColor, 0xFF6B7280, t * 0.6f);
-            paint.setColor(body);
-            paint.setStrokeWidth(dp(10f) * s);
-            paint.setStrokeCap(Paint.Cap.BUTT);
-            c.drawLine(bodyX, hipY, shoulderX, shoulderY, paint);
-            paint.setColor(mix(0xFFF1C27D, 0xFFE0604A, t));
-            float headDrop = t * dp(5f) * s;
-            c.drawCircle(shoulderX + t * dp(3f) * s, shoulderY - dp(6f) * s + headDrop, dp(6f) * s, paint);
-            if (i == youSeat) {
-                label(c, "YOU", shoulderX, shoulderY - dp(18f) * s, 10f, ACCENT, Paint.Align.CENTER);
+            kDrive[i] = drive;
+            comp += 1f - smooth(0f, 0.55f, drive);
+        }
+        comp /= SEATS;
+        // The run: as the crew slides toward the stern the shell runs on underneath them, so the
+        // hull leads at the catch. Averaged over the eight, so a ragged crew cancels it out.
+        float bx = cx + (comp - 0.5f) * 8f * u;
+        float left = bx - len / 2f;
+        float right = bx + len / 2f;
+        float gun = waterY - 11f * u;
+        float keel = waterY + 3f * u;
+        float spN = Math.max(0f, Math.min(1f, drawSpeed / 4.5f));
+
+        // Level water around the hull: its shadow, a broken reflection, the wake and the bow wave.
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0x55040A12);
+        c.drawOval(left + len * 0.04f, waterY - 3f * u, right - len * 0.03f, waterY + 10f * u, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        for (int k = 0; k < 4; k++) {
+            float wob = (float) Math.sin(sessionSeconds * 2.2 + k * 1.3) * 5f * u;
+            float ry = keel + (3f + k * 3.5f) * u;
+            paint.setStrokeWidth((2.4f - k * 0.4f) * u);
+            paint.setColor(((70 - k * 15) << 24) | 0x00E8E2D0);
+            c.drawLine(left + len * (0.10f + k * 0.03f) + wob, ry, right - len * (0.12f + k * 0.03f) + wob, ry, paint);
+        }
+        if (spN > 0.02f) {
+            paint.setStrokeWidth(2f * u);
+            paint.setColor(((int) (90 * spN) << 24) | 0x00DDEBF7);
+            c.drawLine(left + 4f * u, keel, left - 190f * u * spN, keel + 9f * u, paint);
+            c.drawLine(left + 4f * u, keel - 2f * u, left - 150f * u * spN, keel - 7f * u, paint);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(((int) (150 * spN) << 24) | 0x00F2F8FF);
+            c.drawOval(right - (26f + 30f * spN) * u, waterY - 1.5f * u, right + 5f * u, waterY + 4.5f * u, paint);
+            if (player && spN > 0.3f && Math.random() < frameDt * spN * 10f) {
+                fx.spawn(right, waterY - 2f * u, -(float) (40 + 60 * Math.random()) * u,
+                        -(float) (50 + 50 * Math.random()) * u, 0.45f, 2f * u, 0xCCE6F2FF, true);
             }
-            float bladeX = seatX + (drive - 0.5f) * spacing * 0.9f;
+        }
+        paint.setStyle(Paint.Style.FILL);
+
+        c.save();
+        // Stern dips as the crew's weight comes forward; out of time the boat rocks.
+        float pitch = -(comp - 0.5f) * 0.7f
+                + (1f - crewSync) * 0.9f * (float) Math.sin(sessionSeconds * 2.7 + (player ? 0.0 : 1.3));
+        c.rotate(pitch, bx, waterY);
+
+        // Pass 2: every rower's pose, and where their blade is.
+        float stern = bx - len * 0.36f;
+        float nearIn = waterY + 27f * u;
+        float nearOut = waterY + 17f * u;
+        float farIn = gun - 30f * u;
+        float farOut = gun - 40f * u;
+        for (int i = 0; i < SEATS; i++) {
+            float t = kTired[i];
+            float drive = kDrive[i];
+            float phaseT = kPhase[i];
+            // Legs first, then the body swings, then the arms draw in; the reverse on the recovery.
+            float legs = smooth(0f, 0.55f, drive);
+            float swingT = smooth(0.25f, 0.85f, drive);
+            float arms = smooth(0.6f, 1f, drive);
+            float st = stern + i * spacing;
+            // A tired rower cuts the slide short and sags forward over the knees.
+            float slide = 30f * u * (1f - 0.3f * t);
+            float hx = st - slide * (1f - legs);
+            float hy = gun - 3f * u;
+            float footX = st - 44f * u;
+            float footY = gun - 1.5f * u;
+            float dx = footX - hx;
+            float dy = footY - hy;
+            float d = (float) Math.sqrt(dx * dx + dy * dy);
+            float bone = 23f * u;
+            float half = d * 0.5f;
+            float lift = half < bone ? (float) Math.sqrt(bone * bone - half * half) : 0f;
+            float nx = -dy / d;
+            float ny = dx / d;
+            if (ny > 0f) {
+                nx = -nx;
+                ny = -ny;
+            }
+            kHipX[i] = hx;
+            kHipY[i] = hy;
+            kFootX[i] = footX;
+            kKneeX[i] = hx + dx * 0.5f + nx * lift;
+            kKneeY[i] = hy + dy * 0.5f + ny * lift;
+            float torso = 32f * u * (1f - 0.28f * t);
+            float a = 0.5f - 0.88f * swingT + 0.3f * t;
+            float sa = (float) Math.sin(a);
+            float ca = (float) Math.cos(a);
+            float sx = hx - torso * sa;
+            float sy = hy - torso * ca;
+            kShX[i] = sx;
+            kShY[i] = sy;
+            kSin[i] = sa;
+            kCos[i] = ca;
+            kTorso[i] = torso;
+            kHeadX[i] = sx - 8.5f * u * sa - 1.5f * u;
+            kHeadY[i] = sy - 8.5f * u * ca + t * 4f * u;
+            // In the water through the drive; a tired blade washes out and pulls shallow.
+            float depth = smooth(0f, 0.05f, phaseT) * (1f - smooth(0.30f, 0.36f, phaseT)) * (1f - 0.4f * t);
+            kDepth[i] = depth;
+            kSquare[i] = Math.max(depth, smooth(0.82f, 0.97f, phaseT));
+            // Hands reach long at the catch and draw in to the ribs at the finish; they ride low on
+            // the recovery, which is what holds the blade off the water.
+            float handX = sx - 25f * u + 19f * u * arms;
+            float handY = sy + 9f * u + 6f * u * arms + (1f - depth) * 6f * u;
+            kHandX[i] = handX;
+            kHandY[i] = handY;
+            float ex = handX - sx;
+            float ey = handY - sy;
+            float ed = (float) Math.sqrt(ex * ex + ey * ey);
+            float arm = 14f * u;
+            float eh = ed * 0.5f;
+            float elift = eh < arm ? (float) Math.sqrt(arm * arm - eh * eh) : 0f;
+            float enx = -ey / ed;
+            float eny = ex / ed;
+            if (enx < 0f) {
+                enx = -enx;
+                eny = -eny;
+            }
+            kElX[i] = sx + ex * 0.5f + enx * elift;
+            kElY[i] = sy + ey * 0.5f + eny * elift;
+            // The oar levers about its pin: the blade goes the other way from the hands.
+            float pinX = st - 32f * u;
+            kPinX[i] = pinX;
+            boolean near = (i & 1) == 0;
+            kBladeX[i] = pinX + (pinX - handX) * 1.35f;
+            kBladeY[i] = near ? nearOut + (nearIn - nearOut) * depth : farOut + (farIn - farOut) * depth;
             boolean inWater = phaseT < 0.35f;
-            // A tired blade washes out: it does not bury, so it pulls shallow.
-            float bladeY = waterY + (inWater ? dp(14f) * s * (1f - 0.4f * t) : -dp(8f) * s);
             if (wasIn[i] && !inWater) {
-                puddleX[puddleHead] = bladeX;
-                puddleY[puddleHead] = waterY + dp(14f) * s;
+                float py = near ? nearIn : farIn;
+                puddleX[puddleHead] = kBladeX[i];
+                puddleY[puddleHead] = py;
                 puddleAge[puddleHead] = 0f;
                 puddleHead = (puddleHead + 1) % PUDDLES;
                 if (t > 0.55f && Math.random() < 0.5) {
                     // A messy extraction: water thrown everywhere.
-                    fx.burst(bladeX, waterY + dp(10f), 8, dp(110f), 0.5f, dp(2.5f), 0xDDBFE3FF, true);
+                    fx.burst(kBladeX[i], py - 4f * u, 8, dp(110f), 0.5f, dp(2.5f), 0xDDBFE3FF, true);
                 }
             }
             wasIn[i] = inWater;
-            paint.setColor(0xFFCBB38A);
-            paint.setStrokeWidth(dp(3f) * s);
-            c.drawLine(seatX, hipY - dp(8f) * s, bladeX, bladeY, paint);
-            paint.setColor(player ? 0xFFFFFFFF : crewColor);
-            c.drawOval(bladeX - dp(10f) * s, bladeY - dp(4f) * s, bladeX + dp(10f) * s, bladeY + dp(4f) * s, paint);
         }
-        // Cox at the stern, with a megaphone pointed at the crew.
-        float coxX = cx + len * 0.46f;
-        float coxY = waterY - beam - dp(10f) * s;
+
+        // Pass 3: far-side oars, behind the boat.
+        for (int i = 1; i < SEATS; i += 2) {
+            drawOar(c, i, u, false, i == youSeat ? ACCENT : crewColor, farIn);
+        }
+
+        // Pass 4: the shell - a long tapering hull, lit from above, the crew's colour on the saxboard.
+        float tipS = waterY - 4f * u;
+        float tipB = waterY - 6.5f * u;
+        path.rewind();
+        path.moveTo(left, tipS);
+        path.quadTo(left + len * 0.05f, gun + 1f * u, left + len * 0.13f, gun);
+        path.lineTo(right - len * 0.15f, gun);
+        path.quadTo(right - len * 0.04f, gun + 0.5f * u, right, tipB);
+        path.quadTo(right - len * 0.09f, keel, right - len * 0.24f, keel);
+        path.lineTo(left + len * 0.20f, keel);
+        path.quadTo(left + len * 0.07f, keel, left, tipS);
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF); // a shader draws at the paint's alpha
+        paint.setShader(vertical(gun, keel, 0xFFF9F5EC, 0xFFA59E8C));
+        c.drawPath(path, paint);
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(2f * u);
+        paint.setColor(0x47081420); // wet at the waterline
+        c.drawLine(left + len * 0.2f, keel - 1f * u, right - len * 0.24f, keel - 1f * u, paint);
+        paint.setStrokeWidth(2.6f * u);
+        paint.setColor(stripe);
+        c.drawLine(left + len * 0.13f, gun + 3.4f * u, right - len * 0.15f, gun + 3.4f * u, paint);
+        paint.setStrokeWidth(1.3f * u);
+        paint.setColor(0xD9FFFFFF); // the gunwale catching the sun
+        c.drawLine(left + len * 0.12f, gun + 0.7f * u, right - len * 0.14f, gun + 0.7f * u, paint);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFFFFFFFF);
+        c.drawCircle(right - 0.5f * u, tipB, 2.4f * u, paint); // bow ball
+
+        // Pass 5: far riggers, over the hull and behind the crew.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(1.5f * u);
+        paint.setColor(0xFF8C96A3);
+        for (int i = 1; i < SEATS; i += 2) {
+            float px = kPinX[i];
+            float py = kHandY[i] + (kBladeY[i] - kHandY[i]) / 2.35f;
+            c.drawLine(px - 10f * u, gun + 0.5f * u, px, py, paint);
+            c.drawLine(px + 8f * u, gun + 0.5f * u, px, py, paint);
+        }
+        if (youSeat >= 0) {
+            Fx.glow(c, kShX[youSeat], kShY[youSeat] + 6f * u, 54f * u, 0x4035D0BA);
+        }
+
+        // Pass 6: the crew.
+        for (int i = 0; i < SEATS; i++) {
+            float t = kTired[i];
+            boolean you = i == youSeat;
+            int shirt = you ? ACCENT : mix(crewColor, 0xFF6B7280, t * 0.6f);
+            int suit = mix(shirt, 0xFF0A1420, 0.55f);
+            int skin = SKIN[hash(i * 5 + (player ? 1 : 40)) % SKIN.length];
+            float hx = kHipX[i];
+            float hy = kHipY[i];
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFF2A313C); // the seat, on its slide
+            c.drawRect(hx - 6f * u, hy + 1f * u, hx + 6f * u, hy + 3.5f * u, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(5.5f * u);
+            paint.setColor(mix(skin, 0xFF000000, 0.12f));
+            c.drawLine(kKneeX[i], kKneeY[i], kFootX[i], gun - 1.5f * u, paint);
+            paint.setStrokeWidth(7.5f * u);
+            paint.setColor(suit);
+            c.drawLine(hx, hy, kKneeX[i], kKneeY[i], paint);
+            float sx = kShX[i];
+            float sy = kShY[i];
+            paint.setStrokeWidth(12.5f * u);
+            paint.setColor(shirt);
+            c.drawLine(hx, hy, sx, sy, paint);
+            // The back faces the bow and the sun: a lit stripe down it gives the torso form.
+            float sa = kSin[i];
+            float ca = kCos[i];
+            float tl = kTorso[i];
+            float bnx = ca * 3.6f * u;
+            float bny = -sa * 3.6f * u;
+            paint.setStrokeWidth(3.2f * u);
+            paint.setColor(mix(shirt, 0xFFFFFFFF, 0.38f));
+            c.drawLine(hx - sa * tl * 0.15f + bnx, hy - ca * tl * 0.15f + bny,
+                    hx - sa * tl * 0.85f + bnx, hy - ca * tl * 0.85f + bny, paint);
+            // Head and crew cap, peak toward the stern - the way they face.
+            paint.setStyle(Paint.Style.FILL);
+            float hdx = kHeadX[i];
+            float hdy = kHeadY[i];
+            float hr = 7f * u;
+            paint.setColor(mix(skin, 0xFFE0604A, t));
+            c.drawCircle(hdx, hdy, hr, paint);
+            int cap = you ? 0xFF1E8C7C : mix(crewColor, 0xFF0A1420, 0.3f);
+            paint.setColor(cap);
+            oval.set(hdx - hr * 1.04f, hdy - hr * 1.08f, hdx + hr * 1.04f, hdy + hr);
+            c.drawArc(oval, 180f, 180f, true, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(2.2f * u);
+            c.drawLine(hdx - 3f * u, hdy - 0.5f * u, hdx - 10.5f * u, hdy + 0.5f * u, paint);
+            // Sleeve to the elbow, forearm to the hands on the handle.
+            paint.setStrokeWidth(5.2f * u);
+            paint.setColor(shirt);
+            c.drawLine(sx, sy, kElX[i], kElY[i], paint);
+            paint.setStrokeWidth(4.4f * u);
+            paint.setColor(skin);
+            c.drawLine(kElX[i], kElY[i], kHandX[i], kHandY[i], paint);
+            paint.setStyle(Paint.Style.FILL);
+            c.drawCircle(kHandX[i], kHandY[i], 2.8f * u, paint);
+        }
+
+        // Pass 7: the cox, low in the stern facing the crew, megaphone up when calling.
+        float coxX = bx - len * 0.46f;
+        float chY = gun + 1.5f * u; // the stern deck is lower than the gunwale amidships
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(6f * u);
+        paint.setColor(0xFF1C2432);
+        c.drawLine(coxX, chY, coxX + 13f * u, chY - 3f * u, paint);
+        paint.setStrokeWidth(11f * u);
         paint.setColor(WARN);
-        c.drawCircle(coxX, coxY, dp(7f) * s, paint);
-        paint.setColor(0xFFF1C27D);
-        c.drawCircle(coxX, coxY - dp(10f) * s, dp(5f) * s, paint);
+        c.drawLine(coxX, chY, coxX + 2f * u, chY - 15f * u, paint);
+        paint.setStrokeWidth(3f * u);
+        paint.setColor(0xFFF8D27C);
+        c.drawLine(coxX + 4f * u, chY - 2f * u, coxX + 5.5f * u, chY - 13f * u, paint);
+        paint.setStyle(Paint.Style.FILL);
+        float chx = coxX + 3.5f * u;
+        float chy = chY - 22.5f * u;
+        float cr = 6.2f * u;
+        paint.setColor(0xFFEBBE92);
+        c.drawCircle(chx, chy, cr, paint);
+        paint.setColor(0xFFE6EDF7);
+        oval.set(chx - cr * 1.04f, chy - cr * 1.08f, chx + cr * 1.04f, chy + cr);
+        c.drawArc(oval, 180f, 180f, true, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(2f * u);
+        c.drawLine(chx + 2.5f * u, chy - 0.5f * u, chx + 9f * u, chy + 0.5f * u, paint);
         boolean calling = player ? sessionSeconds < coxUntil : sessionSeconds < rivalCallUntil;
         if (calling) {
             float pulse = 1f + 0.2f * (float) Math.abs(Math.sin(sessionSeconds * 10));
+            paint.setStrokeWidth(3.5f * u);
+            paint.setColor(WARN);
+            c.drawLine(coxX + 2f * u, chY - 12f * u, chx + 7f * u, chy + 4f * u, paint);
+            paint.setStyle(Paint.Style.FILL);
             paint.setColor(0xFFE6EDF7);
-            path.reset();
-            path.moveTo(coxX - dp(4f) * s, coxY - dp(11f) * s);
-            path.lineTo(coxX - dp(16f) * s * pulse, coxY - dp(16f) * s * pulse);
-            path.lineTo(coxX - dp(16f) * s * pulse, coxY - dp(4f) * s);
+            float mx = chx + 6f * u;
+            float my = chy + 2f * u;
+            path.rewind();
+            path.moveTo(mx, my - 2f * u);
+            path.lineTo(mx + 14f * u * pulse, my - 6.5f * u * pulse);
+            path.lineTo(mx + 14f * u * pulse, my + 5f * u * pulse);
+            path.lineTo(mx, my + 2f * u);
             path.close();
             c.drawPath(path, paint);
+        }
+
+        // Pass 8: near riggers and near-side oars, in front of everything.
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth(1.7f * u);
+        paint.setColor(0xFFB7C0CB);
+        for (int i = 0; i < SEATS; i += 2) {
+            float px = kPinX[i];
+            float py = kHandY[i] + (kBladeY[i] - kHandY[i]) / 2.35f;
+            c.drawLine(px - 12f * u, gun + 0.5f * u, px, py, paint);
+            c.drawLine(px + 10f * u, gun + 0.5f * u, px, py, paint);
+        }
+        for (int i = 0; i < SEATS; i += 2) {
+            drawOar(c, i, u, true, i == youSeat ? ACCENT : crewColor, nearIn);
+        }
+        if (youSeat >= 0) {
+            label(c, "YOU", kShX[youSeat], kHeadY[youSeat] - 12f * u, 10f, ACCENT, Paint.Align.CENTER);
+        }
+        c.restore();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    /**
+     * One sweep oar from the hands through its pin to the blade. The blade is squared through the
+     * drive and feathered flat on the recovery, and reads as under water - with foam where it
+     * goes in - while it is pulling.
+     */
+    private void drawOar(Canvas c, int i, float u, boolean near, int color, float level) {
+        float hx = kHandX[i];
+        float hy = kHandY[i];
+        float bx = kBladeX[i];
+        float by = kBladeY[i];
+        float vx = bx - hx;
+        float vy = by - hy;
+        float vd = (float) Math.sqrt(vx * vx + vy * vy);
+        if (vd < 1f) {
+            return;
+        }
+        float ux = vx / vd;
+        float uy = vy / vd;
+        float rootX = bx - ux * 11f * u;
+        float rootY = by - uy * 11f * u;
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeCap(Paint.Cap.ROUND);
+        paint.setStrokeWidth((near ? 2.8f : 2.2f) * u);
+        paint.setColor(near ? 0xFFE4E8EE : 0xFF9FAAB8);
+        c.drawLine(hx, hy, rootX, rootY, paint);
+        float hw = (1.3f + 3.4f * kSquare[i]) * u;
+        float hr = hw * 0.5f;
+        float tipX = bx + ux * 8f * u;
+        float tipY = by + uy * 8f * u;
+        float px = -uy;
+        float py = ux;
+        path.rewind();
+        path.moveTo(rootX + px * hr, rootY + py * hr);
+        path.lineTo(tipX + px * hw, tipY + py * hw);
+        path.lineTo(tipX - px * hw, tipY - py * hw);
+        path.lineTo(rootX - px * hr, rootY - py * hr);
+        path.close();
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(near ? color : mix(color, 0xFF8FA6C0, 0.3f));
+        float depth = kDepth[i];
+        paint.setAlpha((int) (255 - (near ? 130 : 100) * depth));
+        c.drawPath(path, paint);
+        paint.setAlpha(255);
+        if (depth > 0.15f) {
+            float fr = (near ? 10f : 7f) * u * (0.8f + 0.4f * depth);
+            paint.setColor(((int) (190 * depth) << 24) | 0x00EEF6FF);
+            c.drawOval(bx - fr, level - 3.2f * u, bx + fr, level + 1.2f * u, paint);
         }
     }
 }
